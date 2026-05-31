@@ -1,0 +1,56 @@
+# =============================================================================
+#  Ambilight Engine — Python Dependencies
+# =============================================================================
+#
+#  Install with:
+#    pip install -r requirements.txt
+#
+#  Optional GPU packages (install the one that matches your CUDA version):
+#    pip install cupy-cuda12x          # CUDA 12.x
+#    pip install cupy-cuda11x          # CUDA 11.x
+#
+#  Optional fast capture backends:
+#    pip install dxcam                 # DXGI Desktop Duplication (Windows)
+#    pip install winsdk                # Windows Graphics Capture API
+#
+# =============================================================================
+
+# ---- Core (always required) -------------------------------------------------
+
+# Screen capture fallback — cross-platform
+mss>=9.0.1
+
+# Image processing and array math
+numpy>=1.26.0
+Pillow>=10.0.0
+
+# OpenCV — CPU resize; CUDA resize if built with CUDA support
+opencv-python>=4.9.0.80
+
+# YAML configuration
+PyYAML>=6.0.1
+
+# ---- Optional — GPU backends (install as needed) ----------------------------
+
+# CuPy — CUDA-accelerated NumPy replacement.
+# Uncomment the line that matches your CUDA version:
+# cupy-cuda12x>=13.0.0
+# cupy-cuda11x>=12.3.0
+
+# PyTorch — optional GPU resize backend.
+# Install from https://pytorch.org/get-started/locally/ to match your CUDA.
+# torch>=2.2.0
+
+# ---- Optional — Fast Windows capture backends --------------------------------
+
+# dxcam — DXGI Desktop Duplication wrapper (Windows only)
+# dxcam>=0.0.5
+
+# winsdk — Windows Graphics Capture API Python bindings (Windows 10 1903+)
+# winsdk>=1.0.0b10
+
+# comtypes — COM interop required by WGC backend (Windows only)
+# comtypes>=1.4.1
+
+# pywin32 — Windows API bindings (Windows only)
+# pywin32>=306
