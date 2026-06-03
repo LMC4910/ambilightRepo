@@ -12,10 +12,13 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# NOTE: anchored to the repo root so they only match the Python build outputs
+# here (PyInstaller writes to ./dist and ./build) and do NOT swallow ui/build
+# (which holds source files like entitlements.mac.plist) or ui/dist.
 .Python
-build/
+/build/
 develop-eggs/
-dist/
+/dist/
 downloads/
 eggs/
 .eggs/
@@ -119,11 +122,21 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Application specific
+# Application specific (runtime artifacts only)
+# The real runtime data dir is ~/.ambilight (outside the repo). These cover the
+# files the service may drop next to itself when run from the repo in dev.
+# IMPORTANT: do NOT use a blanket "*.json" here — it would ignore source files
+# like profiles/*.json and ui/package.json. configuration.yaml is the bundled
+# default seed (build.py ships it) and must stay tracked.
 logs/
-*.json
 device_cache.json
-configuration.yaml
+metrics/
+auth_token
+onboarded
+service.out.log
+
+# PyInstaller leftovers occasionally written at the repo root
+*.spec.bak
 
 # IDE
 .vscode/
