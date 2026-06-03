@@ -1,0 +1,91 @@
+name: Ambilight Release
+
+# Build signed installers for all three platforms and publish them — together with
+# the electron-updater feed files (latest.yml / latest-mac.yml / latest-linux.yml) —
+# to the GitHub Release for the pushed tag.
+#
+# Prerequisites (repo secrets; the workflow runs unsigned if absent):
+#   GH_TOKEN                     - provided automatically as github.token
+#   WIN_CSC_LINK / CSC_KEY_PASSWORD          - Windows code-signing cert (base64 .pfx + password)
+#   APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID  - macOS notarization
+#   CSC_LINK / CSC_KEY_PASSWORD              - macOS signing cert (Developer ID)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create/upload to releases
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build service (PyInstaller)
+        run: python build.py --service
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@latest
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate icons
+        working-directory: ui
+        run: pnpm run gen:icons
+
+      - name: Build Vite bundle
+        working-directory: ui
+        run: pnpm run build
+
+      - name: Build & publish (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ui
+        run: pnpm exec electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Build & publish (macOS)
+        if: runner.os == 'macOS'
+        working-directory: ui
+        run: pnpm exec electron-builder --mac --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build & publish (Linux)
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: pnpm exec electron-builder --linux --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -30,6 +30,26 @@ opencv-python>=4.9.0.80
 # YAML configuration
 PyYAML>=6.0.1
 
+# ---- Service layer (REST + WebSocket API) -----------------------------------
+
+# FastAPI app, ASGI server, and data validation for the background service.
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+
+# Config hot-reload file watching (falls back to mtime polling if absent).
+watchdog>=4.0.0
+
+# ---- Development / tests ----------------------------------------------------
+#   pip install pytest    # run the suite with:  pytest
+#   (CI installs pytest + flake8 separately; see .github/workflows/build.yml)
+
+# ---- Optional — platform display/power monitors -----------------------------
+#  macOS (lock/sleep + display reconfig):
+#    pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz
+#  Linux (logind/screensaver + DRM hotplug):
+#    pip install dbus-python PyGObject pyudev
+
 # ---- Optional — GPU backends (install as needed) ----------------------------
 
 # CuPy — CUDA-accelerated NumPy replacement.

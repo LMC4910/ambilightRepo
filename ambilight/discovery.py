@@ -58,6 +58,9 @@ class DeviceInfo:
     mac: str = ""
     model: str = "MagicHome"
     firmware: str = ""
+    device_type: int = 0
+    supports_addressable: bool = False
+    supports_rgbw: bool = False
     last_seen: float = 0.0
 
     def to_dict(self) -> dict:
@@ -144,37 +147,92 @@ class DeviceScanner:
                 except socket.timeout:
                     data = b""
 
-                mac, firmware = self._parse_status(data)
+                mac, firmware, device_type = self._parse_status(data)
                 info = DeviceInfo(
                     ip=ip,
                     mac=mac,
                     firmware=firmware,
+                    device_type=device_type,
+                    supports_addressable=device_type in (0x04, 0x35),
+                    supports_rgbw=device_type in (0x44, 0x35),
                     last_seen=time.time(),
                 )
-                logger.debug("[Scanner] Found device at %s (MAC=%s).", ip, mac or "?")
+                logger.debug("[Scanner] Found device at %s (MAC=%s, Type=0x%02x).", ip, mac or "?", device_type)
                 return info
 
         except (OSError, ConnectionRefusedError, socket.timeout):
             return None
 
     @staticmethod
-    def _parse_status(data: bytes) -> tuple[str, str]:
+    def _parse_status(data: bytes) -> tuple[str, str, int]:
         """
         Parse MagicHome status response.
 
         The 14-byte response encodes device state; bytes 6-11 contain the
-        6-byte MAC address in many firmware revisions.  If parsing fails we
-        return empty strings.
+        6-byte MAC address in many firmware revisions. Byte 1 is device type.
+        If parsing fails we return empty strings and 0.
         """
         mac = ""
         firmware = ""
+        device_type = 0
         if len(data) >= _STATUS_RESPONSE_LEN:
             try:
+                device_type = data[1]
                 mac_bytes = data[6:12]
                 mac = ":".join(f"{b:02x}" for b in mac_bytes)
             except Exception:
                 pass
-        return mac, firmware
+        return mac, firmware, device_type
+
+
+# ---------------------------------------------------------------------------
+# Capability probe
+# ---------------------------------------------------------------------------
+
+def classify_device(info: DeviceInfo) -> str:
+    """Return a coarse capability kind: ``addressable`` | ``rgbw`` | ``single``."""
+    if info.supports_addressable:
+        return "addressable"
+    if info.supports_rgbw:
+        return "rgbw"
+    return "single"
+
+
+class CapabilityProbe:
+    """
+    Live capability detection for a single MagicHome controller (FR-DEV-04).
+
+    Connects to ``ip``:5577, issues the standard status query, and classifies the
+    device. Reuses :meth:`DeviceScanner._parse_status` so the byte layout lives in
+    exactly one place.
+    """
+
+    def __init__(self, connect_timeout: float = 1.0) -> None:
+        self._timeout = connect_timeout
+
+    def probe(self, ip: str, port: int = _MAGIC_PORT) -> Optional[DeviceInfo]:
+        try:
+            with socket.create_connection((ip, port), timeout=self._timeout) as sock:
+                sock.settimeout(self._timeout)
+                sock.sendall(_STATUS_QUERY)
+                try:
+                    data = sock.recv(128)
+                except socket.timeout:
+                    data = b""
+            mac, firmware, device_type = DeviceScanner._parse_status(data)
+            return DeviceInfo(
+                ip=ip,
+                port=port,
+                mac=mac,
+                firmware=firmware,
+                device_type=device_type,
+                supports_addressable=device_type in (0x04, 0x35),
+                supports_rgbw=device_type in (0x44, 0x35),
+                last_seen=time.time(),
+            )
+        except (OSError, socket.timeout) as exc:
+            logger.debug("[CapabilityProbe] %s unreachable: %s", ip, exc)
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +259,17 @@ class DeviceCache:
         try:
             with self._path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            devices = [DeviceInfo.from_dict(d) for d in data]
-            logger.debug("[Cache] Loaded %d device(s) from cache.", len(devices))
+            
+            now = time.time()
+            valid_devices = []
+            for d in data:
+                device = DeviceInfo.from_dict(d)
+                # Expire devices older than 7 days (7 * 86400 seconds)
+                if now - device.last_seen < 604800:
+                    valid_devices.append(device)
+            
+            devices = valid_devices
+            logger.debug("[Cache] Loaded %d valid device(s) from cache (expired %d).", len(devices), len(data) - len(devices))
             return devices
         except Exception as exc:
             logger.warning("[Cache] Failed to load device cache: %s", exc)

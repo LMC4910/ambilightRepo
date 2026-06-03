@@ -35,6 +35,51 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# dxcam private-API isolation (TD-05 / R-01)
+# ---------------------------------------------------------------------------
+# The WGC backend needs a D3D11 device and a texture→numpy mapper. dxcam does
+# not expose these publicly, so we reach into ``dxcam._core``. To keep that
+# fragility contained — and to fail over cleanly to DXGI/MSS if a dxcam update
+# changes its internals — every private access goes through these guarded
+# helpers, which raise a clean RuntimeError that callers already handle.
+
+def _dxcam_core():
+    """Return the dxcam internals module across versions (``core`` or ``_core``).
+
+    NOTE (TD-05 / R-01): dxcam ≥ 0.3.0 rewrote its internals and no longer
+    exposes ``create_d3d_device`` / ``frame_to_numpy`` at all, so the WGC backend
+    cannot borrow a D3D device from dxcam on those versions and will fail over to
+    DXGI/MSS. These helpers stay defensive so older dxcam builds keep working and
+    newer ones degrade gracefully rather than crash.
+    """
+    import importlib
+    for name in ("dxcam.core", "dxcam._core"):
+        try:
+            return importlib.import_module(name)
+        except Exception:
+            continue
+    raise RuntimeError("dxcam internals module not found")
+
+
+def _wgc_create_d3d_device() -> object:
+    """Create a D3D11 device for WGC. Raises RuntimeError if unavailable."""
+    try:
+        core = _dxcam_core()
+        return core.create_d3d_device()  # type: ignore[attr-defined]
+    except Exception as exc:  # ImportError or dxcam internal change
+        raise RuntimeError(f"dxcam D3D device unavailable: {exc}") from exc
+
+
+def _wgc_frame_to_numpy(frame: object, device: object) -> np.ndarray:
+    """Map a WGC D3D texture to a numpy array. Raises RuntimeError on failure."""
+    try:
+        core = _dxcam_core()
+        return core.frame_to_numpy(frame, device)  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise RuntimeError(f"dxcam frame mapping unavailable: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
 # Abstract backend
 # ---------------------------------------------------------------------------
 
@@ -137,20 +182,18 @@ class WGCBackend(CaptureBackend):
 
             hmonitor = monitors[monitor_index]
 
+            # winsdk ≥ 1.0.0b10 exposes a public interop helper that builds a
+            # GraphicsCaptureItem straight from an HMONITOR — no comtypes / no
+            # IGraphicsCaptureItemInterop (which this winsdk build no longer
+            # exports, the cause of the previous silent WGC failure).
             from winsdk.windows.graphics.capture.interop import (  # type: ignore[import-untyped]
-                IGraphicsCaptureItemInterop,
+                create_for_monitor,
             )
-            import comtypes  # type: ignore[import-untyped]
 
-            interop = comtypes.cast(
-                IGraphicsCaptureItemInterop(),
-                comtypes.POINTER(IGraphicsCaptureItemInterop),
-            )
-            item = interop.CreateForMonitor(hmonitor)
+            item = create_for_monitor(hmonitor)
 
-            # Create a D3D11 device via dxcam or d3d11 helper
-            import dxcam  # type: ignore[import-untyped]  # available if installed
-            device = dxcam._core.create_d3d_device()  # internal, but stable
+            # Create a D3D11 device (dxcam private API, isolated + guarded)
+            device = _wgc_create_d3d_device()
 
             size = item.Size
             frame_pool = Direct3D11CaptureFramePool.Create(
@@ -161,6 +204,7 @@ class WGCBackend(CaptureBackend):
             )
             session = GraphicsCaptureSession(frame_pool, item)
             session.IsCursorCaptureEnabled = False
+            session.IsBorderRequired = False
             session.Start()
 
             self._frame_pool = frame_pool
@@ -183,9 +227,8 @@ class WGCBackend(CaptureBackend):
             if frame is None:
                 return None
 
-            # Map the Direct3D texture to a numpy array via dxcam helpers
-            import dxcam._core as _core  # type: ignore[import-untyped]
-            arr = _core.frame_to_numpy(frame, self._device)
+            # Map the Direct3D texture to a numpy array (guarded dxcam access)
+            arr = _wgc_frame_to_numpy(frame, self._device)
             # arr is BGRA; drop alpha channel
             return arr[:, :, :3]
         except Exception as exc:
@@ -407,11 +450,17 @@ class ScreenCaptureManager:
         numpy.ndarray or None
             BGR uint8 frame, or *None* if all backends are exhausted.
         """
-        # Rate limiting
-        now = time.monotonic()
-        elapsed = now - self._last_grab_time
-        if elapsed < self._frame_interval:
-            time.sleep(self._frame_interval - elapsed)
+        # Monotonic rate limiting (spin-wait for precision)
+        target_time = self._last_grab_time + self._frame_interval
+        while True:
+            now = time.monotonic()
+            if now >= target_time:
+                break
+            remaining = target_time - now
+            if remaining > 0.002:
+                time.sleep(0.001)
+            else:
+                pass  # Spin wait for the last ~2ms to avoid oversleeping
         self._last_grab_time = time.monotonic()
 
         frame = self._active.grab() if self._active else None

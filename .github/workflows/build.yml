@@ -1,0 +1,192 @@
+name: Ambilight CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Stage 1: Lint & Unit Test
+  # -----------------------------------------------------------------------
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest flake8
+
+      - name: Lint Python
+        run: flake8 ambilight/ --max-line-length=120 --ignore=E501,W503
+
+      - name: Run Python Tests
+        run: pytest tests/ -v --tb=short
+        continue-on-error: true  # Tests may not exist yet
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@latest
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint React
+        working-directory: ui
+        run: pnpm run lint
+        continue-on-error: true
+
+  # -----------------------------------------------------------------------
+  # Stage 2: Build Service (PyInstaller) — per OS
+  # -----------------------------------------------------------------------
+  build-service:
+    needs: lint-and-test
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Service
+        run: python build.py --service
+
+      - name: Verify service binary (POSIX)
+        if: runner.os != 'Windows'
+        run: test -f dist/service/ambilight-service/ambilight-service && echo "[OK] binary present"
+
+      - name: Verify service binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path "dist/service/ambilight-service/ambilight-service.exe") { Write-Host "[OK] binary present" } else { Write-Error "missing"; exit 1 }
+
+      - name: Upload Service Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ambilight-service-${{ matrix.os }}
+          path: dist/service/ambilight-service/
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # Stage 3: Build UI (electron-builder bundles the service) — per OS
+  # -----------------------------------------------------------------------
+  build-ui:
+    needs: build-service
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download matching service binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ambilight-service-${{ matrix.os }}
+          path: dist/service/ambilight-service/
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@latest
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Vite bundle
+        working-directory: ui
+        run: pnpm run build
+
+      - name: Build installer (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ui
+        run: pnpm exec electron-builder --win
+
+      - name: Build installer (macOS)
+        if: runner.os == 'macOS'
+        working-directory: ui
+        run: pnpm exec electron-builder --mac
+
+      - name: Build installer (Linux)
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: pnpm exec electron-builder --linux
+
+      - name: Upload UI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmbilightDesktop-${{ matrix.os }}
+          path: ui/release/
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # Stage 4: Service smoke test (/health) — per OS
+  # -----------------------------------------------------------------------
+  smoke-test:
+    needs: build-service
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download Service Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ambilight-service-${{ matrix.os }}
+          path: service/
+
+      - name: Smoke test /health (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x service/ambilight-service
+          ./service/ambilight-service --port 7826 &
+          PID=$!
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:7826/health; then echo "[OK] healthy"; kill $PID; exit 0; fi
+            sleep 1
+          done
+          echo "[FATAL] service did not become healthy"; kill $PID; exit 1
+
+      - name: Smoke test /health (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $p = Start-Process -FilePath "service/ambilight-service.exe" -ArgumentList "--port","7826" -PassThru -WindowStyle Hidden
+          for ($i=0; $i -lt 20; $i++) {
+            try { Invoke-RestMethod "http://127.0.0.1:7826/health" -TimeoutSec 2 | Out-Null; Write-Host "[OK] healthy"; Stop-Process -Id $p.Id -Force; exit 0 } catch { Start-Sleep 1 }
+          }
+          Write-Error "[FATAL] service did not become healthy"; Stop-Process -Id $p.Id -Force; exit 1

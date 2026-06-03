@@ -95,19 +95,26 @@ class MagicHomeController:
         send_timeout: float = 1.0,
         reconnect_interval: float = 5.0,
         min_update_interval: float = 0.033,  # ~30 fps max
+        reconnect_backoff_max: float = 30.0,
+        kind: str = "single",          # "single" | "addressable" | "rgbw"
+        led_count: int = 30,           # addressable strip length
     ) -> None:
         self._ip = ip
         self._port = port
         self._connect_timeout = connect_timeout
         self._send_timeout = send_timeout
         self._reconnect_interval = reconnect_interval
+        self._reconnect_backoff_max = reconnect_backoff_max
         self._min_update_interval = min_update_interval
+        self.kind = kind
+        self.led_count = led_count
 
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._last_color: Optional[tuple[int, int, int]] = None
         self._last_send_time: float = 0.0
         self._last_reconnect_attempt: float = 0.0
+        self._reconnect_failures: int = 0
         self._connected: bool = False
 
     # ------------------------------------------------------------------
@@ -214,6 +221,40 @@ class MagicHomeController:
             self._last_send_time = now
         return success
 
+    def set_pixels(self, pixels: list[tuple[int, int, int]]) -> bool:
+        """
+        Set addressable (per-LED) pixels on an SPI MagicHome controller.
+
+        Protocol note
+        -------------
+        Addressable MagicHome / flux_led controllers accept a custom-frame
+        command. The framing below follows the common ``0x41`` per-pixel form
+        (header + RGB triplets + trailer + checksum). **This path is exercised
+        only for devices classified ``addressable`` and has NOT been validated
+        against physical addressable hardware — verify framing before relying on
+        it in production.** Single-RGB devices never reach this method.
+
+        Parameters
+        ----------
+        pixels:
+            Ordered list of (R, G, B) tuples, one per LED.
+        """
+        # Rate limiting (shared with set_rgb)
+        now = time.monotonic()
+        if now - self._last_send_time < self._min_update_interval:
+            return True
+
+        payload = bytearray([0x41])              # custom per-pixel frame
+        for r, g, b in pixels:
+            payload.extend((r & 0xFF, g & 0xFF, b & 0xFF))
+        payload.append(0x0F)                     # trailer
+        payload.append(sum(payload) & 0xFF)      # checksum
+
+        success = self._send_raw(bytes(payload))
+        if success:
+            self._last_send_time = now
+        return success
+
     # ------------------------------------------------------------------
     # Internal send with reconnect logic
     # ------------------------------------------------------------------
@@ -244,24 +285,35 @@ class MagicHomeController:
                         logger.error("[LED] Re-send after reconnect failed: %s", exc2)
                 return False
 
+    def _current_backoff(self) -> float:
+        """Capped exponential back-off based on consecutive failures."""
+        backoff = self._reconnect_interval * (2 ** self._reconnect_failures)
+        return min(backoff, self._reconnect_backoff_max)
+
     def _maybe_reconnect(self) -> bool:
         """
         Attempt reconnect if the back-off interval has passed.
 
+        Uses capped exponential back-off (FR-DEV-08): the wait grows
+        ``reconnect_interval × 2ⁿ`` after each consecutive failure, up to
+        ``reconnect_backoff_max`` seconds, and resets on success.
+
         Returns *True* if now connected.
         """
         now = time.monotonic()
-        if now - self._last_reconnect_attempt < self._reconnect_interval:
+        if now - self._last_reconnect_attempt < self._current_backoff():
             return False
         self._last_reconnect_attempt = now
         logger.info("[LED] Attempting reconnect to %s:%d …", self._ip, self._port)
         success = self._connect_locked()
         if success:
+            self._reconnect_failures = 0
             logger.info("[LED] Reconnect successful.")
         else:
+            self._reconnect_failures += 1
             logger.warning(
                 "[LED] Reconnect failed; will retry in %.0f s.",
-                self._reconnect_interval,
+                self._current_backoff(),
             )
         return success
 
@@ -281,6 +333,10 @@ class MagicHomeController:
                 logger.info("[LED] IP changed: %s → %s", self._ip, value)
                 self._ip = value
                 self._disconnect_locked()
+
+    @property
+    def is_addressable(self) -> bool:
+        return self.kind == "addressable"
 
     @property
     def is_connected(self) -> bool:

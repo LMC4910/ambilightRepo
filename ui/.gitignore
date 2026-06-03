@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# electron-builder output (installers, win-unpacked, blockmaps, latest*.yml, .icon-ico)
+release/
+
+# Generated icons — created by scripts/gen-icons.mjs from public/favicon.svg at
+# build time (gen:icons runs before every dist/build script and in CI).
+# build/entitlements.mac.plist is a SOURCE file and stays tracked.
+build/icon.png
+electron/assets/icon.png
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

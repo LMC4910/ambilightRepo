@@ -150,10 +150,11 @@ class PerformanceMetrics:
 def setup_logging(
     level: str = "INFO",
     log_file: str = "logs/ambilight.log",
-    max_bytes: int = 5_242_880,
-    backup_count: int = 3,
+    max_bytes: int = 20_971_520,
+    backup_count: int = 10,
     show_fps: bool = True,
     fps_interval: float = 5.0,
+    file_level: str = "INFO",
 ) -> PerformanceMetrics:
     """
     Configure root logging and return a :class:`PerformanceMetrics` instance.
@@ -161,28 +162,34 @@ def setup_logging(
     Parameters
     ----------
     level:
-        Root log level string, e.g. ``"DEBUG"``, ``"INFO"``.
+        Console / root log level string, e.g. ``"DEBUG"``, ``"INFO"``.
     log_file:
         Destination for the rotating log file.  Parent directories are created
         automatically.
     max_bytes:
         Maximum size of each log file before rotation.
     backup_count:
-        Number of rotated backups to retain.
+        Number of rotated backups to retain (total on-disk cap ≈
+        ``max_bytes × (backup_count + 1)``).
     show_fps:
         Whether to start the FPS reporting background thread.
     fps_interval:
         Seconds between FPS / latency log lines.
+    file_level:
+        On-disk log level, independent of ``level``.  Defaults to ``INFO`` so that
+        running with a DEBUG *console* never floods/churns the rotating file.
 
     Returns
     -------
     PerformanceMetrics
         A started metrics object; the caller can call ``record_frame()`` on it.
     """
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
+    numeric_console = getattr(logging, level.upper(), logging.INFO)
+    numeric_file = getattr(logging, file_level.upper(), logging.INFO)
 
     root = logging.getLogger()
-    root.setLevel(numeric_level)
+    # Root must pass the most verbose of the two so each handler can filter its own.
+    root.setLevel(min(numeric_console, numeric_file))
 
     # Remove any handlers added by previous calls (e.g. during tests)
     for handler in list(root.handlers):
@@ -191,15 +198,16 @@ def setup_logging(
     fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     date_fmt = "%Y-%m-%d %H:%M:%S"
 
-    # Console handler
+    # Console handler — uses the (possibly verbose) console level.
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(numeric_level)
+    console_handler.setLevel(numeric_console)
     console_handler.setFormatter(
         _ColouredFormatter(fmt=fmt, datefmt=date_fmt)
     )
     root.addHandler(console_handler)
 
-    # Rotating file handler
+    # Rotating file handler — bounded by size, and kept at file_level so DEBUG
+    # console output does not bloat the on-disk log.
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
@@ -208,7 +216,7 @@ def setup_logging(
         backupCount=backup_count,
         encoding="utf-8",
     )
-    file_handler.setLevel(numeric_level)
+    file_handler.setLevel(numeric_file)
     file_handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=date_fmt))
     root.addHandler(file_handler)
 
@@ -221,6 +229,7 @@ def setup_logging(
         metrics.start()
 
     logging.getLogger(__name__).info(
-        "Logging initialised — level=%s, file=%s", level, log_path
+        "Logging initialised — console=%s, file=%s (%s), cap=%d×%dB",
+        level, file_level, log_path, backup_count + 1, max_bytes,
     )
     return metrics

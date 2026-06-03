@@ -37,13 +37,17 @@ class CaptureConfig:
 class DeviceConfig:
     ip: str = "192.168.1.29"
     port: int = 5577
-    mac: str = ""                 # preferred over IP when set
+    mac: str = "30:3a:29:00:0c:00"                 # preferred over IP when set
     subnet: str = "192.168.1."
     connect_timeout: float = 2.0
     send_timeout: float = 1.0
     reconnect_interval: float = 5.0
     discovery_timeout: float = 0.5
     cache_file: str = "device_cache.json"
+    led_count: int = 30           # LEDs per strip (addressable devices only)
+    monitor_index: int = 0        # which monitor this device mirrors
+    name: str = ""                # friendly label (defaults to IP)
+    enabled: bool = True          # include this device in the pipeline
 
 
 @dataclass
@@ -74,6 +78,13 @@ class SmoothingConfig:
 
 
 @dataclass
+class GradientConfig:
+    enabled: bool = True             # use addressable gradient output when supported
+    mode: str = "screen_matched"     # linear | radial | ambient | screen_matched
+    gamma: float = 2.2
+
+
+@dataclass
 class GpuConfig:
     enabled: bool = True
     prefer: str = "cupy"             # cupy | opencv_cuda | torch | none
@@ -81,11 +92,18 @@ class GpuConfig:
 
 
 @dataclass
+class EffectsConfig:
+    plugins_dir: str = ""            # default resolved to ~/.ambilight/plugins at load
+    schedule: list = field(default_factory=list)  # [{effect, params, window}]
+
+
+@dataclass
 class LoggingConfig:
-    level: str = "INFO"
+    level: str = "INFO"              # console / root verbosity
+    file_level: str = "INFO"         # on-disk verbosity (independent of console)
     file: str = "logs/ambilight.log"
-    max_bytes: int = 5_242_880       # 5 MB
-    backup_count: int = 3
+    max_bytes: int = 20_971_520      # 20 MB per file
+    backup_count: int = 10           # → ~220 MB hard ceiling, then oldest dropped
     show_fps: bool = True
     fps_interval: float = 5.0        # seconds between FPS log lines
 
@@ -94,9 +112,14 @@ class LoggingConfig:
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
+    # Optional multi-device list (each item a DeviceConfig-shaped dict). When
+    # empty, the single `device` + `capture.monitor_index` is used (back-compat).
+    devices: list = field(default_factory=list)
     zones: ZoneConfig = field(default_factory=ZoneConfig)
     color: ColorConfig = field(default_factory=ColorConfig)
     smoothing: SmoothingConfig = field(default_factory=SmoothingConfig)
+    gradient: GradientConfig = field(default_factory=GradientConfig)
+    effects: EffectsConfig = field(default_factory=EffectsConfig)
     gpu: GpuConfig = field(default_factory=GpuConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
@@ -124,12 +147,16 @@ def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
     type annotation is itself a dataclass.
     """
     import dataclasses
-    import inspect
+    import sys
 
     if not dataclasses.is_dataclass(cls):
         return data
 
     field_types = {f.name: f.type for f in dataclasses.fields(cls)}
+    # `from __future__ import annotations` makes field types strings; resolve them
+    # in the *defining module's* namespace, not the caller's frame (TD-11). This
+    # makes nesting work for every caller (config update, profile import, tests).
+    module_globals = getattr(sys.modules.get(cls.__module__), "__dict__", {})
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
         if key not in field_types:
@@ -138,9 +165,8 @@ def _dict_to_dataclass(cls: type, data: dict[str, Any]) -> Any:
         type_hint = field_types[key]
         # Resolve string annotations (e.g. from __future__ annotations)
         if isinstance(type_hint, str):
-            frame = inspect.currentframe()
             try:
-                resolved = eval(type_hint, frame.f_back.f_globals if frame else {})  # noqa: S307
+                resolved = eval(type_hint, module_globals)  # noqa: S307
             except Exception:
                 resolved = None
             type_hint = resolved
@@ -164,6 +190,12 @@ class ConfigManager:
     """
 
     _instance: AppConfig | None = None
+    _loaded_path: str = "configuration.yaml"
+
+    @classmethod
+    def loaded_path(cls) -> str:
+        """Path the config was last loaded from (used by the file watcher)."""
+        return cls._loaded_path
 
     @classmethod
     def load(cls, path: str | Path = "configuration.yaml") -> AppConfig:
@@ -195,6 +227,7 @@ class ConfigManager:
             config = AppConfig()
 
         cls._instance = config
+        cls._loaded_path = str(path)
         return config
 
     @classmethod
@@ -205,3 +238,53 @@ class ConfigManager:
         if cls._instance is None:
             cls._instance = AppConfig()
         return cls._instance
+
+    @classmethod
+    def save(cls, path: str | Path | None = None) -> None:
+        """Atomically save the current configuration.
+
+        Defaults to the path the config was loaded from (``_loaded_path``) so
+        UI/API edits persist back to the same file — critical for installed
+        builds where the load path is the writable ``~/.ambilight/configuration.yaml``
+        rather than a (read-only) bundled default.
+        """
+        if cls._instance is None:
+            return
+
+        if path is None:
+            path = cls._loaded_path
+        path = Path(path)
+        import dataclasses
+        import tempfile
+        import os
+        
+        try:
+            # Write to a temporary file in the same directory, then replace atomically
+            temp_fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".tmp", text=True)
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(dataclasses.asdict(cls._instance), fh, default_flow_style=False, sort_keys=False)
+            os.replace(temp_path, path)
+            logger.debug("Configuration saved atomically to %s", path)
+        except Exception as exc:
+            logger.error("Failed to save configuration: %s", exc)
+
+    @classmethod
+    def update(cls, override: dict[str, Any], path: str | Path | None = None) -> None:
+        """Merge a dictionary of overrides into the current configuration and save.
+
+        ``path`` defaults to ``_loaded_path`` (see :meth:`save`).
+        """
+        if cls._instance is None:
+            return
+
+        import dataclasses
+        base = dataclasses.asdict(cls._instance)
+        merged = _merge(base, override)
+
+        # Re-build the dataclass
+        cls._instance = _dict_to_dataclass(AppConfig, merged)
+        if not isinstance(cls._instance, AppConfig):
+            cls._instance = AppConfig()
+
+        cls.save(path)
+

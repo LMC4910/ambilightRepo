@@ -1,0 +1,100 @@
+{
+  "name": "ambilight-desktop",
+  "productName": "Ambilight Desktop",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "author": "Ambilight Desktop",
+  "description": "Cross-platform ambient lighting platform for MagicHome LED controllers.",
+  "homepage": "https://github.com/ambilight-desktop/ambilight",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "build": "vite build",
+    "electron:build": "pnpm run gen:icons && vite build && electron-builder --win",
+    "dist:win": "pnpm run gen:icons && vite build && electron-builder --win",
+    "dist:mac": "pnpm run gen:icons && vite build && electron-builder --mac",
+    "dist:linux": "pnpm run gen:icons && vite build && electron-builder --linux",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.ambilight.desktop",
+    "productName": "Ambilight Desktop",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/service/ambilight-service",
+        "to": "service",
+        "filter": ["**/*"]
+      }
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "ambilight-desktop",
+      "repo": "ambilight"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png",
+      "verifyUpdateCodeSignature": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Ambilight Desktop",
+      "include": "installer/nsis_hooks.nsh"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Utility",
+      "icon": "build/icon.png",
+      "maintainer": "Ambilight Desktop"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "ws": "^8.21.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^10.0.3",
+    "electron": "^42.3.2",
+    "electron-builder": "^26.8.1",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "sharp": "^0.34.2",
+    "vite": "^8.0.12",
+    "vite-plugin-electron": "^1.0.0",
+    "wait-on": "^9.0.10"
+  }
+}

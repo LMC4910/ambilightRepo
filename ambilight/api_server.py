@@ -1,0 +1,476 @@
+"""
+API Server Module
+=================
+Exposes a FastAPI REST interface and WebSocket for real-time telemetry.
+Provides control over the PipelineController.
+"""
+
+import asyncio
+import logging
+import time
+import os
+import json
+import platform
+import dataclasses
+from collections import deque
+from typing import Any, Dict, List, Optional
+
+import pydantic
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
+
+from .config import ConfigManager
+from .events import bus
+from .platform_monitor import get_platform_monitor
+from .pipeline_controller import PipelineController
+from .auth import generate_and_save_token, verify_token
+from . import auth
+from .profile_manager import profile_manager
+from .discovery import DeviceScanner, DeviceCache, DeviceInfo, CapabilityProbe, classify_device
+from .led_output import MagicHomeController
+from .config_watcher import ConfigWatcher
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Ambilight Desktop API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Local UI will bind to this
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Globals
+controller = PipelineController()
+monitor = None
+config_watcher = None
+
+# Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
+latest_metrics: Dict[str, Any] = {}
+service_start_time = time.monotonic()
+
+# Rolling diagnostics window (~60 s at ~30 fps) persisted to disk for the UI.
+AMBILIGHT_DIR = os.path.join(os.path.expanduser("~"), ".ambilight")
+METRICS_FILE = os.path.join(AMBILIGHT_DIR, "metrics", "latest.json")
+metrics_history: "deque[Dict[str, Any]]" = deque(maxlen=1800)
+_last_metrics_persist = 0.0
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    global monitor, config_watcher
+
+    # 0. Security: Generate Token
+    generate_and_save_token()
+
+    logger.info("[API] Starting up. Initializing Pipeline Controller & Platform Monitor.")
+
+    # 1. Start Platform Monitor to watch for sleep/lock events
+    monitor = get_platform_monitor(asyncio.get_running_loop())
+    monitor.start()
+
+    # 1b. Watch configuration.yaml for on-disk edits → hot-reload (FR-SVC-06)
+    config_watcher = ConfigWatcher(ConfigManager.loaded_path(), asyncio.get_running_loop())
+    config_watcher.start()
+
+    # 2. Setup Pipeline Controller (subscribes to events)
+    await controller.setup()
+
+    # 3. Start the actual capture process
+    controller.start()
+
+    # 4. Subscribe the WebSocket manager + metrics cache to METRICS_UPDATE
+    await bus.subscribe("METRICS_UPDATE", push_metrics_to_ws)
+    await bus.subscribe("METRICS_UPDATE", _cache_metrics)
+
+
+async def _cache_metrics(metrics: dict) -> None:
+    """Keep the latest snapshot + a rolling window; persist to disk ~1 Hz."""
+    global latest_metrics, _last_metrics_persist
+    latest_metrics = metrics
+    metrics_history.append({
+        "t": time.time(),
+        "fps": metrics.get("fps", 0.0),
+        "latency_ms": metrics.get("latency_ms", 0.0),
+    })
+    now = time.monotonic()
+    if now - _last_metrics_persist >= 1.0:
+        _last_metrics_persist = now
+        try:
+            os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
+            tmp = METRICS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(list(metrics_history), fh)
+            os.replace(tmp, METRICS_FILE)
+        except Exception as exc:
+            logger.debug("[API] metrics persist failed: %s", exc)
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    global monitor, config_watcher
+    logger.info("[API] Shutting down. Stopping pipeline.")
+    controller.stop()
+    if monitor:
+        monitor.stop()
+    if config_watcher:
+        config_watcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# REST ENDPOINTS
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    """Unauthenticated structured health probe (FR-SVC-08).
+
+    Intentionally token-free so watchdogs / the Electron supervisor can poll it
+    cheaply. It exposes no sensitive data — only liveness and coarse metrics.
+    """
+    st = controller.status()
+    return {
+        "status": "ok" if st["running"] else "degraded",
+        "pipeline_alive": st["running"],
+        "paused": st["paused"],
+        "restarts": st["restarts"],
+        "fps": round(latest_metrics.get("fps", 0.0), 1),
+        "latency_ms": round(latest_metrics.get("latency_ms", 0.0), 1),
+        "uptime_s": round(time.monotonic() - service_start_time, 1),
+    }
+
+
+@app.get("/api/status", dependencies=[Depends(verify_token)])
+async def get_status() -> Dict[str, Any]:
+    st = controller.status()
+    return {
+        "status": "running" if st["running"] else "stopped",
+        "paused": st["paused"],
+        "pid": st["pid"],
+        "restarts": st["restarts"],
+    }
+
+
+@app.post("/api/pipeline/start", dependencies=[Depends(verify_token)])
+async def start_pipeline() -> Dict[str, str]:
+    controller.start()
+    return {"message": "Pipeline started"}
+
+
+@app.post("/api/pipeline/stop", dependencies=[Depends(verify_token)])
+async def stop_pipeline() -> Dict[str, str]:
+    controller.stop()
+    return {"message": "Pipeline stopped"}
+
+
+@app.post("/api/pipeline/pause", dependencies=[Depends(verify_token)])
+async def pause_pipeline() -> Dict[str, str]:
+    controller.pause()
+    return {"message": "Pipeline paused"}
+
+
+@app.post("/api/pipeline/resume", dependencies=[Depends(verify_token)])
+async def resume_pipeline() -> Dict[str, str]:
+    controller.resume()
+    return {"message": "Pipeline resumed"}
+
+
+@app.post("/api/service/restart", dependencies=[Depends(verify_token)])
+async def restart_service() -> Dict[str, str]:
+    controller.restart()
+    return {"message": "Pipeline restarted"}
+
+
+@app.get("/api/config", dependencies=[Depends(verify_token)])
+async def get_config() -> Dict[str, Any]:
+    cfg = ConfigManager.get()
+    return dataclasses.asdict(cfg)
+
+
+@app.put("/api/config", dependencies=[Depends(verify_token)])
+async def update_config(override: Dict[str, Any]) -> Dict[str, str]:
+    ConfigManager.update(override)
+    cfg = ConfigManager.get()
+    await bus.publish("CONFIG_UPDATE", cfg)
+    return {"message": "Config updated"}
+
+
+@app.get("/api/profiles", dependencies=[Depends(verify_token)])
+async def list_profiles() -> Dict[str, List[str]]:
+    return {"profiles": profile_manager.list_profiles()}
+
+
+@app.get("/api/profiles/{name}", dependencies=[Depends(verify_token)])
+async def get_profile(name: str) -> Dict[str, Any]:
+    prof = profile_manager.get_profile(name)
+    if prof is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return prof
+
+
+@app.post("/api/profiles/{name}", dependencies=[Depends(verify_token)])
+async def save_profile(name: str) -> Dict[str, str]:
+    if profile_manager.save_profile(name):
+        return {"message": f"Profile '{name}' saved"}
+    raise HTTPException(status_code=500, detail="Failed to save profile")
+
+
+@app.delete("/api/profiles/{name}", dependencies=[Depends(verify_token)])
+async def delete_profile(name: str) -> Dict[str, str]:
+    if profile_manager.delete_profile(name):
+        return {"message": f"Profile '{name}' deleted"}
+    raise HTTPException(status_code=404, detail="Profile not found or failed to delete")
+
+
+@app.post("/api/profiles/{name}/import", dependencies=[Depends(verify_token)])
+async def import_profile(name: str, data: Dict[str, Any]) -> Dict[str, str]:
+    """Write an imported profile JSON body to disk under *name* (FR-PROF-05)."""
+    if profile_manager.write_profile(name, data):
+        return {"message": f"Profile '{name}' imported"}
+    raise HTTPException(status_code=400, detail="Invalid profile data")
+
+
+@app.post("/api/profiles/{name}/apply", dependencies=[Depends(verify_token)])
+async def apply_profile(name: str) -> Dict[str, str]:
+    if profile_manager.apply_profile(name):
+        cfg = ConfigManager.get()
+        await bus.publish("CONFIG_UPDATE", cfg)
+        return {"message": f"Profile '{name}' applied"}
+    raise HTTPException(status_code=404, detail="Profile not found or failed to apply")
+
+class ModeRequest(pydantic.BaseModel):
+    mode: str
+    params: Dict[str, Any] = {}
+
+@app.put("/api/mode", dependencies=[Depends(verify_token)])
+async def set_mode(request: ModeRequest) -> Dict[str, str]:
+    controller.set_mode(request.mode, request.params)
+    return {"message": f"Mode set to {request.mode}"}
+
+
+@app.get("/api/effects", dependencies=[Depends(verify_token)])
+async def list_effects() -> Dict[str, List[str]]:
+    """List selectable effect modes (built-ins + discovered plugins)."""
+    import os
+    from .effects_engine import EffectsManager
+    mgr = EffectsManager()
+    cfg = ConfigManager.get()
+    eff = getattr(cfg, "effects", None)
+    plugins_dir = (eff.plugins_dir if eff and eff.plugins_dir
+                   else os.path.join(os.path.expanduser("~"), ".ambilight", "plugins"))
+    try:
+        mgr.load_plugins(plugins_dir)
+    except Exception:
+        pass
+    return {"effects": mgr.list_effects()}
+
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTICS & LOGS
+# ---------------------------------------------------------------------------
+
+@app.get("/api/diagnostics", dependencies=[Depends(verify_token)])
+async def diagnostics() -> Dict[str, Any]:
+    """System + runtime diagnostics for the UI Diagnostics page (FR-UI-12)."""
+    cfg = ConfigManager.get()
+    monitors: List[Dict[str, Any]] = []
+    try:
+        import mss  # type: ignore
+        with mss.mss() as sct:
+            for i, mon in enumerate(sct.monitors[1:]):
+                monitors.append({"index": i, "width": mon["width"], "height": mon["height"]})
+    except Exception:
+        pass
+    return {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "gpu": {"enabled": cfg.gpu.enabled, "prefer": cfg.gpu.prefer},
+        "capture_method": cfg.capture.method,
+        "monitors": monitors,
+        "device": {"ip": cfg.device.ip, "mac": cfg.device.mac, "led_count": cfg.device.led_count},
+        "pipeline": controller.status(),
+        "metrics": latest_metrics,
+        "history_points": len(metrics_history),
+        "history": list(metrics_history)[-120:],
+    }
+
+
+@app.get("/api/logs", dependencies=[Depends(verify_token)])
+async def get_logs(level: str = "", limit: int = 400) -> Dict[str, Any]:
+    """Tail the rotating log file, optionally filtered by level substring."""
+    cfg = ConfigManager.get()
+    path = cfg.logging.file
+    if not os.path.isabs(path):
+        path = os.path.join(AMBILIGHT_DIR, path)
+    lines: List[str] = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()[-2000:]
+    except FileNotFoundError:
+        return {"lines": [], "file": path}
+    if level:
+        lvl = level.upper()
+        lines = [ln for ln in lines if lvl in ln]
+    return {"lines": [ln.rstrip("\n") for ln in lines[-limit:]], "file": path}
+
+
+# ---------------------------------------------------------------------------
+# AUTO-START (start on login)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/autostart", dependencies=[Depends(verify_token)])
+async def autostart_status() -> Dict[str, bool]:
+    from . import autostart
+    return {"enabled": autostart.status()}
+
+
+@app.post("/api/autostart/enable", dependencies=[Depends(verify_token)])
+async def autostart_enable() -> Dict[str, bool]:
+    from . import autostart
+    await asyncio.get_running_loop().run_in_executor(None, autostart.install)
+    return {"enabled": autostart.status()}
+
+
+@app.post("/api/autostart/disable", dependencies=[Depends(verify_token)])
+async def autostart_disable() -> Dict[str, bool]:
+    from . import autostart
+    await asyncio.get_running_loop().run_in_executor(None, autostart.remove)
+    return {"enabled": autostart.status()}
+
+
+# ---------------------------------------------------------------------------
+# DEVICE ENDPOINTS
+# ---------------------------------------------------------------------------
+
+@app.get("/api/devices", dependencies=[Depends(verify_token)])
+async def list_devices() -> Dict[str, List[Dict[str, Any]]]:
+    """Return the last-known devices from the on-disk cache (fast, no scan)."""
+    cfg = ConfigManager.get()
+    cache = DeviceCache(path=cfg.device.cache_file)
+    devices = await asyncio.get_running_loop().run_in_executor(None, cache.load)
+    return {"devices": [d.to_dict() for d in devices]}
+
+
+@app.post("/api/devices/scan", dependencies=[Depends(verify_token)])
+async def scan_devices() -> Dict[str, List[Dict[str, Any]]]:
+    """Run a live subnet scan for MagicHome controllers and refresh the cache."""
+    cfg = ConfigManager.get()
+    scanner = DeviceScanner(subnet=cfg.device.subnet, connect_timeout=cfg.device.discovery_timeout)
+    loop = asyncio.get_running_loop()
+    devices = await loop.run_in_executor(None, scanner.scan)
+    if devices:
+        await loop.run_in_executor(None, DeviceCache(path=cfg.device.cache_file).save, devices)
+    return {"devices": [d.to_dict() for d in devices]}
+
+
+class DeviceTestRequest(pydantic.BaseModel):
+    ip: str
+    port: Optional[int] = None
+
+
+def _flash_device(ip: str, port: int) -> bool:
+    """Blocking helper: flash a controller white three times, then restore off."""
+    ctrl = MagicHomeController(ip=ip, port=port)
+    if not ctrl.connect():
+        return False
+    try:
+        ctrl.turn_on()
+        for _ in range(3):
+            ctrl.set_rgb(255, 255, 255)
+            time.sleep(0.25)
+            ctrl.set_rgb(0, 0, 0)
+            time.sleep(0.25)
+        return True
+    finally:
+        ctrl.disconnect()
+
+
+@app.post("/api/devices/test", dependencies=[Depends(verify_token)])
+async def test_device(request: DeviceTestRequest) -> Dict[str, str]:
+    """Flash a device's LEDs so the user can confirm they picked the right one."""
+    cfg = ConfigManager.get()
+    port = request.port or cfg.device.port
+    ok = await asyncio.get_running_loop().run_in_executor(None, _flash_device, request.ip, port)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"Could not reach device at {request.ip}:{port}")
+    return {"message": f"Flashed device at {request.ip}"}
+
+
+@app.get("/api/devices/{ip}/capabilities", dependencies=[Depends(verify_token)])
+async def device_capabilities(ip: str) -> Dict[str, Any]:
+    """Live-probe a device and classify its capabilities (FR-DEV-04)."""
+    cfg = ConfigManager.get()
+    probe = CapabilityProbe(connect_timeout=cfg.device.connect_timeout)
+    info = await asyncio.get_running_loop().run_in_executor(None, probe.probe, ip, cfg.device.port)
+    if info is None:
+        raise HTTPException(status_code=502, detail=f"Could not reach device at {ip}")
+    return {
+        "ip": info.ip,
+        "mac": info.mac,
+        "device_type": info.device_type,
+        "kind": classify_device(info),
+        "supports_addressable": info.supports_addressable,
+        "supports_rgbw": info.supports_rgbw,
+    }
+
+
+# ---------------------------------------------------------------------------
+# WEBSOCKET ENDPOINT
+# ---------------------------------------------------------------------------
+
+class ConnectionManager:
+    def __init__(self) -> None:
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict) -> None:
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+
+import time
+
+last_ws_broadcast = 0.0
+WS_BROADCAST_INTERVAL = 0.1  # 10Hz
+
+async def push_metrics_to_ws(metrics: dict) -> None:
+    """EventBus callback for METRICS_UPDATE"""
+    global last_ws_broadcast
+    now = time.monotonic()
+    if now - last_ws_broadcast < WS_BROADCAST_INTERVAL:
+        return
+    last_ws_broadcast = now
+    
+    if manager.active_connections:
+        await manager.broadcast(metrics)
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    token = websocket.query_params.get("token")
+    if not token or token != auth._current_token:
+        logger.warning("[API] Rejected WebSocket connection due to invalid token.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive. The client can send commands here if needed,
+            # but currently we only use this for pushing metrics.
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)

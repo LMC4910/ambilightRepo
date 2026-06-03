@@ -28,6 +28,7 @@ import logging
 import signal
 import sys
 import time
+from dataclasses import dataclass, field as dc_field
 from typing import Optional
 
 import numpy as np
@@ -41,8 +42,70 @@ from .led_output import MagicHomeController
 from .logging_setup import PerformanceMetrics, setup_logging
 from .smoothing import SmoothingEngine
 from .zones import ZoneManager
+from .effects_engine import EffectsManager, EffectScheduler
+from .gradient_engine import generate_gradient
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Channel:
+    """One device + its own analysis chain, bound to a monitor.
+
+    Multiple channels may share a monitor's captured frame; each owns its LED
+    controller, zone manager, analyser and smoother so per-device state is
+    independent.
+    """
+    name: str
+    monitor_index: int
+    led: "MagicHomeController"
+    zones: "ZoneManager"
+    analyzer: "ColorAnalyzer"
+    smoother: "SmoothingEngine"
+    led_count: int
+    last_zone_colors: list = dc_field(default_factory=list)
+
+
+def _device_specs(cfg) -> list[dict]:
+    """Normalise config into a list of device specs.
+
+    Uses ``cfg.devices`` (multi-device) when non-empty, otherwise falls back to
+    the single ``cfg.device`` bound to ``cfg.capture.monitor_index`` (back-compat).
+    """
+    import dataclasses
+    raw = list(getattr(cfg, "devices", None) or [])
+    dev = cfg.device
+    specs: list[dict] = []
+    if raw:
+        for d in raw:
+            d = d if isinstance(d, dict) else dataclasses.asdict(d)
+            if not d.get("enabled", True):
+                continue
+            specs.append({
+                "ip": d.get("ip", ""),
+                "mac": d.get("mac", ""),
+                "port": int(d.get("port", dev.port)),
+                "monitor_index": int(d.get("monitor_index", 0)),
+                "led_count": int(d.get("led_count", 30)),
+                "name": d.get("name") or d.get("ip") or "device",
+                "connect_timeout": float(d.get("connect_timeout", dev.connect_timeout)),
+                "send_timeout": float(d.get("send_timeout", dev.send_timeout)),
+                "reconnect_interval": float(d.get("reconnect_interval", dev.reconnect_interval)),
+                "subnet": d.get("subnet", dev.subnet),
+                "discovery_timeout": float(d.get("discovery_timeout", dev.discovery_timeout)),
+                "cache_file": d.get("cache_file", dev.cache_file),
+            })
+    else:
+        specs.append({
+            "ip": dev.ip, "mac": dev.mac, "port": dev.port,
+            "monitor_index": cfg.capture.monitor_index,
+            "led_count": getattr(dev, "led_count", 30),
+            "name": getattr(dev, "name", "") or dev.ip,
+            "connect_timeout": dev.connect_timeout, "send_timeout": dev.send_timeout,
+            "reconnect_interval": dev.reconnect_interval, "subnet": dev.subnet,
+            "discovery_timeout": dev.discovery_timeout, "cache_file": dev.cache_file,
+        })
+    return specs
 
 
 class AmbilightPipeline:
@@ -58,18 +121,28 @@ class AmbilightPipeline:
         Application configuration.  Defaults to ``ConfigManager.get()``.
     """
 
-    def __init__(self, config: Optional[AppConfig] = None) -> None:
+    def __init__(self, config: Optional[AppConfig] = None, stop_event=None, pause_event=None, metrics_queue=None, command_queue=None) -> None:
         self._cfg = config or ConfigManager.get()
         self._running = False
         self._metrics: Optional[PerformanceMetrics] = None
+        self._stop_event = stop_event
+        self._pause_event = pause_event
+        self._metrics_queue = metrics_queue
+        self._command_queue = command_queue
 
         # Sub-system instances (populated in start())
-        self._capture: Optional[ScreenCaptureManager] = None
         self._gpu: Optional[GpuAccelerator] = None
-        self._zones: Optional[ZoneManager] = None
-        self._analyzer: Optional[ColorAnalyzer] = None
-        self._smoother: Optional[SmoothingEngine] = None
-        self._led: Optional[MagicHomeController] = None
+        # Multi-device I/O: one capture per distinct monitor, one channel per device.
+        self._captures: dict[int, ScreenCaptureManager] = {}
+        self._channels: list[_Channel] = []
+        self._topology: Optional[tuple] = None
+        self._effects: EffectsManager = EffectsManager()
+        self._scheduler: Optional[EffectScheduler] = None
+        self._scheduled_active: bool = False
+        self._last_sched_check: float = 0.0
+        self._start_time: float = time.monotonic()
+        self._last_zone_colors: list = []
+        self._last_debug_log: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -94,6 +167,7 @@ class AmbilightPipeline:
             backup_count=log_cfg.backup_count,
             show_fps=log_cfg.show_fps,
             fps_interval=log_cfg.fps_interval,
+            file_level=getattr(log_cfg, "file_level", "INFO"),
         )
         logger.info("=" * 60)
         logger.info("  Ambilight Engine  starting up …")
@@ -107,64 +181,19 @@ class AmbilightPipeline:
         from .gpu import GpuBackend
         self._gpu = GpuAccelerator(backend if backend is not None else GpuBackend.CPU)
 
-        # Screen capture
-        self._capture = ScreenCaptureManager(
-            preferred_method=cfg.capture.method,
-            monitor_index=cfg.capture.monitor_index,
-            fps_target=cfg.capture.fps_target,
-        )
-        self._capture.start()
+        # Captures (per monitor) + device channels.
+        self._build_io()
 
-        # Zone manager
-        z = cfg.zones
-        self._zones = ZoneManager(
-            n_top=z.top,
-            n_bottom=z.bottom,
-            n_left=z.left,
-            n_right=z.right,
-        )
-
-        # Colour analyser
-        c = cfg.color
-        self._analyzer = ColorAnalyzer(
-            mode=c.mode,
-            black_threshold=c.ignore_black_threshold,
-            white_threshold=c.ignore_white_threshold,
-            kmeans_clusters=c.kmeans_clusters,
-            saturation_weight_power=c.saturation_weight_power,
-            min_saturation=c.min_saturation,
-        )
-
-        # Smoothing engine
-        s = cfg.smoothing
-        self._smoother = SmoothingEngine(
-            enabled=s.enabled,
-            base_alpha=s.base_alpha,
-            fast_alpha=s.adaptive_fast_alpha,
-            fast_threshold=s.adaptive_fast_threshold,
-            min_change=s.min_change,
-        )
-
-        # Device discovery + LED controller
-        dev_cfg = cfg.device
-        device_info = self._discover_device(dev_cfg)
-        ip = device_info.ip if device_info else dev_cfg.ip
-        self._led = MagicHomeController(
-            ip=ip,
-            port=dev_cfg.port,
-            connect_timeout=dev_cfg.connect_timeout,
-            send_timeout=dev_cfg.send_timeout,
-            reconnect_interval=dev_cfg.reconnect_interval,
-            min_update_interval=1.0 / max(cfg.capture.fps_target, 1),
-        )
-        if not self._led.connect():
-            logger.warning(
-                "[Pipeline] Could not connect to LED controller at %s; "
-                "will retry during run loop.",
-                ip,
-            )
-        else:
-            self._led.turn_on()
+        # Effects: load plugins + build the schedule.
+        import os
+        eff_cfg = getattr(cfg, "effects", None)
+        plugins_dir = (eff_cfg.plugins_dir if eff_cfg and eff_cfg.plugins_dir
+                       else os.path.join(os.path.expanduser("~"), ".ambilight", "plugins"))
+        try:
+            self._effects.load_plugins(plugins_dir)
+        except Exception as exc:
+            logger.warning("[Pipeline] Plugin load error: %s", exc)
+        self._scheduler = EffectScheduler(eff_cfg.schedule if eff_cfg else [])
 
         # Signal handlers
         self._install_signal_handlers()
@@ -176,7 +205,7 @@ class AmbilightPipeline:
 
         Blocks until :meth:`stop` is called or an unrecoverable error occurs.
         """
-        if self._capture is None:
+        if not self._captures:
             raise RuntimeError("call start() before run()")
 
         self._running = True
@@ -187,43 +216,121 @@ class AmbilightPipeline:
 
         try:
             while self._running:
-                t0 = time.monotonic()
-
-                # --- Capture ---
-                frame = self._capture.grab()
-                if frame is None:
-                    time.sleep(0.01)
+                if self._stop_event and self._stop_event.is_set():
+                    logger.info("[Pipeline] Interrupted by stop event.")
+                    break
+                    
+                if self._pause_event and self._pause_event.is_set():
+                    time.sleep(0.1)
                     continue
 
-                # --- Resize to analysis resolution ---
-                small: np.ndarray = self._gpu.resize(frame, w, h)  # type: ignore[union-attr]
+                if self._command_queue is not None:
+                    import queue
+                    try:
+                        cmd = self._command_queue.get_nowait()
+                        if cmd.get("action") == "reload":
+                            self._cfg = cmd["config"]
+                            self._apply_config_hot()
+                        elif cmd.get("action") == "set_mode":
+                            mode = cmd.get("mode")
+                            params = cmd.get("params", {})
+                            self._effects.set_mode(mode, params)
+                            logger.info("[Pipeline] Mode switched to %s", mode)
+                    except queue.Empty:
+                        pass
 
-                # --- Zone decomposition ---
-                zone_regions = self._zones.extract_regions(small)  # type: ignore[union-attr]
+                # --- Effect schedule (checked at most every 5 s) ---
+                if self._scheduler is not None and (time.monotonic() - self._last_sched_check) > 5.0:
+                    self._last_sched_check = time.monotonic()
+                    self._apply_schedule()
 
-                # --- Colour analysis ---
-                zone_colors = self._analyzer.analyze_zones(zone_regions)  # type: ignore[union-attr]
+                t0 = time.monotonic()
+                r, g, b = (0, 0, 0)
 
-                # --- Smoothing ---
-                smoothed_zones = self._smoother.smooth_zones(zone_colors)  # type: ignore[union-attr]
+                # --- Effect Processing (applies to every device) ---
+                if self._effects.current_mode != "screen_sync":
+                    color = self._effects.update()
+                    if color:
+                        r, g, b = color
+                        for ch in self._channels:
+                            ch.led.set_rgb(r, g, b)
+                    sent = True
+                    time.sleep(1.0 / max(self._cfg.capture.fps_target, 1))
+                else:
+                    # --- Capture each distinct monitor once, share among devices ---
+                    small_by_mon: dict[int, Optional[np.ndarray]] = {}
+                    for mi, cap in self._captures.items():
+                        frame = cap.grab()
+                        small_by_mon[mi] = self._gpu.resize(frame, w, h) if frame is not None else None  # type: ignore[union-attr]
 
-                # --- Combine zones → single RGB (MagicHome is single-zone) ---
-                combined = self._analyzer.combine_zone_colors(smoothed_zones)  # type: ignore[union-attr]
-                final_color = self._smoother.smooth_combined(combined)  # type: ignore[union-attr]
+                    if not any(v is not None for v in small_by_mon.values()):
+                        time.sleep(0.01)
+                        continue
 
-                # --- LED output ---
-                r, g, b = final_color
-                sent = self._led.set_rgb(r, g, b)  # type: ignore[union-attr]
+                    # --- Per-device analysis + output ---
+                    for ch in self._channels:
+                        small = small_by_mon.get(ch.monitor_index)
+                        if small is None:
+                            continue
+                        zone_regions = ch.zones.extract_regions(small)
+                        zone_colors = ch.analyzer.analyze_zones(zone_regions)
+                        smoothed_zones = ch.smoother.smooth_zones(zone_colors)
+                        ch.last_zone_colors = [
+                            (int(c[0]), int(c[1]), int(c[2])) for (_zone, c) in smoothed_zones
+                        ]
+                        combined = ch.analyzer.combine_zone_colors(smoothed_zones)
+                        r, g, b = ch.smoother.smooth_combined(combined)
+                        if ch.led.is_addressable and self._cfg.gradient.enabled:
+                            pixels = generate_gradient(
+                                self._cfg.gradient.mode, ch.last_zone_colors,
+                                ch.led.led_count, self._cfg.gradient.gamma,
+                            )
+                            ch.led.set_pixels(pixels)
+                        else:
+                            ch.led.set_rgb(r, g, b)
+                    sent = True
+                    # Live preview reflects the first channel.
+                    self._last_zone_colors = self._channels[0].last_zone_colors if self._channels else []
 
                 # --- Metrics ---
                 latency_ms = (time.monotonic() - t0) * 1000.0
+                fps = 1000.0 / latency_ms if latency_ms > 0 else 0
+                connected = sum(1 for ch in self._channels if ch.led.is_connected)
+
+                metrics = {
+                    "fps": fps,
+                    "latency_ms": latency_ms,
+                    "capture_time_ms": latency_ms * 0.4,
+                    "process_time_ms": latency_ms * 0.4,
+                    "led_transmit_ms": latency_ms * 0.2,
+                    "uptime_s": time.monotonic() - (self._start_time or time.monotonic()),
+                    "mode": self._effects.current_mode,
+                    "color": [int(r), int(g), int(b)],
+                    "zones": self._last_zone_colors,  # per-zone RGB for live preview
+                    "devices": len(self._channels),
+                    "devices_connected": connected,
+                }
+                
                 if self._metrics is not None:
                     self._metrics.record_frame(latency_ms)
+                    
+                if self._metrics_queue is not None:
+                    import queue
+                    try:
+                        self._metrics_queue.put_nowait(metrics)
+                    except queue.Full:
+                        pass
 
-                logger.debug(
-                    "[Pipeline] RGB=(%3d,%3d,%3d) | latency=%.1f ms | sent=%s",
-                    r, g, b, latency_ms, sent,
-                )
+                # Throttle the per-frame debug line to ≤ 1 / 2 s so DEBUG mode
+                # doesn't churn the rotating log at the capture frame rate.
+                if logger.isEnabledFor(logging.DEBUG):
+                    now_dbg = time.monotonic()
+                    if now_dbg - self._last_debug_log >= 2.0:
+                        self._last_debug_log = now_dbg
+                        logger.debug(
+                            "[Pipeline] RGB=(%3d,%3d,%3d) | latency=%.1f ms | sent=%s",
+                            r, g, b, latency_ms, sent,
+                        )
 
         except KeyboardInterrupt:
             logger.info("[Pipeline] KeyboardInterrupt received.")
@@ -239,40 +346,155 @@ class AmbilightPipeline:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _discover_device(self, dev_cfg: object) -> Optional[DeviceInfo]:
-        """Run device discovery and return the best match."""
-        discovery = DeviceDiscovery(
-            preferred_ip=dev_cfg.ip,  # type: ignore[attr-defined]
-            preferred_mac=dev_cfg.mac,  # type: ignore[attr-defined]
-            subnet=dev_cfg.subnet,  # type: ignore[attr-defined]
-            connect_timeout=dev_cfg.connect_timeout,  # type: ignore[attr-defined]
-            discovery_timeout=dev_cfg.discovery_timeout,  # type: ignore[attr-defined]
-            cache_file=dev_cfg.cache_file,  # type: ignore[attr-defined]
+    def _apply_schedule(self) -> None:
+        """Activate/deactivate scheduled effects for the current time (FR-EFF-08)."""
+        entry = self._scheduler.current() if self._scheduler else None
+        if entry:
+            if not self._scheduled_active or self._effects.current_mode != entry.get("effect"):
+                self._effects.set_mode(entry.get("effect", "screen_sync"), entry.get("params", {}))
+                self._scheduled_active = True
+                logger.info("[Pipeline] Schedule activated effect '%s'.", entry.get("effect"))
+        elif self._scheduled_active:
+            # Window ended — return to screen sync.
+            self._effects.set_mode("screen_sync")
+            self._scheduled_active = False
+            logger.info("[Pipeline] Schedule window ended; back to screen_sync.")
+
+    def _apply_config_hot(self) -> None:
+        """Apply config changes without a process restart.
+
+        If the device/monitor *topology* changed, rebuild captures + channels;
+        otherwise update each channel's analysis settings in place.
+        """
+        if self._topology_sig() != self._topology:
+            logger.info("[Pipeline] Device/monitor topology changed; rebuilding I/O.")
+            self._teardown_io()
+            self._build_io()
+            return
+
+        z = self._cfg.zones
+        c = self._cfg.color
+        s = self._cfg.smoothing
+        for ch in self._channels:
+            ch.zones = ZoneManager(z.top, z.bottom, z.left, z.right)
+            ch.analyzer = ColorAnalyzer(
+                mode=c.mode,
+                black_threshold=c.ignore_black_threshold,
+                white_threshold=c.ignore_white_threshold,
+                kmeans_clusters=c.kmeans_clusters,
+                saturation_weight_power=c.saturation_weight_power,
+                min_saturation=c.min_saturation,
+            )
+            ch.smoother = SmoothingEngine(
+                enabled=s.enabled,
+                base_alpha=s.base_alpha,
+                fast_alpha=s.adaptive_fast_alpha,
+                fast_threshold=s.adaptive_fast_threshold,
+                min_change=s.min_change,
+            )
+        logger.info("[Pipeline] Hot-reloaded configuration (%d channel(s)).", len(self._channels))
+
+    # ------------------------------------------------------------------
+    # Multi-device I/O construction
+    # ------------------------------------------------------------------
+
+    def _topology_sig(self) -> tuple:
+        """Signature of the device/monitor layout; changes trigger a rebuild."""
+        return tuple(sorted(
+            (s["mac"] or s["ip"], s["monitor_index"], s["led_count"])
+            for s in _device_specs(self._cfg)
+        ))
+
+    def _build_io(self) -> None:
+        """Create one capture per distinct monitor and one channel per device."""
+        from .discovery import classify_device
+        cfg = self._cfg
+        specs = _device_specs(cfg)
+        z, c, s = cfg.zones, cfg.color, cfg.smoothing
+        min_interval = 1.0 / max(cfg.capture.fps_target, 1)
+
+        # Captures per distinct monitor (shared by devices on that monitor).
+        self._captures = {}
+        for mi in sorted({sp["monitor_index"] for sp in specs}):
+            cap = ScreenCaptureManager(
+                preferred_method=cfg.capture.method, monitor_index=mi,
+                fps_target=cfg.capture.fps_target,
+            )
+            cap.start()
+            self._captures[mi] = cap
+
+        # One channel per device.
+        self._channels = []
+        for sp in specs:
+            info = self._discover_spec(sp)
+            ip = info.ip if info else sp["ip"]
+            kind = classify_device(info) if info else "single"
+            led = MagicHomeController(
+                ip=ip, port=sp["port"], connect_timeout=sp["connect_timeout"],
+                send_timeout=sp["send_timeout"], reconnect_interval=sp["reconnect_interval"],
+                min_update_interval=min_interval, kind=kind, led_count=sp["led_count"],
+            )
+            if led.connect():
+                led.turn_on()
+            else:
+                logger.warning("[Pipeline] Could not connect to %s; will retry.", ip)
+            self._channels.append(_Channel(
+                name=sp["name"], monitor_index=sp["monitor_index"], led=led,
+                zones=ZoneManager(z.top, z.bottom, z.left, z.right),
+                analyzer=ColorAnalyzer(
+                    mode=c.mode, black_threshold=c.ignore_black_threshold,
+                    white_threshold=c.ignore_white_threshold, kmeans_clusters=c.kmeans_clusters,
+                    saturation_weight_power=c.saturation_weight_power, min_saturation=c.min_saturation,
+                ),
+                smoother=SmoothingEngine(
+                    enabled=s.enabled, base_alpha=s.base_alpha, fast_alpha=s.adaptive_fast_alpha,
+                    fast_threshold=s.adaptive_fast_threshold, min_change=s.min_change,
+                ),
+                led_count=sp["led_count"],
+            ))
+
+        self._topology = self._topology_sig()
+        logger.info(
+            "[Pipeline] Built %d device channel(s) across %d monitor(s).",
+            len(self._channels), len(self._captures),
         )
+
+    def _teardown_io(self) -> None:
+        """Turn off + release all LED controllers and capture managers."""
+        for ch in self._channels:
+            try:
+                ch.led.set_rgb(0, 0, 0)
+                ch.led.turn_off()
+                ch.led.disconnect()
+            except Exception:
+                pass
+        self._channels = []
+        for cap in self._captures.values():
+            try:
+                cap.stop()
+            except Exception:
+                pass
+        self._captures = {}
+
+    def _discover_spec(self, spec: dict) -> Optional[DeviceInfo]:
+        """Resolve a device spec to a reachable controller (MAC-aware)."""
         try:
+            discovery = DeviceDiscovery(
+                preferred_ip=spec["ip"], preferred_mac=spec["mac"], subnet=spec["subnet"],
+                connect_timeout=spec["connect_timeout"], discovery_timeout=spec["discovery_timeout"],
+                cache_file=spec["cache_file"],
+            )
             return discovery.find_device()
         except Exception as exc:
-            logger.warning("[Pipeline] Device discovery error: %s", exc)
+            logger.warning("[Pipeline] Discovery error for %s: %s", spec.get("ip"), exc)
             return None
 
     def _shutdown(self) -> None:
         """Gracefully release all resources."""
         logger.info("[Pipeline] Shutting down …")
-
-        if self._led is not None:
-            try:
-                self._led.set_rgb(0, 0, 0)
-                self._led.turn_off()
-            except Exception:
-                pass
-            self._led.disconnect()
-
-        if self._capture is not None:
-            self._capture.stop()
-
+        self._teardown_io()
         if self._metrics is not None:
             self._metrics.stop()
-
         logger.info("[Pipeline] Shutdown complete.")
 
     def _install_signal_handlers(self) -> None:

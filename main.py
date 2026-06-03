@@ -175,14 +175,13 @@ def main() -> None:
         _run_discovery(cfg)
         return
 
-    # Full pipeline
-    pipeline = AmbilightPipeline(cfg)
+    # Full pipeline (via FastAPI Server)
     try:
-        pipeline.start()
-        pipeline.run()
+        import uvicorn
+        uvicorn.run("ambilight.api_server:app", host="127.0.0.1", port=7826, log_level="info")
     except Exception as exc:
         logging.getLogger(__name__).critical(
-            "Pipeline fatal error: %s", exc, exc_info=True
+            "Server fatal error: %s", exc, exc_info=True
         )
         sys.exit(1)
 
