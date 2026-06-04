@@ -29,7 +29,9 @@ The MVP (P0), the v1.1 feature set (P1), and most of the v1.2 (P2) scope are **i
 | **Packaged installers** (PyInstaller service + electron-builder) with **code-sign config** + **electron-updater** (GitHub Releases) | ✅ Done (unsigned until certs supplied) |
 | **Multi-device + multi-monitor**, gradient engine, profiles + built-ins, diagnostics, log viewer | ✅ Done |
 | **Per-user config/profile persistence** under `~/.ambilight` | ✅ Done |
-| **Audio-reactive mode, scene presets, zone-layout editor, web dashboard, functional WGC/DRM capture** | 🚧 Not yet |
+| **Audio-reactive mode** (system-audio loopback) + **scene presets** (sunrise/sunset/ocean/ambient) | ✅ Done |
+| **Functional WGC capture** (catches hardware-overlay video DXGI misses; hardware DRM still excluded by Windows) | ✅ Done |
+| **Zone-layout editor, web dashboard** | 🚧 Not yet |
 
 **Distribution prerequisites you must supply:** real code-signing certificates (Windows `.pfx`, Apple Developer ID) and a GitHub repo + `GH_TOKEN` before signed builds and end-to-end auto-update work. Without them, installers build **unsigned** (Windows SmartScreen warning; macOS auto-update inactive).
 
@@ -46,10 +48,10 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 |-----------|--------|---------|
 | **Service entry** | ✅ | `python -m ambilight.service` (long-lived); legacy `python main.py` kept for source/headless use |
 | **REST API + WebSocket** | ✅ | `127.0.0.1:7826`, Bearer-token auth; WS metrics on `/ws` (~10 Hz) |
-| **Screen capture** | ✅ | DXGI/DXCam → MSS auto-failover, 24–30 FPS, <50 ms latency |
+| **Screen capture** | ✅ | WGC → DXGI/DXCam → MSS auto-failover, 24–30 FPS, <50 ms latency |
 | **Colour analysis** | ✅ | 5 modes: average, edges, dominant, kmeans, saturation_weighted; per-zone |
 | **Gradient engine** | ✅ | linear / radial / ambient / screen_matched + gamma; addressable `set_pixels` path |
-| **Effects engine** | ✅ | screen_sync, static, breathing, rainbow, candle + **scheduler** (time windows) + **plugin loader** (`~/.ambilight/plugins`) |
+| **Effects engine** | ✅ | screen_sync, static, breathing, rainbow, candle, **sunrise/sunset/ocean/ambient** scenes, **audio-reactive** (loopback) + **scheduler** (time windows) + **plugin loader** (`~/.ambilight/plugins`) |
 | **Multi-device + multi-monitor** | ✅ | One capture per monitor shared across per-device channels |
 | **Device discovery / reconnect** | ✅ | MAC-based discovery, capability probe, exponential reconnect backoff |
 | **Config** | ✅ | YAML + env overrides + **hot-reload** (file watcher); persisted to `~/.ambilight/configuration.yaml` |
@@ -81,11 +83,9 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 
 | Feature | Ref | Notes |
 |---------|-----|-------|
-| Audio-reactive mode | FR-EFF-05 | Beat/level-driven effect — not started |
-| Scene presets (sunrise / sunset / ocean) | FR-EFF-06 | Only `candle` exists today |
 | Zone-layout editor (visual) | FR-UI-06 | Zone counts are editable via Settings, but no drag/visual editor |
+| Hardware-DRM capture | FR-CAP-05 | WGC capture **is** implemented, but HDCP/PlayReady fullscreen video is excluded by Windows — no API bypasses it |
 | Web dashboard | P2 | No browser UI yet |
-| Functional WGC / DRM capture | FR-CAP-05 | WGC degrades gracefully to DXGI/MSS; a from-scratch native D3D path is required |
 | Auto profile switching by app | FR-PROF-07 | Future |
 
 ### 🎯 Non-Functional Requirements Status
@@ -114,16 +114,16 @@ Ambilight Desktop serves four distinct user types. Find yours and jump straight 
 
 | Persona | Core Need | Jump To |
 |---|---|---|
-| 🎬 Home Theater Enthusiast | DRM bypass, cinema smoothing, sleep/wake recovery | [Quick Start](#quick-start) · [Capture Backends](#capture-backend-selection) · [Smoothing](#smoothing-tuning) |
+| 🎬 Home Theater Enthusiast | overlay-video capture, cinema smoothing, sleep/wake recovery | [Quick Start](#quick-start) · [Capture Backends](#capture-backend-selection) · [Smoothing](#smoothing-tuning) |
 | 🎮 PC Gamer | <50 ms latency, zero FPS impact, gaming profiles | [Quick Start](#quick-start) · [Performance](#performance-optimisation) · [Colour Modes](#colour-modes-reference) |
 | 💻 Developer / Power User | REST API, WebSocket metrics, profile CRUD, scriptable modes | [API Server](#architecture-) · [Environment Variables](#environment-variables) · [Contributing](#contributing) |
 | 👤 Casual User | Simple setup, auto-discovery, graphical UI | [Quick Start](#quick-start) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting) |
 
 ### 🎬 Home Theater Enthusiast
 
-You watch Netflix, Disney+, or local media daily on a display ringed with LED strips. You want cinema-quality smoothing so scene cuts don't produce jarring LED jumps, and automatic recovery — the display event handler in `pipeline_controller.py` pauses and resumes on sleep, wake, and lock with no manual restarts. _Note: DRM-protected fullscreen video still shows black with the current DXGI/MSS capture; functional WGC compositor capture is on the [roadmap](#roadmap)._
+You watch Netflix, Disney+, or local media daily on a display ringed with LED strips. You want cinema-quality smoothing so scene cuts don't produce jarring LED jumps, and automatic recovery — the display event handler in `pipeline_controller.py` pauses and resumes on sleep, wake, and lock with no manual restarts. The default **WGC** backend captures the composited desktop, so hardware-accelerated video (players/browsers) that DXGI renders black now lights up correctly. _Note: true hardware-DRM fullscreen (Netflix app, PlayReady) is excluded by Windows and stays black under any capture API — see [Troubleshooting](#video-appears-black)._
 
-→ [Quick Start](#quick-start) · [Capture Backend Selection](#capture-backend-selection) · [Smoothing Tuning](#smoothing-tuning) · [DRM Troubleshooting](#drm-protected-content-appears-black)
+→ [Quick Start](#quick-start) · [Capture Backend Selection](#capture-backend-selection) · [Smoothing Tuning](#smoothing-tuning) · [DRM Troubleshooting](#video-appears-black)
 
 ---
 
@@ -346,14 +346,14 @@ Support modules
 ### Features ✅
 
 - ✅ **Self-supervising service**: Electron spawns, health-checks, and crash-restarts the background service; it survives window close (minimise-to-tray) and can start on login.
-- ✅ **Multi-backend screen capture**: WGC (graceful fallback today), DXGI, MSS with automatic failover.
+- ✅ **Multi-backend screen capture**: WGC (default — captures hardware-overlay video), DXGI, MSS with automatic failover.
 - ✅ **Multi-device + multi-monitor**: one capture per monitor shared across per-device channels, each with its own LED count/zones.
 - ✅ **5 colour analysis modes**: average, edges, dominant, k-means, saturation-weighted (per-zone).
 - ✅ **Gradient engine**: linear / radial / ambient / screen_matched with gamma; addressable-strip output.
 - ✅ **GPU acceleration**: CuPy, OpenCV CUDA, PyTorch with automatic CPU fallback.
 - ✅ **Adaptive smoothing**: per-zone EMA, fast on scene cuts, gentle on subtle changes.
 - ✅ **Auto device discovery**: parallel subnet scan, MAC-based caching, capability probe, reconnect after IP change.
-- ✅ **Effects engine**: screen_sync, static, breathing, rainbow, candle + time-window scheduler + drop-in plugins.
+- ✅ **Effects engine**: screen_sync, static, breathing, rainbow, candle, sunrise/sunset/ocean/ambient scenes, and **audio-reactive** (system-audio loopback) + time-window scheduler + drop-in plugins.
 - ✅ **Profiles**: save/load/apply/import/export + built-in Gaming / Movie / Night.
 - ✅ **Desktop UI**: tray, first-run wizard, dashboard, diagnostics, log viewer, settings editor, device manager, live zone preview, auto-update.
 - ✅ **Packaging**: signed-installer config + electron-updater + PyInstaller service bundle + release CI.
@@ -372,15 +372,15 @@ Support modules
 
 **Capture Backend Comparison:**
 
-| Backend | Latency | DRM Bypass | Platform | Requirements |
-|---------|---------|------------|----------|--------------|
-| WGC | ★★★ | Designed for it (⚠️ not functional yet) | Windows 10 1903+ only | `pip install winsdk comtypes pywin32` |
-| DXGI (dxcam) | ★★★ | No | Windows only | `pip install dxcam` |
-| MSS | ★★ | No | Windows, macOS, Linux | Included in `requirements.txt` |
+| Backend | Latency | Overlay video | Hardware DRM | Platform | Requirements |
+|---------|---------|---------------|--------------|----------|--------------|
+| WGC | ★★★ | ✅ Yes (composited) | ❌ No (OS-excluded) | Windows 10 1903+ | `pip install windows-capture` |
+| DXGI (dxcam) | ★★★ | ⚠️ Misses some | ❌ No | Windows | `pip install dxcam` |
+| MSS | ★★ | ⚠️ Misses some | ❌ No | Windows, macOS, Linux | Included in `requirements.txt` |
 
 The capture manager tries backends in priority order (WGC → DXGI → MSS) and automatically fails over if a backend is unavailable. On macOS and Linux, only MSS is attempted.
 
-> ⚠️ **WGC status:** the Windows Graphics Capture path currently **degrades gracefully to DXGI/MSS** — it is not yet a working DRM-bypass capture (a native Direct3D 11 implementation is required; see [Roadmap](#roadmap)). DXGI delivers the same low latency for non-DRM content.
+> ✅ **WGC status:** the Windows Graphics Capture backend is **functional** (via the native `windows-capture` package) and is the default. Because it captures the DWM-composited desktop, it picks up **hardware-accelerated video overlay/MPO planes** that DXGI Desktop Duplication renders black. It does **not** defeat hardware DRM — HDCP/PlayReady-protected fullscreen video (e.g. the Netflix app) is excluded by Windows and stays black under every capture backend.
 
 **Hardware Requirements:**
 
@@ -417,11 +417,12 @@ python -m venv .venv
 # Install core dependencies
 pip install -r requirements.txt
 
-# Optional: fast Windows capture (DXGI backend)
-pip install dxcam
+# Windows Graphics Capture (WGC) — default backend, captures overlay video.
+# Installed by requirements.txt on Windows; install explicitly if needed:
+pip install windows-capture
 
-# Optional: Windows Graphics Capture API
-pip install winsdk comtypes pywin32
+# Optional: DXGI Desktop Duplication fallback backend
+pip install dxcam
 
 # Optional: GPU acceleration (pick your CUDA version)
 pip install cupy-cuda12x        # CUDA 12.x
@@ -557,13 +558,13 @@ python main.py --ip 192.168.1.50 --mode kmeans --debug
 
 #### Capture backend selection
 
-| Backend | Latency | DRM bypass | Platform |
+| Backend | Latency | Overlay video | Platform |
 |---|---|---|---|
-| WGC | ★★★ | Yes (compositor) | Windows 10 1903+ |
+| WGC | ★★★ | Yes (composited; not hardware DRM) | Windows 10 1903+ |
 | DXGI (dxcam) | ★★★ | No | Windows |
 | MSS | ★★ | No | All |
 
-Install `dxcam` and `winsdk` to unlock the two fastest backends.
+Install `windows-capture` (WGC, default) and `dxcam` (DXGI) to unlock the two fastest backends. WGC is preferred because it also captures hardware-overlay video that DXGI misses.
 
 #### Analysis resolution
 
@@ -612,14 +613,18 @@ If no GPU is detected the system silently falls back to NumPy on CPU.
 - **Windows**: install `mss` (`pip install mss`) as the guaranteed fallback.
 - **Linux/macOS**: only MSS is supported; make sure it is installed.
 
-#### DRM-protected content appears black
+#### Video appears black
 
-- **Known limitation:** functional DRM-bypass capture is not implemented yet. The
-  WGC backend currently degrades to DXGI/MSS, which cannot read protected
-  surfaces, so DRM fullscreen video (e.g. Netflix, Disney+) reads as black.
-- Workaround: play in a browser tab / windowed mode where the frame is part of
-  the normal desktop composition, or use content without hardware DRM.
-- Tracking: native Direct3D 11 WGC capture is on the [Roadmap](#roadmap).
+- First, make sure the **WGC** backend is active (`capture.method: wgc`, the
+  default). WGC captures the composited desktop and fixes most "black video"
+  cases — hardware-accelerated **overlay/MPO planes** (many media players and
+  hardware-accelerated browser video) that the DXGI backend renders black.
+- **Hardware DRM is a hard limit:** HDCP/PlayReady-protected fullscreen video
+  (e.g. the Netflix app, Edge/Chrome DRM playback) is excluded by Windows at the
+  compositor level and stays black under **every** capture backend, including
+  WGC. No documented API bypasses this — it's the purpose of the DRM.
+- Workaround: use a player/source without hardware DRM, or windowed playback
+  that the OS still composites normally.
 
 #### High CPU usage
 
@@ -641,10 +646,12 @@ If no GPU is detected the system silently falls back to NumPy on CPU.
   The discovery module will scan the subnet to find the new IP automatically.
   Use `python main.py --discover` to find the MAC.
 
-#### "ImportError: No module named 'winsdk'"
+#### WGC backend not active
 
-WGC is only available on Windows 10 1903+.  The engine automatically falls
-back to DXGI or MSS if WGC is unavailable — no action needed.
+WGC needs the `windows-capture` package (`pip install windows-capture`) and
+Windows 10 1903+. If it's missing or unavailable the engine automatically falls
+back to DXGI or MSS — no action needed, but you'll lose hardware-overlay video
+capture. Check the log for `[Capture] Active backend: …`.
 
 #### Debug mode
 
@@ -694,7 +701,7 @@ Logs include per-frame RGB values, zone analysis results, and timing data.
 ┌─────────────────────────────────────┐     ┌──────────────────────────────────────┐
 │        Python Background Service    │     │        Electron Desktop App          │
 │                                     │     │                                      │
-│  • Screen capture (DXGI/MSS; WGC →) │     │  • Spawns & supervises the service   │
+│  • Screen capture (WGC/DXGI/MSS)    │     │  • Spawns & supervises the service   │
 │  • Colour analysis + smoothing      │◄────┤  • Tray + minimise-to-tray           │
 │  • LED output (MagicHome TCP)       │     │  • Onboarding, dashboard, diagnostics│
 │  • REST API + WebSocket  :7826      │────►│  • Profiles / devices / settings     │
@@ -763,12 +770,10 @@ pnpm run dist:win      # or dist:mac / dist:linux  (each runs gen:icons + vite b
 The service lifecycle, crash/display recovery, tray, start-on-login, multi-device, profiles, diagnostics, and packaged installers that earlier drafts of this README listed as "planned" are now **implemented and verified** (see [Feature Implementation Status](#-feature-implementation-status)). The genuine remaining gaps:
 
 ### Not yet implemented
-- **Audio-reactive mode** (FR-EFF-05) — no beat/level-driven effect yet.
-- **Scene presets** (FR-EFF-06) — only `candle`; sunrise/sunset/ocean/ambient pending.
 - **Zone-layout editor** (FR-UI-06) — zone counts are editable in Settings, but there is no visual drag editor.
 - **Web dashboard** — no browser UI.
-- **Functional WGC / DRM capture** (FR-CAP-05) — WGC currently degrades to DXGI/MSS; a from-scratch native Direct3D 11 path is required for DRM-protected content (Netflix/Disney+).
 - **Auto profile switching by foreground app** (FR-PROF-07).
+- **Hardware-DRM capture** — *cannot* be implemented: HDCP/PlayReady fullscreen video is OS-excluded from all capture APIs (WGC included). Not a roadmap item.
 
 ### Caveats
 - **macOS / Linux**: installers are configured and the pipeline runs, but testing is light and capture is MSS-only (no GPU-accelerated or DRM capture).
@@ -786,14 +791,13 @@ The service lifecycle, crash/display recovery, tray, start-on-login, multi-devic
 - ✅ Electron app: tray, minimise-to-tray, onboarding wizard, dashboard, diagnostics, logs, settings, devices, profiles
 - ✅ Start-on-login (Windows Startup / macOS launchd / Linux systemd)
 - ✅ Multi-device + multi-monitor, gradient engine, built-in profiles, import/export, effect scheduler + plugins
+- ✅ Audio-reactive mode (system-audio loopback) + scene presets (sunrise / sunset / ocean / ambient)
+- ✅ Functional WGC capture (default; captures hardware-overlay video DXGI misses)
 - ✅ Packaged installers (PyInstaller + electron-builder), code-sign config, electron-updater, release CI
 - ✅ Per-user (`~/.ambilight`) config/profile persistence
 
 **Next**
-- [ ] Audio-reactive mode (system-audio beat/level detection)
-- [ ] Scene presets (sunrise / sunset / candlelight / ocean / ambient)
 - [ ] Visual zone-layout editor
-- [ ] Functional WGC / DRM-protected capture (native D3D11)
 - [ ] Web dashboard
 - [ ] Activate signed builds + auto-update (supply certs + GitHub release feed)
 - [ ] macOS / Linux hardening + long-term performance profiling
@@ -850,9 +854,12 @@ PUT /api/config
 ### Effects & modes
 ```
 PUT /api/mode
-{ "mode": "screen_sync" | "static" | "breathing" | "rainbow" | "candle",
+{ "mode": "screen_sync" | "static" | "breathing" | "rainbow" | "candle"
+        | "sunrise" | "sunset" | "ocean" | "ambient" | "audio",
   "params": { "r": 255, "g": 100, "b": 50, "speed": 1.0 } }
 ```
+- `audio` params: `{ "mode": "level" | "spectrum", "sensitivity": 1.0, "r","g","b" }`.
+- `sunrise`/`sunset` params: `{ "duration": 300 }` (seconds).
 - `GET /api/effects` — list selectable modes (built-ins + loaded plugins).
 
 ### Diagnostics, logs & auto-start

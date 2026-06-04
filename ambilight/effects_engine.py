@@ -28,6 +28,14 @@ class BaseEffect:
         """
         raise NotImplementedError
 
+    def stop(self) -> None:
+        """Release any resources (audio streams, threads). Default: no-op.
+
+        Called by :meth:`EffectsManager.set_mode` when this effect is replaced,
+        so stateful effects (e.g. audio-reactive) can shut down cleanly.
+        """
+        return None
+
 class StaticColorEffect(BaseEffect):
     def __init__(self, r: int, g: int, b: int):
         self.color = (r, g, b)
@@ -78,12 +86,129 @@ class CandleEffect(BaseEffect):
         return (int(r * self.level), int(g * self.level), int(b * self.level))
 
 
+def _lerp_color(c1: Tuple[int, int, int], c2: Tuple[int, int, int], t: float) -> Tuple[int, int, int]:
+    return tuple(int(round(c1[i] + (c2[i] - c1[i]) * t)) for i in range(3))  # type: ignore[return-value]
+
+
+def _gradient_at(keys, t: float) -> Tuple[int, int, int]:
+    """Sample a keyframe gradient ``[(pos0,(r,g,b)), ...]`` (pos in 0..1) at *t*."""
+    t = max(0.0, min(1.0, t))
+    for i in range(len(keys) - 1):
+        p0, c0 = keys[i]
+        p1, c1 = keys[i + 1]
+        if t <= p1:
+            seg = (t - p0) / (p1 - p0) if p1 > p0 else 0.0
+            return _lerp_color(c0, c1, seg)
+    return keys[-1][1]
+
+
+class _TimedScene(BaseEffect):
+    """Base for one-shot scenes that progress over *duration* then hold the end."""
+    KEYS: list = []
+
+    def __init__(self, duration: float = 300.0):
+        self.duration = max(1.0, float(duration))
+        self.start_time = time.monotonic()
+
+    def update(self) -> Tuple[int, int, int]:
+        t = (time.monotonic() - self.start_time) / self.duration
+        return _gradient_at(self.KEYS, t)
+
+
+class SunriseEffect(_TimedScene):
+    """Night → dawn → warm daylight over ``duration`` seconds (FR-EFF-06)."""
+    name = "sunrise"
+    KEYS = [
+        (0.0, (8, 2, 12)), (0.25, (60, 15, 20)), (0.5, (200, 70, 20)),
+        (0.75, (255, 150, 60)), (1.0, (255, 214, 150)),
+    ]
+
+
+class SunsetEffect(_TimedScene):
+    """Warm daylight → dusk → night over ``duration`` seconds (FR-EFF-06)."""
+    name = "sunset"
+    KEYS = [
+        (0.0, (255, 214, 150)), (0.25, (255, 140, 50)), (0.5, (200, 60, 20)),
+        (0.75, (80, 20, 30)), (1.0, (10, 3, 15)),
+    ]
+
+
+class OceanEffect(BaseEffect):
+    """Slow blue/teal swell — gentle hue and brightness waves (FR-EFF-06)."""
+    name = "ocean"
+
+    def __init__(self, speed: float = 1.0):
+        self.speed = max(0.05, speed)
+        self.start_time = time.monotonic()
+
+    def update(self) -> Tuple[int, int, int]:
+        e = (time.monotonic() - self.start_time) * 0.1 * self.speed
+        hue = 0.52 + 0.06 * math.sin(e)                 # cyan ↔ blue
+        val = 0.6 + 0.4 * (0.5 + 0.5 * math.sin(e * 0.7))
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, val)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+
+class AmbientEffect(BaseEffect):
+    """Very slow, low-saturation full-hue drift — calm pastel wash (FR-EFF-06)."""
+    name = "ambient"
+
+    def __init__(self, speed: float = 1.0):
+        self.speed = max(0.05, speed)
+        self.start_time = time.monotonic()
+
+    def update(self) -> Tuple[int, int, int]:
+        e = time.monotonic() - self.start_time
+        hue = (e * 0.01 * self.speed) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.45, 0.9)
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+
+class AudioReactiveEffect(BaseEffect):
+    """Drive brightness/colour from system audio (FR-EFF-05).
+
+    ``mode="level"`` pulses *base* colour with loudness + beat flashes;
+    ``mode="spectrum"`` maps bass→R, mid→G, treble→B. Degrades to a dim *base*
+    colour when no loopback audio backend is available.
+    """
+    name = "audio"
+
+    def __init__(self, r: int = 0, g: int = 120, b: int = 255, mode: str = "level", sensitivity: float = 1.0):
+        self.base = (int(r), int(g), int(b))
+        self.mode = mode
+        # Imported lazily so the module loads without the optional audio backend.
+        from .audio_input import AudioAnalyzer, AudioCapture
+        self.analyzer = AudioAnalyzer(sensitivity=sensitivity)
+        self.capture = AudioCapture(self.analyzer)
+        self.capture.start()
+
+    def update(self) -> Tuple[int, int, int]:
+        if not self.capture.available:
+            r, g, b = self.base                 # dim base = "on, but no audio yet"
+            return (r // 6, g // 6, b // 6)
+        a = self.analyzer
+        if self.mode == "spectrum":
+            scale = 0.3 + 0.7 * a.level
+            return (int(255 * a.bass * scale), int(255 * a.mid * scale), int(255 * a.treble * scale))
+        bright = min(1.0, a.level + 0.35 * a.pulse)
+        r, g, b = self.base
+        return (int(r * bright), int(g * bright), int(b * bright))
+
+    def stop(self) -> None:
+        self.capture.stop()
+
+
 # Built-in effect classes keyed by their `name`.
 BUILTIN_EFFECTS = {
     "static": StaticColorEffect,
     "breathing": BreathingEffect,
     "rainbow": RainbowCycleEffect,
     "candle": CandleEffect,
+    "sunrise": SunriseEffect,
+    "sunset": SunsetEffect,
+    "ocean": OceanEffect,
+    "ambient": AmbientEffect,
+    "audio": AudioReactiveEffect,
 }
 
 
@@ -166,11 +291,20 @@ class EffectsManager:
         """All selectable modes (screen_sync + built-ins + plugins)."""
         return ["screen_sync", *sorted(self._registry.keys())]
 
+    def _stop_active(self) -> None:
+        """Release the current effect's resources (e.g. audio stream) if any."""
+        if self.active_effect is not None:
+            try:
+                self.active_effect.stop()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("[Effects] stop() on %s failed: %s", self.current_mode, exc)
+
     def set_mode(self, mode: str, params: Dict[str, Any] = None) -> bool:
         """Set the active effect mode (built-in or plugin)."""
         params = params or {}
 
         if mode == "screen_sync":
+            self._stop_active()
             self.current_mode = "screen_sync"
             self.active_effect = None
             return True
@@ -183,6 +317,7 @@ class EffectsManager:
         except TypeError:
             # Plugin/effect that doesn't accept these kwargs — fall back to defaults.
             effect = cls()
+        self._stop_active()
         self.current_mode = mode
         self.active_effect = effect
         return True

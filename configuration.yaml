@@ -9,20 +9,20 @@ device:
   port: 5577
   mac: 30:3a:29:00:0c:00
   subnet: 192.168.1.
-  connect_timeout: 2.0
-  send_timeout: 1.0
-  reconnect_interval: 5.0
+  connect_timeout: 2
+  send_timeout: 1
+  reconnect_interval: 5
   discovery_timeout: 0.5
   cache_file: device_cache.json
-  led_count: 30
-  monitor_index: 0
-  name: ''
+  led_count: 3000
+  monitor_index: '2'
+  name: RGB Light Strip
   enabled: true
 devices:
 - ip: 192.168.1.29
   mac: 30:3a:29:00:0c:00
-  monitor_index: 1
-  led_count: 30
+  monitor_index: 2
+  led_count: 13000
   name: 192.168.1.29
   enabled: true
 zones:
@@ -35,7 +35,7 @@ color:
   kmeans_clusters: 3
   ignore_black_threshold: 30
   ignore_white_threshold: 225
-  saturation_weight_power: 2.0
+  saturation_weight_power: 2
   min_saturation: 0.05
 smoothing:
   enabled: true
@@ -61,4 +61,4 @@ logging:
   max_bytes: 20971520
   backup_count: 10
   show_fps: true
-  fps_interval: 5.0
+  fps_interval: 5

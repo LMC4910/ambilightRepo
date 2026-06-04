@@ -69,10 +69,20 @@ def build_service() -> None:
         "--hidden-import=fastapi",
         "--hidden-import=pydantic",
     ]
-    for opt in ("dxcam", "cupy", "winsdk", "comtypes"):
+    for opt in ("dxcam", "cupy", "winsdk", "comtypes", "soundcard", "windows_capture"):
         try:
             __import__(opt)
             hidden_imports.append(f"--hidden-import={opt}")
+        except ImportError:
+            pass
+
+    # Packages with compiled extensions / bundled data files need --collect-all
+    # so their native modules ship, not just the Python import graph.
+    collect_all: list[str] = []
+    for pkg in ("windows_capture", "soundcard"):
+        try:
+            __import__(pkg)
+            collect_all += ["--collect-all", pkg]
         except ImportError:
             pass
 
@@ -90,6 +100,7 @@ def build_service() -> None:
         # Collect the whole package so conditionally/dynamically imported
         # submodules (capture backends, api_server referenced via uvicorn) ship.
         "--collect-submodules", "ambilight",
+        *collect_all,
         *hidden_imports,
         str(ROOT / "service_entry.py"),
     ])

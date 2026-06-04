@@ -12,6 +12,18 @@ import UpdateBanner from './components/UpdateBanner'
 
 const TABS = ['dashboard', 'devices', 'profiles', 'settings', 'logs', 'diagnostics']
 
+// [label, mode, params] for the sidebar quick-mode grid.
+const MODES = [
+  ['Screen Sync', 'screen_sync', undefined],
+  ['Rainbow', 'rainbow', { speed: 1.0 }],
+  ['Candle', 'candle', undefined],
+  ['Audio', 'audio', { mode: 'level' }],
+  ['Sunrise', 'sunrise', { duration: 300 }],
+  ['Sunset', 'sunset', { duration: 300 }],
+  ['Ocean', 'ocean', undefined],
+  ['Ambient', 'ambient', undefined],
+]
+
 function MetricCard({ title, value, unit, icon: Icon }) {
   return (
     <div className="metric-card">
@@ -103,10 +115,12 @@ function App() {
 
         <div style={{ marginTop: 'auto' }}>
           <h4 style={{ color: 'var(--text-muted)', marginBottom: '0.5rem', fontSize: '0.875rem' }}>Modes</h4>
-          <nav style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <button className="button" style={{ background: 'rgba(255,255,255,0.1)', padding: '0.5rem' }} onClick={() => useStore.getState().setMode('screen_sync')}>Screen Sync</button>
-            <button className="button" style={{ background: 'rgba(255,255,255,0.1)', padding: '0.5rem' }} onClick={() => useStore.getState().setMode('rainbow', { speed: 1.0 })}>Rainbow Effect</button>
-            <button className="button" style={{ background: 'rgba(255,255,255,0.1)', padding: '0.5rem' }} onClick={() => useStore.getState().setMode('candle')}>Candle</button>
+          <nav style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
+            {MODES.map(([label, mode, params]) => (
+              <button key={label} className="button"
+                style={{ background: 'rgba(255,255,255,0.1)', padding: '0.45rem', fontSize: '0.8rem' }}
+                onClick={() => useStore.getState().setMode(mode, params)}>{label}</button>
+            ))}
           </nav>
           <button className="button" style={{ marginTop: '0.75rem', padding: '0.5rem', background: 'rgba(255,255,255,0.06)', fontSize: '0.8rem' }} onClick={() => setShowOnboarding(true)}>Setup wizard</button>
         </div>

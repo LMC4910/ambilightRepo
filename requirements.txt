@@ -40,6 +40,17 @@ pydantic>=2.6.0
 # Config hot-reload file watching (falls back to mtime polling if absent).
 watchdog>=4.0.0
 
+# System-audio loopback capture for the audio-reactive effect (FR-EFF-05).
+# Pure-Python (cffi); the effect degrades to a dim base colour if it can't open
+# a device. WASAPI loopback on Windows, PulseAudio monitor on Linux.
+soundcard>=0.4.3
+
+# Windows Graphics Capture backend (FR-CAP-05). Native (Rust) WGC implementation
+# that returns numpy frames and captures hardware-overlay/MPO video DXGI misses.
+# Windows-only; the WGC backend degrades to DXGI/MSS if it's absent.
+# NOTE: WGC does NOT bypass hardware DRM (HDCP/PlayReady stays black).
+windows-capture>=2.0.0 ; sys_platform == "win32"
+
 # ---- Development / tests ----------------------------------------------------
 #   pip install pytest    # run the suite with:  pytest
 #   (CI installs pytest + flake8 separately; see .github/workflows/build.yml)
