@@ -53,9 +53,13 @@ effects:
   schedule: []
 auto_profile:
   enabled: true
-  poll_interval: 1.0
+  poll_interval: 1
   default_profile: gaming
-  rules: []
+  rules:
+  - match: Red
+    profile: gaming
+  - match: rdr2.exe
+    profile: gaming
 gpu:
   enabled: true
   prefer: cupy
