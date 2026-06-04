@@ -5,7 +5,9 @@
 [![Build Status](https://github.com/LMC4910/ambilightRepo/actions/workflows/build.yml/badge.svg)](https://github.com/LMC4910/ambilightRepo/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](docs/02_prd.md#platform-support)
+[![Windows](https://img.shields.io/badge/Windows-Officially%20Supported-success)](docs/platform__support.md)
+[![Linux](https://img.shields.io/badge/Linux-Officially%20Supported-success)](docs/platform__support.md)
+[![macOS](https://img.shields.io/badge/macOS-Builds%20Pending%20Signing-warning)](docs/platform__support.md)
 
 > **Transform any display into an immersive viewing experience with dynamic, screen-reactive LED lighting — without proprietary hardware lock-in.**
 
