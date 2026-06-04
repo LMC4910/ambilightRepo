@@ -70,7 +70,7 @@ jobs:
 
       - name: Install UI dependencies
         working-directory: ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true
 
       - name: Lint React
         working-directory: ui
@@ -171,7 +171,7 @@ jobs:
 
       - name: Install UI dependencies
         working-directory: ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true
 
       - name: Build Vite bundle
         working-directory: ui

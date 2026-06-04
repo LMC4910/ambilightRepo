@@ -1,9 +1,6 @@
 # pnpm settings. As of pnpm v11 the "pnpm" field in package.json is no longer
-# read — build-script approvals live here. Without this, pnpm aborts CI installs
-# with ERR_PNPM_IGNORED_BUILDS for dependencies that have build scripts.
-onlyBuiltDependencies:
-  - sharp
-  - esbuild
-  - electron
-  - electron-builder
-  - electron-winstaller
+# read. Some dependencies (sharp, electron-winstaller, esbuild, electron) ship
+# build/install scripts that fetch their native binaries; pnpm v10+ blocks those
+# by default and aborts CI installs with ERR_PNPM_IGNORED_BUILDS. Allowing build
+# scripts here (and via --config on the CI install command) lets them run.
+dangerouslyAllowAllBuilds: true

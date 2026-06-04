@@ -52,7 +52,7 @@ jobs:
 
       - name: Install UI dependencies
         working-directory: ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true
 
       - name: Generate icons
         working-directory: ui
