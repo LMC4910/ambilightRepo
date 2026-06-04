@@ -19,6 +19,16 @@ contextBridge.exposeInMainWorld('api', {
     enable: () => ipcRenderer.invoke('api:autostart:enable'),
     disable: () => ipcRenderer.invoke('api:autostart:disable')
   },
+  foreground: {
+    get: () => ipcRenderer.invoke('api:foreground:get')
+  },
+  window: {
+    onVisibility: (callback) => {
+      const listener = (_, visible) => callback(visible)
+      ipcRenderer.on('window:visibility', listener)
+      return () => ipcRenderer.removeListener('window:visibility', listener)
+    }
+  },
   onboarding: {
     get: () => ipcRenderer.invoke('app:onboarding:get'),
     complete: () => ipcRenderer.invoke('app:onboarding:complete')

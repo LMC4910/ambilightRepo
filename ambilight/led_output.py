@@ -42,6 +42,7 @@ _MAGIC_PORT = 5577
 # Protocol constants
 _CMD_ON = bytes([0x71, 0x23, 0x0F])
 _CMD_OFF = bytes([0x71, 0x24, 0x0F])
+_CMD_QUERY_STATE = bytes([0x81, 0x8A, 0x8B])  # → 14-byte status; byte[2] = 0x23 on / 0x24 off
 
 
 def _build_rgb_command(r: int, g: int, b: int) -> bytes:
@@ -116,6 +117,7 @@ class MagicHomeController:
         self._last_reconnect_attempt: float = 0.0
         self._reconnect_failures: int = 0
         self._connected: bool = False
+        self._power_on: Optional[bool] = None  # tracked power state (None = unknown)
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -178,11 +180,54 @@ class MagicHomeController:
 
     def turn_on(self) -> bool:
         """Send the turn-on command.  Returns *True* on success."""
-        return self._send_raw(_CMD_ON)
+        ok = self._send_raw(_CMD_ON)
+        if ok:
+            self._power_on = True
+        return ok
 
     def turn_off(self) -> bool:
         """Send the turn-off command.  Returns *True* on success."""
-        return self._send_raw(_CMD_OFF)
+        ok = self._send_raw(_CMD_OFF)
+        if ok:
+            self._power_on = False
+            self._last_color = None  # force a resend after the next power-on
+        return ok
+
+    def query_power(self) -> Optional[bool]:
+        """Best-effort query of the controller's power state.
+
+        Sends the MagicHome status request and parses the response (byte[2]:
+        ``0x23`` = on, ``0x24`` = off). Returns the boolean state, or ``None`` if
+        the device is unreachable or doesn't answer (common on some clones).
+        Updates the tracked :attr:`power_on` on success.
+        """
+        with self._lock:
+            if not self._connected and not self._maybe_reconnect():
+                return None
+            try:
+                self._sock.sendall(_CMD_QUERY_STATE)  # type: ignore[union-attr]
+                resp = self._sock.recv(64)  # type: ignore[union-attr]
+            except (OSError, socket.timeout) as exc:
+                logger.debug("[LED] State query failed: %s", exc)
+                return None
+        if len(resp) < 3:
+            return None
+        state = resp[2] == 0x23
+        self._power_on = state
+        return state
+
+    def ensure_on(self) -> bool:
+        """Check the strip's power and send turn-on if it is off/unknown.
+
+        Used before applying a mode so colours actually show even if the strip
+        was switched off (FR: "pass the turn-on command after checking state").
+        """
+        state = self.query_power()
+        if state is None:
+            state = self._power_on
+        if state:
+            return True
+        return self.turn_on()
 
     def set_rgb(self, r: int, g: int, b: int) -> bool:
         """
@@ -219,6 +264,7 @@ class MagicHomeController:
         if success:
             self._last_color = color
             self._last_send_time = now
+            self._power_on = True  # sending colour implies the strip is on
         return success
 
     def set_pixels(self, pixels: list[tuple[int, int, int]]) -> bool:
@@ -253,6 +299,7 @@ class MagicHomeController:
         success = self._send_raw(bytes(payload))
         if success:
             self._last_send_time = now
+            self._power_on = True
         return success
 
     # ------------------------------------------------------------------
@@ -341,6 +388,11 @@ class MagicHomeController:
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def power_on(self) -> Optional[bool]:
+        """Last-known power state (True/False, or None if never determined)."""
+        return self._power_on
 
     @property
     def last_color(self) -> Optional[tuple[int, int, int]]:

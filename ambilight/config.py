@@ -56,6 +56,7 @@ class ZoneConfig:
     bottom: int = 7
     left: int = 4
     right: int = 4
+    edge_fraction: float = 0.25   # strip thickness as a fraction of frame H/W
 
 
 @dataclass
@@ -98,6 +99,15 @@ class EffectsConfig:
 
 
 @dataclass
+class AutoProfileConfig:
+    """Auto-switch the active profile based on the foreground application (FR-PROF-07)."""
+    enabled: bool = False
+    poll_interval: float = 2.0       # seconds between foreground checks
+    default_profile: str = ""        # applied when no rule matches ("" = leave as-is)
+    rules: list = field(default_factory=list)  # ordered [{match: "game.exe", profile: "gaming"}]
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"              # console / root verbosity
     file_level: str = "INFO"         # on-disk verbosity (independent of console)
@@ -120,6 +130,7 @@ class AppConfig:
     smoothing: SmoothingConfig = field(default_factory=SmoothingConfig)
     gradient: GradientConfig = field(default_factory=GradientConfig)
     effects: EffectsConfig = field(default_factory=EffectsConfig)
+    auto_profile: AutoProfileConfig = field(default_factory=AutoProfileConfig)
     gpu: GpuConfig = field(default_factory=GpuConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 

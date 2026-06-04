@@ -88,8 +88,12 @@ class ProfileManager:
 
         path = self.profiles_dir / f"{name}.json"
         try:
+            data = dataclasses.asdict(config)
+            # auto_profile rules are a meta-setting, not a lighting profile — keep
+            # them out so applying a profile never changes the switching rules.
+            data.pop("auto_profile", None)
             with path.open("w", encoding="utf-8") as f:
-                json.dump(dataclasses.asdict(config), f, indent=2)
+                json.dump(data, f, indent=2)
             logger.info(f"Saved profile '{name}'")
             return True
         except Exception as e:
@@ -136,8 +140,10 @@ class ProfileManager:
         data = self.get_profile(name)
         if data is None:
             return False
-        
+
         try:
+            # Never let a profile overwrite the auto-switch rules (FR-PROF-07).
+            data.pop("auto_profile", None)
             ConfigManager.update(data)
             logger.info(f"Applied profile '{name}'")
             return True

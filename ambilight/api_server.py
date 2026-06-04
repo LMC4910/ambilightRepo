@@ -29,6 +29,8 @@ from .profile_manager import profile_manager
 from .discovery import DeviceScanner, DeviceCache, DeviceInfo, CapabilityProbe, classify_device
 from .led_output import MagicHomeController
 from .config_watcher import ConfigWatcher
+from .auto_profile import AutoProfileSwitcher
+from .foreground import get_foreground_app
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ app.add_middleware(
 controller = PipelineController()
 monitor = None
 config_watcher = None
+auto_switcher = None
 
 # Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
 latest_metrics: Dict[str, Any] = {}
@@ -59,7 +62,7 @@ _last_metrics_persist = 0.0
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global monitor, config_watcher
+    global monitor, config_watcher, auto_switcher
 
     # 0. Security: Generate Token
     generate_and_save_token()
@@ -83,6 +86,17 @@ async def startup_event() -> None:
     # 4. Subscribe the WebSocket manager + metrics cache to METRICS_UPDATE
     await bus.subscribe("METRICS_UPDATE", push_metrics_to_ws)
     await bus.subscribe("METRICS_UPDATE", _cache_metrics)
+
+    # 5. Auto-profile switcher: apply a profile based on the foreground app
+    #    (FR-PROF-07). Refresh its rules whenever the config changes.
+    auto_switcher = AutoProfileSwitcher(ConfigManager.get())
+
+    async def _refresh_auto_profile(cfg) -> None:
+        if auto_switcher is not None:
+            auto_switcher.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_auto_profile)
+    auto_switcher.start()
 
 
 async def _cache_metrics(metrics: dict) -> None:
@@ -313,6 +327,16 @@ async def get_logs(level: str = "", limit: int = 400) -> Dict[str, Any]:
         lvl = level.upper()
         lines = [ln for ln in lines if lvl in ln]
     return {"lines": [ln.rstrip("\n") for ln in lines[-limit:]], "file": path}
+
+
+# ---------------------------------------------------------------------------
+# FOREGROUND APP (for the auto-profile rules UI)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/foreground", dependencies=[Depends(verify_token)])
+async def foreground_app() -> Dict[str, Optional[str]]:
+    app_name = await asyncio.get_running_loop().run_in_executor(None, get_foreground_app)
+    return {"app": app_name}
 
 
 # ---------------------------------------------------------------------------

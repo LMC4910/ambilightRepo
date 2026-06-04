@@ -143,6 +143,8 @@ class AmbilightPipeline:
         self._start_time: float = time.monotonic()
         self._last_zone_colors: list = []
         self._last_debug_log: float = 0.0
+        self._power: bool = True               # strip powered on?
+        self._mode: str = "screen_sync"        # reported mode ("off" when powered off)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -205,7 +207,7 @@ class AmbilightPipeline:
 
         Blocks until :meth:`stop` is called or an unrecoverable error occurs.
         """
-        if not self._captures:
+        if not self._channels:
             raise RuntimeError("call start() before run()")
 
         self._running = True
@@ -234,15 +236,54 @@ class AmbilightPipeline:
                         elif cmd.get("action") == "set_mode":
                             mode = cmd.get("mode")
                             params = cmd.get("params", {})
-                            self._effects.set_mode(mode, params)
-                            logger.info("[Pipeline] Mode switched to %s", mode)
+                            if mode == "off":
+                                # Power the strip off completely and stop any effect.
+                                self._effects.set_mode("screen_sync")
+                                for ch in self._channels:
+                                    ch.led.turn_off()
+                                self._power = False
+                                self._mode = "off"
+                                logger.info("[Pipeline] Powered off.")
+                            else:
+                                # Check each strip's power and turn it on if off,
+                                # before applying the mode (FR-POWER).
+                                for ch in self._channels:
+                                    ch.led.ensure_on()
+                                self._power = True
+                                self._effects.set_mode(mode, params)
+                                self._mode = mode
+                                logger.info("[Pipeline] Mode switched to %s", mode)
                     except queue.Empty:
                         pass
+
+                # --- Powered off: idle without driving the strip ---
+                if not self._power:
+                    self._set_capture_active(False)   # free the capture device
+                    self._last_zone_colors = []
+                    if self._metrics_queue is not None:
+                        import queue
+                        try:
+                            self._metrics_queue.put_nowait({
+                                "fps": 0.0, "latency_ms": 0.0,
+                                "uptime_s": time.monotonic() - (self._start_time or time.monotonic()),
+                                "mode": "off", "power": False,
+                                "color": [0, 0, 0], "zones": [],
+                                "devices": len(self._channels),
+                                "devices_connected": sum(1 for ch in self._channels if ch.led.is_connected),
+                            })
+                        except queue.Full:
+                            pass
+                    time.sleep(0.1)
+                    continue
 
                 # --- Effect schedule (checked at most every 5 s) ---
                 if self._scheduler is not None and (time.monotonic() - self._last_sched_check) > 5.0:
                     self._last_sched_check = time.monotonic()
                     self._apply_schedule()
+
+                # Capture is only needed while screen-syncing; release it for
+                # effect modes (self-correcting, also covers scheduler changes).
+                self._set_capture_active(self._effects.current_mode == "screen_sync")
 
                 t0 = time.monotonic()
                 r, g, b = (0, 0, 0)
@@ -304,7 +345,8 @@ class AmbilightPipeline:
                     "process_time_ms": latency_ms * 0.4,
                     "led_transmit_ms": latency_ms * 0.2,
                     "uptime_s": time.monotonic() - (self._start_time or time.monotonic()),
-                    "mode": self._effects.current_mode,
+                    "mode": self._effects.current_mode if self._power else "off",
+                    "power": self._power,
                     "color": [int(r), int(g), int(b)],
                     "zones": self._last_zone_colors,  # per-zone RGB for live preview
                     "devices": len(self._channels),
@@ -376,7 +418,7 @@ class AmbilightPipeline:
         c = self._cfg.color
         s = self._cfg.smoothing
         for ch in self._channels:
-            ch.zones = ZoneManager(z.top, z.bottom, z.left, z.right)
+            ch.zones = ZoneManager(z.top, z.bottom, z.left, z.right, edge_fraction=z.edge_fraction)
             ch.analyzer = ColorAnalyzer(
                 mode=c.mode,
                 black_threshold=c.ignore_black_threshold,
@@ -413,15 +455,9 @@ class AmbilightPipeline:
         z, c, s = cfg.zones, cfg.color, cfg.smoothing
         min_interval = 1.0 / max(cfg.capture.fps_target, 1)
 
-        # Captures per distinct monitor (shared by devices on that monitor).
+        # Captures are acquired lazily — only while actually screen-syncing
+        # (see _set_capture_active). Start empty.
         self._captures = {}
-        for mi in sorted({sp["monitor_index"] for sp in specs}):
-            cap = ScreenCaptureManager(
-                preferred_method=cfg.capture.method, monitor_index=mi,
-                fps_target=cfg.capture.fps_target,
-            )
-            cap.start()
-            self._captures[mi] = cap
 
         # One channel per device.
         self._channels = []
@@ -440,7 +476,7 @@ class AmbilightPipeline:
                 logger.warning("[Pipeline] Could not connect to %s; will retry.", ip)
             self._channels.append(_Channel(
                 name=sp["name"], monitor_index=sp["monitor_index"], led=led,
-                zones=ZoneManager(z.top, z.bottom, z.left, z.right),
+                zones=ZoneManager(z.top, z.bottom, z.left, z.right, edge_fraction=z.edge_fraction),
                 analyzer=ColorAnalyzer(
                     mode=c.mode, black_threshold=c.ignore_black_threshold,
                     white_threshold=c.ignore_white_threshold, kmeans_clusters=c.kmeans_clusters,
@@ -454,10 +490,44 @@ class AmbilightPipeline:
             ))
 
         self._topology = self._topology_sig()
-        logger.info(
-            "[Pipeline] Built %d device channel(s) across %d monitor(s).",
-            len(self._channels), len(self._captures),
-        )
+        logger.info("[Pipeline] Built %d device channel(s).", len(self._channels))
+        # Acquire capture now only if we're in screen-sync and powered.
+        self._set_capture_active(self._power and self._effects.current_mode == "screen_sync")
+
+    def _acquire_captures(self) -> None:
+        """Open one ScreenCaptureManager per distinct monitor (idempotent)."""
+        if self._captures:
+            return
+        cfg = self._cfg
+        specs = _device_specs(cfg)
+        caps: dict[int, ScreenCaptureManager] = {}
+        for mi in sorted({sp["monitor_index"] for sp in specs}):
+            cap = ScreenCaptureManager(
+                preferred_method=cfg.capture.method, monitor_index=mi, fps_target=cfg.capture.fps_target,
+            )
+            cap.start()
+            caps[mi] = cap
+        self._captures = caps
+        logger.info("[Pipeline] Capture acquired (%d monitor(s)).", len(caps))
+
+    def _release_captures(self) -> None:
+        """Stop + release all capture devices (frees the OS duplication + CPU)."""
+        if not self._captures:
+            return
+        for cap in self._captures.values():
+            try:
+                cap.stop()
+            except Exception:
+                pass
+        self._captures = {}
+        logger.info("[Pipeline] Capture released (effect/off mode).")
+
+    def _set_capture_active(self, active: bool) -> None:
+        """Acquire capture when screen-syncing, release it otherwise."""
+        if active:
+            self._acquire_captures()
+        else:
+            self._release_captures()
 
     def _teardown_io(self) -> None:
         """Turn off + release all LED controllers and capture managers."""

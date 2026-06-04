@@ -31,7 +31,8 @@ The MVP (P0), the v1.1 feature set (P1), and most of the v1.2 (P2) scope are **i
 | **Per-user config/profile persistence** under `~/.ambilight` | ✅ Done |
 | **Audio-reactive mode** (system-audio loopback) + **scene presets** (sunrise/sunset/ocean/ambient) | ✅ Done |
 | **Functional WGC capture** (catches hardware-overlay video DXGI misses; hardware DRM still excluded by Windows) | ✅ Done |
-| **Zone-layout editor, web dashboard** | 🚧 Not yet |
+| **Visual zone-layout editor** (per-edge counts + thickness, live preview, hot-reload) | ✅ Done |
+| **Web dashboard** | 🚧 Not yet |
 
 **Distribution prerequisites you must supply:** real code-signing certificates (Windows `.pfx`, Apple Developer ID) and a GitHub repo + `GH_TOKEN` before signed builds and end-to-end auto-update work. Without them, installers build **unsigned** (Windows SmartScreen warning; macOS auto-update inactive).
 
@@ -56,6 +57,7 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 | **Device discovery / reconnect** | ✅ | MAC-based discovery, capability probe, exponential reconnect backoff |
 | **Config** | ✅ | YAML + env overrides + **hot-reload** (file watcher); persisted to `~/.ambilight/configuration.yaml` |
 | **Profiles** | ✅ | save/load/apply/delete/import/export + built-ins (Gaming, Movie, Night) |
+| **Auto profile switching** | ✅ | Foreground-app → profile rules (FR-PROF-07), with a default fallback; applied live |
 | **Crash + display recovery** | ✅ | pipeline-worker watchdog (≤10 s); pause/resume on sleep/wake/lock; rebuild on monitor change |
 | **Auth / logging** | ✅ | per-session Bearer token (0600); rotating logs, split console/file levels, captured service stdio |
 
@@ -67,6 +69,7 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 | **First-run onboarding wizard** | ✅ | Monitor → device → test → profile → auto-start |
 | **Dashboard / Diagnostics / Logs** | ✅ | Live FPS/latency/uptime, zone preview, SVG charts, log viewer (with level filter) |
 | **Devices / Profiles / Settings** | ✅ | Multi-device setup with monitor assignment, profile import/export, full settings editor |
+| **Zone-layout editor** | ✅ | Visual per-edge LED counts + strip thickness, live-tinted preview, hot-reloads the running pipeline |
 | **Auto-start toggle + updates** | ✅ | "Start on login"; electron-updater banner + "Check for updates" |
 | **Auto-update** | ✅ wired | electron-updater via GitHub Releases (dormant until a release feed + repo exist) |
 
@@ -83,10 +86,8 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 
 | Feature | Ref | Notes |
 |---------|-----|-------|
-| Zone-layout editor (visual) | FR-UI-06 | Zone counts are editable via Settings, but no drag/visual editor |
 | Hardware-DRM capture | FR-CAP-05 | WGC capture **is** implemented, but HDCP/PlayReady fullscreen video is excluded by Windows — no API bypasses it |
-| Web dashboard | P2 | No browser UI yet |
-| Auto profile switching by app | FR-PROF-07 | Future |
+| Web dashboard | P2 | Intentionally not built — this is a native app, not a web portal |
 
 ### 🎯 Non-Functional Requirements Status
 
@@ -354,7 +355,7 @@ Support modules
 - ✅ **Adaptive smoothing**: per-zone EMA, fast on scene cuts, gentle on subtle changes.
 - ✅ **Auto device discovery**: parallel subnet scan, MAC-based caching, capability probe, reconnect after IP change.
 - ✅ **Effects engine**: screen_sync, static, breathing, rainbow, candle, sunrise/sunset/ocean/ambient scenes, and **audio-reactive** (system-audio loopback) + time-window scheduler + drop-in plugins.
-- ✅ **Profiles**: save/load/apply/import/export + built-in Gaming / Movie / Night.
+- ✅ **Profiles**: save/load/apply/import/export + built-in Gaming / Movie / Night, plus **auto-switch by foreground app**.
 - ✅ **Desktop UI**: tray, first-run wizard, dashboard, diagnostics, log viewer, settings editor, device manager, live zone preview, auto-update.
 - ✅ **Packaging**: signed-installer config + electron-updater + PyInstaller service bundle + release CI.
 - ✅ **Performance**: ~30 FPS, <50 ms end-to-end latency; GPU path reduces frame processing to 2–15 ms.
@@ -484,6 +485,7 @@ zones:
   bottom: integer         # LED count on bottom edge, default 7
   left: integer           # LED count on left edge, default 4
   right: integer          # LED count on right edge, default 4
+  edge_fraction: float    # edge-strip thickness as a fraction of frame H/W, default 0.25
 
 color:
   mode: enum              # average | edges | dominant | kmeans | saturation_weighted
@@ -513,6 +515,12 @@ gradient:
 effects:
   plugins_dir: string     # default resolves to ~/.ambilight/plugins
   schedule: list          # [{effect, params, window: "22:00-07:00"}]
+
+auto_profile:             # auto-switch profile by foreground app (FR-PROF-07)
+  enabled: boolean        # default false
+  poll_interval: float    # seconds between foreground checks, default 2.0
+  default_profile: string # applied when no rule matches ("" = leave unchanged)
+  rules: list             # ordered, first match wins: [{match: "game.exe", profile: "gaming"}]
 
 logging:
   level: string           # console level: DEBUG | INFO | WARNING | ERROR (default: INFO)
@@ -770,9 +778,7 @@ pnpm run dist:win      # or dist:mac / dist:linux  (each runs gen:icons + vite b
 The service lifecycle, crash/display recovery, tray, start-on-login, multi-device, profiles, diagnostics, and packaged installers that earlier drafts of this README listed as "planned" are now **implemented and verified** (see [Feature Implementation Status](#-feature-implementation-status)). The genuine remaining gaps:
 
 ### Not yet implemented
-- **Zone-layout editor** (FR-UI-06) — zone counts are editable in Settings, but there is no visual drag editor.
-- **Web dashboard** — no browser UI.
-- **Auto profile switching by foreground app** (FR-PROF-07).
+- **Web dashboard** — intentionally skipped; Ambilight Desktop is a native app, not a web portal.
 - **Hardware-DRM capture** — *cannot* be implemented: HDCP/PlayReady fullscreen video is OS-excluded from all capture APIs (WGC included). Not a roadmap item.
 
 ### Caveats
@@ -793,18 +799,17 @@ The service lifecycle, crash/display recovery, tray, start-on-login, multi-devic
 - ✅ Multi-device + multi-monitor, gradient engine, built-in profiles, import/export, effect scheduler + plugins
 - ✅ Audio-reactive mode (system-audio loopback) + scene presets (sunrise / sunset / ocean / ambient)
 - ✅ Functional WGC capture (default; captures hardware-overlay video DXGI misses)
+- ✅ Visual zone-layout editor (per-edge counts + thickness, live preview, hot-reload)
+- ✅ Auto profile switching by foreground application (FR-PROF-07)
 - ✅ Packaged installers (PyInstaller + electron-builder), code-sign config, electron-updater, release CI
 - ✅ Per-user (`~/.ambilight`) config/profile persistence
 
 **Next**
-- [ ] Visual zone-layout editor
-- [ ] Web dashboard
 - [ ] Activate signed builds + auto-update (supply certs + GitHub release feed)
 - [ ] macOS / Linux hardening + long-term performance profiling
 
 **Later**
 - [ ] Custom effect SDK / community plugin marketplace
-- [ ] Auto profile switching by foreground application
 - [ ] Cloud profile sync · mobile companion app
 
 ---
@@ -862,10 +867,13 @@ PUT /api/mode
 - `sunrise`/`sunset` params: `{ "duration": 300 }` (seconds).
 - `GET /api/effects` — list selectable modes (built-ins + loaded plugins).
 
-### Diagnostics, logs & auto-start
+### Diagnostics, logs, foreground & auto-start
 - `GET /api/diagnostics` — metrics history + system info.
 - `GET /api/logs?level=INFO` — recent log lines (optional level filter).
+- `GET /api/foreground` → `{ "app": "chrome.exe" }` — current foreground app (for auto-profile rules).
 - `GET /api/autostart` · `POST /api/autostart/enable` · `POST /api/autostart/disable`.
+
+> **Auto profile switching** (FR-PROF-07) is configured via the `auto_profile` block in `PUT /api/config` (or the Profiles tab): enable it, set per-app rules and an optional default profile, and the service applies the matching profile when the foreground app changes.
 
 ### WebSocket (Real-Time Metrics)
 

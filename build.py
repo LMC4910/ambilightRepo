@@ -52,8 +52,8 @@ def _check_tool(name: str, version_flag: str = "--version") -> None:
         sys.exit(1)
 
 
-def build_service() -> None:
-    print("\n[1/2] Building Python service with PyInstaller…")
+def build_service(gpu: bool = False) -> None:
+    print(f"\n[1/2] Building Python service with PyInstaller ({'GPU' if gpu else 'lean CPU'})…")
     _check_tool("pyinstaller")
 
     if SERVICE_DIST.exists():
@@ -63,28 +63,47 @@ def build_service() -> None:
     hidden_imports = [
         "--hidden-import=mss",
         "--hidden-import=numpy",
-        "--hidden-import=cv2",
+        "--hidden-import=PIL",
         "--hidden-import=yaml",
         "--hidden-import=uvicorn",
         "--hidden-import=fastapi",
         "--hidden-import=pydantic",
     ]
-    for opt in ("dxcam", "cupy", "winsdk", "comtypes", "soundcard", "windows_capture"):
+    # Probe availability WITHOUT importing — importing winsdk/comtypes/
+    # windows_capture here would fight over the COM apartment and crash the build.
+    import importlib.util
+    def _available(name: str) -> bool:
         try:
-            __import__(opt)
-            hidden_imports.append(f"--hidden-import={opt}")
-        except ImportError:
-            pass
+            return importlib.util.find_spec(name) is not None
+        except Exception:
+            return False
 
-    # Packages with compiled extensions / bundled data files need --collect-all
-    # so their native modules ship, not just the Python import graph.
+    # Always-bundled optional native deps (capture backends + audio + WGC).
+    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture"]
     collect_all: list[str] = []
     for pkg in ("windows_capture", "soundcard"):
-        try:
-            __import__(pkg)
+        if _available(pkg):
             collect_all += ["--collect-all", pkg]
-        except ImportError:
-            pass
+
+    # Lean build: drop the heavy GPU stack (CuPy ~118 MB + CUDA ~86 MB) and
+    # OpenCV (~99 MB; resize falls back to Pillow). Also drop obvious dead weight.
+    # GPU build (--gpu) re-includes CuPy + OpenCV for users who want it.
+    excludes = ["tkinter", "_tkinter", "lib2to3", "pydoc_data", "matplotlib", "PyQt5", "PySide2"]
+    if gpu:
+        optional += ["cupy", "cv2", "torch"]
+        for pkg in ("cupy", "cv2"):
+            if _available(pkg):
+                collect_all += ["--collect-all", pkg]
+    else:
+        excludes += ["cupy", "cupyx", "cupy_backends", "torch", "cv2", "nvidia"]
+
+    for opt in optional:
+        if _available(opt):
+            hidden_imports.append(f"--hidden-import={opt}")
+
+    exclude_args: list[str] = []
+    for mod in excludes:
+        exclude_args += ["--exclude-module", mod]
 
     sep = os.pathsep  # ; on Windows, : elsewhere
     _run([
@@ -100,6 +119,7 @@ def build_service() -> None:
         # Collect the whole package so conditionally/dynamically imported
         # submodules (capture backends, api_server referenced via uvicorn) ship.
         "--collect-submodules", "ambilight",
+        *exclude_args,
         *collect_all,
         *hidden_imports,
         str(ROOT / "service_entry.py"),
@@ -123,11 +143,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build Ambilight Desktop (cross-platform)")
     parser.add_argument("--service", action="store_true", help="Build service only")
     parser.add_argument("--ui", action="store_true", help="Build UI only")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Bundle CuPy/CUDA + OpenCV (large GPU build). Default is lean CPU-only.")
     args = parser.parse_args()
 
     build_all = not args.service and not args.ui
     if build_all or args.service:
-        build_service()
+        build_service(gpu=args.gpu)
     if build_all or args.ui:
         build_ui()
 

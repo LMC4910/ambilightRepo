@@ -371,17 +371,12 @@ class ScreenCaptureManager:
         numpy.ndarray or None
             BGR uint8 frame, or *None* if all backends are exhausted.
         """
-        # Monotonic rate limiting (spin-wait for precision)
-        target_time = self._last_grab_time + self._frame_interval
-        while True:
-            now = time.monotonic()
-            if now >= target_time:
-                break
-            remaining = target_time - now
-            if remaining > 0.002:
-                time.sleep(0.001)
-            else:
-                pass  # Spin wait for the last ~2ms to avoid oversleeping
+        # Monotonic rate limiting — sleep the whole remaining interval in one go.
+        # (A previous busy spin-wait burned a CPU core; a plain sleep is plenty
+        # accurate for a 24/7 LED tool and keeps idle CPU low.)
+        delay = (self._last_grab_time + self._frame_interval) - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
         self._last_grab_time = time.monotonic()
 
         frame = self._active.grab() if self._active else None

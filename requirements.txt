@@ -20,12 +20,10 @@
 # Screen capture fallback — cross-platform
 mss>=9.0.1
 
-# Image processing and array math
+# Image processing and array math (Pillow handles the analysis-frame resize in
+# the lean CPU build — OpenCV is only needed for the optional GPU build).
 numpy>=1.26.0
 Pillow>=10.0.0
-
-# OpenCV — CPU resize; CUDA resize if built with CUDA support
-opencv-python>=4.9.0.80
 
 # YAML configuration
 PyYAML>=6.0.1
@@ -61,7 +59,12 @@ windows-capture>=2.0.0 ; sys_platform == "win32"
 #  Linux (logind/screensaver + DRM hotplug):
 #    pip install dbus-python PyGObject pyudev
 
-# ---- Optional — GPU backends (install as needed) ----------------------------
+# ---- Optional — GPU build only (large; `python build.py --service --gpu`) ----
+#  Not needed for normal use: at the 80x45 analysis resolution the CPU path is
+#  effectively instant. Installing these makes the bundle ~300 MB larger.
+
+# OpenCV — faster CPU/CUDA resize (lean build uses Pillow instead).
+# opencv-python>=4.9.0.80
 
 # CuPy — CUDA-accelerated NumPy replacement.
 # Uncomment the line that matches your CUDA version:

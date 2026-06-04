@@ -214,8 +214,16 @@ class GpuAccelerator:
 
     @staticmethod
     def _cpu_resize(frame: np.ndarray, width: int, height: int) -> np.ndarray:
-        import cv2  # type: ignore[import-untyped]
-        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+        # Pillow keeps the lean build small (no OpenCV). Channel order is
+        # irrelevant to resizing, so BGR frames round-trip correctly. If OpenCV
+        # happens to be installed (GPU build) prefer its slightly faster resize.
+        try:
+            import cv2  # type: ignore[import-untyped]
+            return cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+        except Exception:
+            from PIL import Image
+            img = Image.fromarray(frame).resize((width, height), Image.BILINEAR)
+            return np.asarray(img)
 
     @staticmethod
     def _opencv_cuda_resize(

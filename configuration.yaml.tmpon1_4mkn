@@ -32,7 +32,7 @@ zones:
   right: 4
   edge_fraction: 0.35
 color:
-  mode: dominant
+  mode: average
   kmeans_clusters: 3
   ignore_black_threshold: 30
   ignore_white_threshold: 225
@@ -54,8 +54,10 @@ effects:
 auto_profile:
   enabled: true
   poll_interval: 1.0
-  default_profile: gaming
-  rules: []
+  default_profile: ''
+  rules:
+  - match: chrome.exe
+    profile: gaming
 gpu:
   enabled: true
   prefer: cupy
@@ -63,7 +65,7 @@ gpu:
 logging:
   level: INFO
   file_level: INFO
-  file: logs/ambilight.log
+  file: C:\Users\Lmc49\.ambilight\logs/ambilight.log
   max_bytes: 20971520
   backup_count: 10
   show_fps: true

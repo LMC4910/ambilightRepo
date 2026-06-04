@@ -1,11 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Download, RefreshCw, X } from 'lucide-react'
 
-/**
- * Thin banner that surfaces electron-updater state pushed from the main process.
- * Stays hidden while idle / in dev (no update feed). Shows download progress and,
- * once an update is downloaded, a "Restart to update" action.
- */
+/** Thin banner surfacing electron-updater state pushed from the main process. */
 export default function UpdateBanner() {
   const [st, setSt] = useState({ state: 'idle' })
   const [dismissed, setDismissed] = useState(false)
@@ -18,32 +14,25 @@ export default function UpdateBanner() {
   }, [])
 
   const { state, version, percent } = st
-  // Only the actionable / in-flight states are worth a banner.
   if (dismissed || !['available', 'downloading', 'downloaded'].includes(state)) return null
-
   const ready = state === 'downloaded'
+
   return (
-    <div className="glass-panel" style={{
-      display: 'flex', alignItems: 'center', gap: '0.75rem',
-      padding: '0.6rem 1rem', borderLeft: '3px solid var(--accent-purple, #863bff)',
-    }}>
-      <Download size={16} color="var(--accent-purple, #863bff)" />
-      <span style={{ flex: 1, fontSize: '0.9rem' }}>
-        {ready
-          ? `Update ${version ? `v${version} ` : ''}ready to install.`
-          : state === 'downloading'
-            ? `Downloading update… ${percent ?? 0}%`
-            : `Update ${version ? `v${version} ` : ''}available — downloading…`}
+    <div className="glass-panel rounded-2xl flex items-center gap-3 px-4 py-3 animate-fade-up" style={{ borderLeft: '3px solid #6366f1' }}>
+      <Download className="w-4 h-4 text-indigo-400 shrink-0" />
+      <span className="flex-1 text-sm text-slate-300">
+        {ready ? `Update ${version ? `v${version} ` : ''}ready to install.`
+          : state === 'downloading' ? `Downloading update… ${percent ?? 0}%`
+          : `Update ${version ? `v${version} ` : ''}available — downloading…`}
       </span>
       {ready && (
-        <button className="button" style={{ width: 'auto', padding: '0.4rem 0.8rem' }}
-          onClick={() => window.api.updater.install()}>
-          <RefreshCw size={14} /> Restart to update
+        <button onClick={() => window.api.updater.install()}
+          className="btn-neon-blue px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
+          <RefreshCw className="w-4 h-4" /> Restart to update
         </button>
       )}
-      <button className="button" title="Dismiss"
-        style={{ width: 'auto', padding: '0.4rem', background: 'rgba(255,255,255,0.1)' }}
-        onClick={() => setDismissed(true)}><X size={14} /></button>
+      <button onClick={() => setDismissed(true)} title="Dismiss"
+        className="p-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-400"><X className="w-4 h-4" /></button>
     </div>
   )
 }
