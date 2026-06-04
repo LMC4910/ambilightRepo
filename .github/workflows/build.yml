@@ -180,17 +180,17 @@ jobs:
       - name: Build installer (Windows)
         if: runner.os == 'Windows'
         working-directory: ui
-        run: pnpm exec electron-builder --win
+        run: pnpm exec electron-builder --win --win --publish never
 
       - name: Build installer (macOS)
         if: runner.os == 'macOS'
         working-directory: ui
-        run: pnpm exec electron-builder --mac
+        run: pnpm exec electron-builder --mac --mac --publish never
 
       - name: Build installer (Linux)
         if: runner.os == 'Linux'
         working-directory: ui
-        run: pnpm exec electron-builder --linux
+        run: pnpm exec electron-builder --linux --linux --publish never
 
       - name: Upload UI Artifact
         uses: actions/upload-artifact@v4
