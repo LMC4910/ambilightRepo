@@ -1,0 +1,13 @@
+title: "My Ambilight Setup"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Show off your setup and share your experience.
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup Description
+    validations:
+      required: true

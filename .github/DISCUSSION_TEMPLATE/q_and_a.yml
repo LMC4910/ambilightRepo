@@ -1,0 +1,13 @@
+title: "[Question]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask a question about setup, configuration, supported devices, or usage.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
