@@ -1,18 +1,37 @@
 name: Ambilight CI/CD
 
+# Runs the full standard pipeline on every push (any branch) and every PR.
+# Tag pushes are handled by release.yml, so they are excluded here.
 on:
   push:
-    branches: [main, develop]
+    branches: ['**']
   pull_request:
-    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# NOTE ON REQUIRED STATUS CHECKS
+# ------------------------------------------------------------------
+# Branch protection requires these four contexts:
+#   lint-and-test, build-service, build-ui, smoke-test
+# A GitHub Actions *matrix* job reports one check per matrix leg
+# (e.g. "build-service (ubuntu-latest)"), never a bare "build-service".
+# So the heavy work runs in `*-matrix` jobs, and a tiny aggregation
+# "gate" job named exactly after each required context succeeds only
+# when every matrix leg succeeded. That gate is the required check.
+# ------------------------------------------------------------------
 
 jobs:
-  # -----------------------------------------------------------------------
+  # =======================================================================
   # Stage 1: Lint & Unit Test
-  # -----------------------------------------------------------------------
-  lint-and-test:
+  # =======================================================================
+  lint-and-test-matrix:
+    name: lint-and-test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.11', '3.12']
     steps:
@@ -29,12 +48,17 @@ jobs:
           pip install -r requirements.txt
           pip install pytest flake8
 
-      - name: Lint Python
-        run: flake8 ambilight/ --max-line-length=120 --ignore=E501,W503
+      # Hard-fail only on real errors (syntax / undefined names); report the
+      # cosmetic style findings without failing the build (flake8's own
+      # recommended two-pass pattern).
+      - name: Lint Python (critical)
+        run: flake8 ambilight/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Lint Python (style, non-blocking)
+        run: flake8 ambilight/ --count --exit-zero --max-line-length=120 --ignore=E501,W503 --statistics
 
       - name: Run Python Tests
         run: pytest tests/ -v --tb=short
-        continue-on-error: true  # Tests may not exist yet
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -51,14 +75,25 @@ jobs:
       - name: Lint React
         working-directory: ui
         run: pnpm run lint
-        continue-on-error: true
 
-  # -----------------------------------------------------------------------
+  lint-and-test:
+    needs: lint-and-test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix legs to pass
+        run: |
+          echo "lint-and-test-matrix result: ${{ needs.lint-and-test-matrix.result }}"
+          [ "${{ needs.lint-and-test-matrix.result }}" = "success" ]
+
+  # =======================================================================
   # Stage 2: Build Service (PyInstaller) — per OS
-  # -----------------------------------------------------------------------
-  build-service:
+  # =======================================================================
+  build-service-matrix:
+    name: build-service (${{ matrix.os }})
     needs: lint-and-test
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
@@ -96,12 +131,24 @@ jobs:
           path: dist/service/ambilight-service/
           retention-days: 14
 
-  # -----------------------------------------------------------------------
+  build-service:
+    needs: build-service-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix legs to pass
+        run: |
+          echo "build-service-matrix result: ${{ needs.build-service-matrix.result }}"
+          [ "${{ needs.build-service-matrix.result }}" = "success" ]
+
+  # =======================================================================
   # Stage 3: Build UI (electron-builder bundles the service) — per OS
-  # -----------------------------------------------------------------------
-  build-ui:
-    needs: build-service
+  # =======================================================================
+  build-ui-matrix:
+    name: build-ui (${{ matrix.os }})
+    needs: build-service-matrix
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
@@ -152,12 +199,24 @@ jobs:
           path: ui/release/
           retention-days: 14
 
-  # -----------------------------------------------------------------------
+  build-ui:
+    needs: build-ui-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix legs to pass
+        run: |
+          echo "build-ui-matrix result: ${{ needs.build-ui-matrix.result }}"
+          [ "${{ needs.build-ui-matrix.result }}" = "success" ]
+
+  # =======================================================================
   # Stage 4: Service smoke test (/health) — per OS
-  # -----------------------------------------------------------------------
-  smoke-test:
-    needs: build-service
+  # =======================================================================
+  smoke-test-matrix:
+    name: smoke-test (${{ matrix.os }})
+    needs: build-service-matrix
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
@@ -190,3 +249,13 @@ jobs:
             try { Invoke-RestMethod "http://127.0.0.1:7826/health" -TimeoutSec 2 | Out-Null; Write-Host "[OK] healthy"; Stop-Process -Id $p.Id -Force; exit 0 } catch { Start-Sleep 1 }
           }
           Write-Error "[FATAL] service did not become healthy"; Stop-Process -Id $p.Id -Force; exit 1
+
+  smoke-test:
+    needs: smoke-test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix legs to pass
+        run: |
+          echo "smoke-test-matrix result: ${{ needs.smoke-test-matrix.result }}"
+          [ "${{ needs.smoke-test-matrix.result }}" = "success" ]

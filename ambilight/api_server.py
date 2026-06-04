@@ -123,7 +123,6 @@ async def _cache_metrics(metrics: dict) -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    global monitor, config_watcher
     logger.info("[API] Shutting down. Stopping pipeline.")
     controller.stop()
     if monitor:
