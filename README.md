@@ -11,112 +11,100 @@
 
 **Ambilight Desktop** is a production-grade ambient lighting platform that extends any display with dynamic, screen-reactive LED lighting. It delivers a premium Philips Ambilight experience on custom hardware — without proprietary lock-in.
 
-The platform vision: a persistent background service with a native desktop control application, distributed as a single installer. Configure once and it works silently and reliably from that point forward. The current CLI implementation provides production-ready functionality today, while the desktop application architecture is under active development.
+It ships as a **persistent Python background service** plus a **native Electron control app**, built into **single-file installers** (Windows NSIS, macOS DMG, Linux AppImage/deb) with code-signing and auto-update wired in (active once you supply certs + a release feed). The desktop app spawns, supervises, and crash-restarts the service; the service keeps your LEDs synced whether the window is open, minimised to the tray, or closed. The original `python main.py` CLI remains available for source/headless use.
 
 ## Development Status
 
-**Current Implementation Status:**
-- ✅ **CLI Mode** - Production-ready command-line interface
-- ✅ **REST API** - FastAPI server for control and configuration
-- ✅ **Desktop UI** - Electron application with React frontend
-- 🚧 **Service Architecture** - Background service foundation in progress
-- 🚧 **Auto-start & Installer** - Single-installer distribution planned
+_Last updated: 2026-06-04_
 
-The project delivers a functional desktop application today with API server and Electron UI. The next phase focuses on persistent background service architecture with auto-start capabilities and packaged installer distribution.
+The MVP (P0), the v1.1 feature set (P1), and most of the v1.2 (P2) scope are **implemented and verified on Windows**. The product installs, self-supervises, recovers, and persists configuration without manual intervention.
 
-**Roadmap**: CLI → Service Foundation → Desktop UI → Packaged Installer  
-(See [Development Roadmap](#roadmap) for complete milestone details)
+| Area | Status |
+|------|--------|
+| **Background service** (`python -m ambilight.service`) — FastAPI REST + WebSocket on `127.0.0.1:7826` | ✅ Done |
+| **Electron desktop app** — spawns/supervises the service, tray, onboarding, dashboards | ✅ Done |
+| **Service survives UI close** (minimise-to-tray) + **auto-start on login** | ✅ Done |
+| **Crash recovery** — Electron watchdog + in-service pipeline-worker watchdog (≤10 s) | ✅ Done |
+| **Display-event recovery** (sleep/wake/lock, monitor connect/disconnect) | ✅ Done |
+| **Packaged installers** (PyInstaller service + electron-builder) with **code-sign config** + **electron-updater** (GitHub Releases) | ✅ Done (unsigned until certs supplied) |
+| **Multi-device + multi-monitor**, gradient engine, profiles + built-ins, diagnostics, log viewer | ✅ Done |
+| **Per-user config/profile persistence** under `~/.ambilight` | ✅ Done |
+| **Audio-reactive mode, scene presets, zone-layout editor, web dashboard, functional WGC/DRM capture** | 🚧 Not yet |
+
+**Distribution prerequisites you must supply:** real code-signing certificates (Windows `.pfx`, Apple Developer ID) and a GitHub repo + `GH_TOKEN` before signed builds and end-to-end auto-update work. Without them, installers build **unsigned** (Windows SmartScreen warning; macOS auto-update inactive).
+
+See [Feature Implementation Status](#-feature-implementation-status) for the per-feature breakdown and [Roadmap](#roadmap) for what's next.
 
 ---
 
 ## ✨ Feature Implementation Status
 
-### 📊 Quick Summary
-- **Fully Implemented:** 18/69 documented features (26%)
-- **Partially Implemented:** 18/69 features (26%)
-- **Not Yet Implemented:** 23/69 features (33%)
-- **Unknown/Needs Testing:** 10/69 features (15%)
-
 ### ✅ What Works Today
 
-#### Backend Service (Python/FastAPI)
+#### Background service (Python / FastAPI)
 | Component | Status | Details |
 |-----------|--------|---------|
-| **REST API** | ✅ Fully Working | Port 7826, Bearer token authentication |
-| **Screen Capture** | ✅ Fully Working | DXGI/DXCam backend, 24-30 FPS achieved, <50ms latency ✓ |
-| **Color Analysis** | ✅ Fully Working | 5 modes: average, edges, dominant, kmeans, saturation_weighted |
-| **Effects Engine** | ✅ Fully Working | screen_sync, static, breathing, rainbow modes |
-| **Profile Management** | ✅ Fully Working | Save/load/apply/delete profiles via API |
-| **Device Discovery** | ✅ Fully Working | Auto-discover MagicHome devices via MAC address |
-| **Configuration Management** | ✅ Fully Working | YAML config, environment variable overrides, hot-reload event (partial) |
-| **Authentication** | ✅ Fully Working | Secure Bearer token generation and validation |
-| **Logging** | ✅ Fully Working | File-based logging with INFO/DEBUG levels |
-| **Platform Events** | ✅ Fully Working | Sleep/wake/lock detection via platform_monitor |
+| **Service entry** | ✅ | `python -m ambilight.service` (long-lived); legacy `python main.py` kept for source/headless use |
+| **REST API + WebSocket** | ✅ | `127.0.0.1:7826`, Bearer-token auth; WS metrics on `/ws` (~10 Hz) |
+| **Screen capture** | ✅ | DXGI/DXCam → MSS auto-failover, 24–30 FPS, <50 ms latency |
+| **Colour analysis** | ✅ | 5 modes: average, edges, dominant, kmeans, saturation_weighted; per-zone |
+| **Gradient engine** | ✅ | linear / radial / ambient / screen_matched + gamma; addressable `set_pixels` path |
+| **Effects engine** | ✅ | screen_sync, static, breathing, rainbow, candle + **scheduler** (time windows) + **plugin loader** (`~/.ambilight/plugins`) |
+| **Multi-device + multi-monitor** | ✅ | One capture per monitor shared across per-device channels |
+| **Device discovery / reconnect** | ✅ | MAC-based discovery, capability probe, exponential reconnect backoff |
+| **Config** | ✅ | YAML + env overrides + **hot-reload** (file watcher); persisted to `~/.ambilight/configuration.yaml` |
+| **Profiles** | ✅ | save/load/apply/delete/import/export + built-ins (Gaming, Movie, Night) |
+| **Crash + display recovery** | ✅ | pipeline-worker watchdog (≤10 s); pause/resume on sleep/wake/lock; rebuild on monitor change |
+| **Auth / logging** | ✅ | per-session Bearer token (0600); rotating logs, split console/file levels, captured service stdio |
 
-#### Frontend (Electron/React)
+#### Desktop app (Electron / React)
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Dashboard Tab** | ✅ Fully Working | Real-time FPS, latency, uptime display |
-| **Diagnostics Tab** | ✅ Fully Working | Log viewer with clear and open folder buttons |
-| **Service Status** | ✅ Fully Working | Shows online/offline status with visual indicator |
-| **Mode Switching** | ✅ Partially Working | Screen Sync & Rainbow buttons present |
-| **State Management** | ✅ Fully Working | Zustand store for app state |
+| **Service supervision** | ✅ | Spawns, health-checks, and crash-restarts the bundled service; adopts an already-running one |
+| **System tray + minimise-to-tray** | ✅ | LEDs keep running with the window closed; tray start/stop/restart + update check |
+| **First-run onboarding wizard** | ✅ | Monitor → device → test → profile → auto-start |
+| **Dashboard / Diagnostics / Logs** | ✅ | Live FPS/latency/uptime, zone preview, SVG charts, log viewer (with level filter) |
+| **Devices / Profiles / Settings** | ✅ | Multi-device setup with monitor assignment, profile import/export, full settings editor |
+| **Auto-start toggle + updates** | ✅ | "Start on login"; electron-updater banner + "Check for updates" |
+| **Auto-update** | ✅ wired | electron-updater via GitHub Releases (dormant until a release feed + repo exist) |
 
-### 🚧 Partially Implemented (Needs Attention)
+#### Packaging & distribution
+| Component | Status | Details |
+|-----------|--------|---------|
+| **Service binary** | ✅ | PyInstaller one-dir bundle (`build.py`) shipped under `resources/service` |
+| **Installers** | ✅ | NSIS (Windows), DMG (macOS), AppImage/deb (Linux) via electron-builder |
+| **Branded icons** | ✅ | Generated from the brand SVG (`scripts/gen-icons.mjs`) |
+| **Code signing / notarization** | ✅ config | Env-driven (Windows `.pfx`, Apple Developer ID) — **inert until you supply certs** |
+| **Release CI** | ✅ | Tag-triggered 3-OS build + publish workflow |
 
-| Feature ID | Feature | Status | Gap |
-|---|---|---|---|
-| FR-SVC-06 | Hot-reload configuration | Event exists | No UI to trigger reload |
-| FR-SVC-07 | Persist/restore last-known-good state | Partial | Profiles saved, but auto-recovery missing |
-| FR-CAP-02/03/04 | Monitor recovery (lock/disconnect/sleep) | Code exists | Needs user validation |
-| FR-CAP-06 | Multi-monitor support | Config present | No UI for monitor selection |
-| FR-CLR-07 | Per-zone color analysis | Module exists | Needs testing |
-| FR-DEV-04/06/08 | Device capability probe, health status, auto-reconnect | Code exists | Incomplete testing |
-| FR-GRAD-03/04 | Radial & ambient gradients | Infrastructure present | Specific types untested |
-| FR-UI-01 | Service start/stop controls | API has start/stop | Missing restart, no UI buttons |
-| FR-UI-05 | Effect selector with preview | Basic buttons only | Missing all but 2 modes in UI |
-| FR-UI-07 | Log viewer with filter | Viewer works | No log level filter |
+### 🚧 Not Yet Implemented
 
-### ❌ Not Implemented (Planned for Future)
-
-| Category | Missing Features | Priority |
-|----------|---|---|
-| **Service Management** | Auto-start on boot, continue when UI closed, auto-restart on crash, Windows Service setup | P0 |
-| **Advanced Capture** | DRM-protected WGC support validation, multi-device support, per-monitor assignment | P1-P2 |
-| **Effects** | Audio-reactive mode, scene presets (sunrise/sunset), custom effect scripting, effect scheduling | P2-P3 |
-| **Profiles** | Built-in profiles (Gaming/Movie/Productivity/Night), auto-switch by app, JSON import/export UI | P1-P2 |
-| **Desktop UI** | Device manager UI, zone editor, settings editor, system tray, first-run wizard, device diagnostics panel | P0-P2 |
-| **UI Polish** | Live color preview, device health display in UI, effect preview, minimize to tray | P1-P2 |
-
-### 📋 Testing Results (Verified June 3, 2026)
-
-| Test | Result | Details |
-|------|--------|---------|
-| Device Discovery | ✅ PASS | Found 1 device at 192.168.1.29 (MAC: 1a:2d:11:00:0c:00) |
-| Monitor Listing | ✅ PASS | Detected 3 monitors correctly |
-| API Authentication | ✅ PASS | Bearer token required, enforced |
-| `/api/status` | ✅ PASS | Returns service status, PID, pause state |
-| `/api/config` | ✅ PASS | Returns full configuration (21 fields) |
-| `/api/profiles` | ✅ PASS | Lists profiles correctly |
-| Profile Save/Load | ✅ PASS | Profiles persist to disk (gaming.json created) |
-| Mode: screen_sync | ✅ PASS | Achieved 29.3 FPS, 34.2 ms latency |
-| Mode: rainbow | ✅ PASS | Effect switched successfully, 21.7 FPS |
-| Mode: breathing | ✅ PASS | Red breathing effect applied |
-| WebSocket Metrics | ⚠️ PARTIAL | Token parameter issue on `/ws` endpoint |
-| Frontend Build | ✅ PASS | Vite build successful, dist created |
-| GPU Acceleration | ✅ PASS | CuPy backend loaded and active |
+| Feature | Ref | Notes |
+|---------|-----|-------|
+| Audio-reactive mode | FR-EFF-05 | Beat/level-driven effect — not started |
+| Scene presets (sunrise / sunset / ocean) | FR-EFF-06 | Only `candle` exists today |
+| Zone-layout editor (visual) | FR-UI-06 | Zone counts are editable via Settings, but no drag/visual editor |
+| Web dashboard | P2 | No browser UI yet |
+| Functional WGC / DRM capture | FR-CAP-05 | WGC degrades gracefully to DXGI/MSS; a from-scratch native D3D path is required |
+| Auto profile switching by app | FR-PROF-07 | Future |
 
 ### 🎯 Non-Functional Requirements Status
 
-| Requirement | Target | Current Status | Notes |
-|---|---|---|---|
-| **End-to-end Latency** | ≤50ms | **34-47ms** ✅ | Exceeds target |
-| **Capture FPS** | ≥24 FPS | **29.3 FPS** ✅ | Exceeds target in screen_sync |
-| **CPU Usage** | ≤5% | Unknown | Needs profiling |
-| **Memory Usage** | ≤150 MB | Unknown | Needs measurement |
-| **UI Startup Time** | ≤3s | Unknown | Electron startup untested |
-| **Service Uptime (MTBF)** | ≥7 days | Unknown | Long-term testing needed |
-| **Windows/macOS/Linux Support** | All platforms | Windows tested ✅, macOS/Linux untested | WGC capture Windows-specific |
+| Requirement | Target | Status |
+|---|---|---|
+| End-to-end latency | ≤ 50 ms | ✅ ~34–47 ms |
+| Capture FPS | ≥ 24 | ✅ ~29 FPS (screen_sync) |
+| Crash recovery | ≤ 10 s | ✅ watchdog verified |
+| Config/profile persistence | survive restart | ✅ `~/.ambilight` |
+| Windows support | full | ✅ verified (capture, service, installer) |
+| macOS / Linux | full | 🚧 builds configured; lightly tested, MSS-only capture |
+| CPU ≤ 5% / Memory ≤ 150 MB / MTBF ≥ 7 days | — | ⏳ not yet profiled long-term |
+
+### 📋 Verification highlights (2026-06-04)
+- `pytest` — **56/56 passing**.
+- Installed/packaged app on Windows: service spawns from `resources/service`, `/health` green, two service processes (API + pipeline worker), survives window close.
+- Installer build produces `Ambilight Desktop Setup 1.0.0.exe` + `latest.yml` (updater feed).
+- First run seeds `~/.ambilight/configuration.yaml` + built-in profiles; UI config edits persist back to that file.
 
 ---
 
@@ -133,7 +121,7 @@ Ambilight Desktop serves four distinct user types. Find yours and jump straight 
 
 ### 🎬 Home Theater Enthusiast
 
-You watch Netflix, Disney+, or local media daily on a display ringed with LED strips. You need DRM-protected content captured correctly (the WGC backend handles this) and cinema-quality smoothing so scene cuts don't produce jarring LED jumps. The display event handler in `pipeline_controller.py` automatically pauses and resumes on sleep, wake, and lock — no manual restarts.
+You watch Netflix, Disney+, or local media daily on a display ringed with LED strips. You want cinema-quality smoothing so scene cuts don't produce jarring LED jumps, and automatic recovery — the display event handler in `pipeline_controller.py` pauses and resumes on sleep, wake, and lock with no manual restarts. _Note: DRM-protected fullscreen video still shows black with the current DXGI/MSS capture; functional WGC compositor capture is on the [roadmap](#roadmap)._
 
 → [Quick Start](#quick-start) · [Capture Backend Selection](#capture-backend-selection) · [Smoothing Tuning](#smoothing-tuning) · [DRM Troubleshooting](#drm-protected-content-appears-black)
 
@@ -170,8 +158,7 @@ You connected some LED strips and want something that just works. Run `python ma
 ## Table of Contents
 
 - [Quick Start](#quick-start)
-- [Current Implementation: CLI Mode ✅](#current-implementation-cli-mode-)
-  - [Architecture](#architecture-)
+- [Architecture & Components ✅](#architecture--components-)
     - [Module Responsibilities](#module-responsibilities)
   - [Features](#features)
   - [Platform Support](#platform-support-)
@@ -193,7 +180,9 @@ You connected some LED strips and want something that just works. Run `python ma
   - [Troubleshooting](#troubleshooting)
   - [Environment Variables](#environment-variables)
   - [Colour Modes Reference](#colour-modes-reference)
-- [Planned Service Architecture 🚧](#planned-service-architecture-)
+- [Service Architecture ✅](#service-architecture-)
+  - [Building Installers](#building-installers)
+- [REST API Reference](#-rest-api-reference)
 - [Roadmap](#roadmap)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
@@ -203,59 +192,63 @@ You connected some LED strips and want something that just works. Run `python ma
 
 ## Quick Start
 
-Want to try Ambilight Desktop right now? Here's the fastest path:
+### Option A — Install the desktop app (recommended)
+
+1. Build (or download) the installer for your OS — see [Building Installers](#building-installers). On Windows you get `ui/release/Ambilight Desktop Setup <version>.exe`.
+2. Run the installer and launch **Ambilight Desktop**.
+3. The app starts the background service automatically and walks you through the first-run wizard (pick a monitor, discover your controller, test it, optionally enable start-on-login).
+
+The service then runs whenever you're logged in — minimise the window to the tray and forget about it.
+
+### Option B — Run from source (service / CLI)
 
 ```bash
-# 1. Install Python 3.12 (or 3.10+)
-# 2. Clone and navigate to the project
-cd ambilight
+# 1. Install Python 3.12 (3.10+ works) and clone the project
+cd ambilightRepo
 
-# 3. Install dependencies
+# 2. Create a venv and install dependencies
 python -m venv .venv
-.venv\Scripts\activate      # Windows
-# source .venv/bin/activate # macOS/Linux
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 
-# 4. Discover your MagicHome device
+# 3. Discover your MagicHome controller, then set its IP in configuration.yaml
 python main.py --discover
 
-# 5. Edit configuration.yaml with your device IP
+# 4a. Run the long-lived background service (REST + WebSocket on :7826)
+python -m ambilight.service
 
-# 6. Run
+# 4b. …or the original one-shot CLI pipeline
 python main.py
 ```
 
-That's it! Your LEDs should now sync with your screen content.
+To run the Electron UI against a source checkout: `cd ui && pnpm install && pnpm run dev` (it will spawn the service from your `.venv` automatically).
 
 ---
 
-## Current Implementation: CLI Mode ✅
+## Architecture & Components ✅
 
-**Status: Production-ready and actively used**
+**Status: implemented and verified on Windows.**
 
-Ambilight Desktop is **available now** with multiple operational modes:
-- ✅ Command-line interface (CLI) for direct execution
-- ✅ REST API server (FastAPI, port 7826) for programmatic control — token-secured, profile CRUD, WebSocket metrics
-- ✅ Desktop application (Electron + React UI) for graphical management
+Ambilight Desktop runs as two cooperating components that share one production-ready pipeline core:
 
-All core ambient lighting functionality is implemented and stable.
+- ✅ **Background service** — `python -m ambilight.service` (or the bundled `ambilight-service` binary). FastAPI REST + WebSocket on `127.0.0.1:7826`, token-secured, with the capture pipeline isolated in a `multiprocessing` worker under a crash watchdog.
+- ✅ **Electron desktop app** — spawns/supervises the service, system tray, onboarding, and full settings/diagnostics UI.
+- ✅ **CLI** — the original `python main.py` for one-shot/headless runs and `--discover` / `--list-monitors` utilities.
 
-### Architecture ✅
+#### Entry points
 
-**All modes share the same production-ready pipeline core.**
+**Background service (`python -m ambilight.service`)**  
+The long-lived entry the desktop app and installers launch. Loads config (from `~/.ambilight/configuration.yaml` in installed builds), starts uvicorn, the platform monitor, the config watcher, and the pipeline controller. Flags: `--config`, `--host`, `--port` (env: `AMBILIGHT_CONFIG/HOST/PORT`).
 
-The system provides three operational modes:
+**REST API + WebSocket (port 7826)**  
+Configuration, profiles, devices, diagnostics, effects, autostart, and pipeline control. WebSocket at `/ws` streams metrics at ~10 Hz. All endpoints secured with a per-session Bearer token written 0600 by `auth.py`. See the [REST API Reference](#-rest-api-reference).
 
-#### Entry Points
+**Desktop app (Electron UI)**  
+Spawns and health-checks the service, forwards WS metrics, and proxies all REST calls (the renderer never sees the token). Provides dashboard, devices, profiles, settings, logs, diagnostics, tray, onboarding, and auto-update.
 
-**CLI / API Server (`python main.py`)**  
-Launches the FastAPI server via uvicorn. Supports `--discover`, `--list-monitors`, `--ip`, `--mode`, and `--debug` flags for direct CLI use.
-
-**API Server (port 7826)**  
-FastAPI REST endpoints for configuration, profiles, pipeline control, and mode switching. WebSocket at `/ws` streams real-time metrics at 10 Hz. All endpoints secured with a per-session Bearer token generated by `auth.py`.
-
-**Desktop Application (Electron UI)**  
-React frontend connects to the API server for visual settings management, profile creation, real-time metrics display, and log viewing.
+**CLI (`python main.py`)**  
+One-shot pipeline plus `--discover`, `--list-monitors`, `--ip`, `--mode`, `--debug`.
 
 #### Core Pipeline Architecture
 
@@ -287,8 +280,9 @@ All modes share this production-ready pipeline:
 ▼                 ▼    ▼                             ▼
 ScreenCapture  ZoneManager  GpuAccelerator    EffectsManager
 Manager        zones.py     gpu.py            effects_engine.py
-capture.py                                    screen_sync | static
-                                               breathing | rainbow
+capture.py                                    screen_sync | static | breathing
+                                               rainbow | candle (+ scheduler,
+                                               plugins)
 WGC ──────┐
 DXGI ─────┤
 MSS  ─────┘
@@ -307,14 +301,18 @@ MSS  ─────┘
 
 Support modules
 ───────────────
+  service/__main__.py Long-lived service entry (uvicorn boot, config seeding)
   config.py           YAML config → typed AppConfig dataclass (atomic save)
-  discovery.py        Subnet scanner + MAC-based device cache
-  logging_setup.py    Rotating logs + FPS/latency metrics thread
+  config_watcher.py   Watch configuration.yaml → hot-reload (CONFIG_UPDATE)
+  paths.py            ~/.ambilight data dir + bundled-resource resolution
+  discovery.py        Subnet scanner + MAC-based device cache + capability probe
+  logging_setup.py    Rotating logs (split console/file levels) + metrics thread
   auth.py             Per-session Bearer token; 0600 file permissions
-  profile_manager.py  Save / load / apply named configuration profiles
+  profile_manager.py  Save / load / apply / import / export profiles + built-ins
+  autostart.py        Start-on-login (Win Startup / launchd / systemd)
   events.py           Async EventBus (subscribe/publish pattern)
-  platform_monitor.py OS sleep/wake/lock detection → EventBus
-  gradient_engine.py  Gradient colour helpers
+  platform_monitor.py OS sleep/wake/lock + monitor change → EventBus
+  gradient_engine.py  linear / radial / ambient / screen_matched + gamma
 ```
 
 #### Module responsibilities
@@ -333,23 +331,33 @@ Support modules
 | `zones.py` | Slice analysis frame into configurable edge zones |
 | `color.py` | 5 colour-analysis modes; zone combiner |
 | `smoothing.py` | Adaptive EMA per zone + single combined output |
-| `effects_engine.py` | Non-capture effects: `screen_sync`, `static`, `breathing`, `rainbow` |
-| `profile_manager.py` | Save, load, list, apply, and delete named configuration profiles |
-| `discovery.py` | Parallel TCP scan; MAC-based caching; reconnect after IP change |
-| `led_output.py` | MagicHome TCP protocol; rate limiting; duplicate suppression; reconnect |
-| `config.py` | Load/validate YAML config; expose typed `AppConfig`; atomic save via temp-then-rename |
-| `logging_setup.py` | Rotating file + coloured console logging; background FPS/latency metrics thread |
-| `gradient_engine.py` | Gradient colour computation helpers |
+| `effects_engine.py` | Non-capture effects (`static`, `breathing`, `rainbow`, `candle`) + time-window scheduler + plugin loader |
+| `profile_manager.py` | Save/load/list/apply/delete/import/export profiles; seeds built-ins; user-dir aware |
+| `discovery.py` | Parallel TCP scan; MAC-based caching; reconnect after IP change; capability probe |
+| `led_output.py` | MagicHome TCP protocol; rate limiting; duplicate suppression; reconnect; `set_pixels` |
+| `config.py` | Load/validate YAML config; typed `AppConfig`; atomic save back to the loaded path |
+| `config_watcher.py` | Watch `configuration.yaml` (watchdog or mtime polling) → emit `CONFIG_UPDATE` |
+| `paths.py` | Resolve `~/.ambilight` data dir and bundled resources (frozen vs source) |
+| `service/__main__.py` | `python -m ambilight.service` entry: config seeding, uvicorn boot |
+| `autostart.py` | Start-on-login: Windows Startup launcher / macOS launchd / Linux systemd |
+| `logging_setup.py` | Rotating file + console logging (independent levels); FPS/latency metrics thread |
+| `gradient_engine.py` | linear / radial / ambient / screen_matched gradients with gamma correction |
 
 ### Features ✅
 
-- ✅ **Multi-backend screen capture**: WGC (DRM bypass), DXGI, MSS with automatic failover chain
-- ✅ **5 color analysis modes**: average, edges, dominant, k-means, saturation-weighted
-- ✅ **GPU acceleration**: CuPy, OpenCV CUDA, PyTorch with automatic CPU fallback
-- ✅ **Adaptive smoothing**: Per-zone EMA with fast response to scene cuts and gentle transitions for subtle changes
-- ✅ **Auto device discovery**: Parallel subnet scan, MAC-based caching, automatic reconnect after IP change
-- ✅ **Effects engine**: screen_sync, static color, breathing, and rainbow cycle modes
-- ✅ **Performance**: 30 FPS target at <5% CPU (80×45 analysis resolution); <50ms end-to-end latency; GPU path reduces frame processing to 2–15ms
+- ✅ **Self-supervising service**: Electron spawns, health-checks, and crash-restarts the background service; it survives window close (minimise-to-tray) and can start on login.
+- ✅ **Multi-backend screen capture**: WGC (graceful fallback today), DXGI, MSS with automatic failover.
+- ✅ **Multi-device + multi-monitor**: one capture per monitor shared across per-device channels, each with its own LED count/zones.
+- ✅ **5 colour analysis modes**: average, edges, dominant, k-means, saturation-weighted (per-zone).
+- ✅ **Gradient engine**: linear / radial / ambient / screen_matched with gamma; addressable-strip output.
+- ✅ **GPU acceleration**: CuPy, OpenCV CUDA, PyTorch with automatic CPU fallback.
+- ✅ **Adaptive smoothing**: per-zone EMA, fast on scene cuts, gentle on subtle changes.
+- ✅ **Auto device discovery**: parallel subnet scan, MAC-based caching, capability probe, reconnect after IP change.
+- ✅ **Effects engine**: screen_sync, static, breathing, rainbow, candle + time-window scheduler + drop-in plugins.
+- ✅ **Profiles**: save/load/apply/import/export + built-in Gaming / Movie / Night.
+- ✅ **Desktop UI**: tray, first-run wizard, dashboard, diagnostics, log viewer, settings editor, device manager, live zone preview, auto-update.
+- ✅ **Packaging**: signed-installer config + electron-updater + PyInstaller service bundle + release CI.
+- ✅ **Performance**: ~30 FPS, <50 ms end-to-end latency; GPU path reduces frame processing to 2–15 ms.
 
 ### Platform Support ✅
 
@@ -366,11 +374,13 @@ Support modules
 
 | Backend | Latency | DRM Bypass | Platform | Requirements |
 |---------|---------|------------|----------|--------------|
-| WGC | ★★★ | Yes (compositor) | Windows 10 1903+ only | `pip install winsdk comtypes pywin32` |
+| WGC | ★★★ | Designed for it (⚠️ not functional yet) | Windows 10 1903+ only | `pip install winsdk comtypes pywin32` |
 | DXGI (dxcam) | ★★★ | No | Windows only | `pip install dxcam` |
 | MSS | ★★ | No | Windows, macOS, Linux | Included in `requirements.txt` |
 
 The capture manager tries backends in priority order (WGC → DXGI → MSS) and automatically fails over if a backend is unavailable. On macOS and Linux, only MSS is attempted.
+
+> ⚠️ **WGC status:** the Windows Graphics Capture path currently **degrades gracefully to DXGI/MSS** — it is not yet a working DRM-bypass capture (a native Direct3D 11 implementation is required; see [Roadmap](#roadmap)). DXGI delivers the same low latency for non-DRM content.
 
 **Hardware Requirements:**
 
@@ -494,14 +504,28 @@ gpu:
   prefer: enum            # cupy | opencv_cuda | torch | none (default: cupy)
   fallback_to_cpu: boolean  # default true
 
+gradient:
+  enabled: boolean        # use addressable gradient output when supported, default true
+  mode: enum              # linear | radial | ambient | screen_matched (default)
+  gamma: float            # gradient gamma correction, default 2.2
+
+effects:
+  plugins_dir: string     # default resolves to ~/.ambilight/plugins
+  schedule: list          # [{effect, params, window: "22:00-07:00"}]
+
 logging:
-  level: string           # DEBUG | INFO | WARNING | ERROR (default: INFO)
-  file: string            # log file path (default: logs/ambilight.log)
-  max_bytes: integer      # rotating log size, default 5242880 (5 MB)
-  backup_count: integer   # number of backup log files, default 3
+  level: string           # console level: DEBUG | INFO | WARNING | ERROR (default: INFO)
+  file_level: string      # on-disk level, independent of console (default: INFO)
+  file: string            # log file path (default: logs/ambilight.log, anchored under ~/.ambilight)
+  max_bytes: integer      # rotating log size, default 20971520 (20 MB)
+  backup_count: integer   # number of backup log files, default 10 (~220 MB ceiling)
   show_fps: boolean       # log FPS metrics, default true
   fps_interval: float     # seconds between FPS log lines, default 5.0
 ```
+
+> **Multi-device:** add a `devices:` list (each entry a device block with `ip`, `mac`, `monitor_index`, `led_count`, `name`, `enabled`) to drive several controllers at once. When omitted, the single `device:` + `capture.monitor_index` is used. The `device:` block also accepts `led_count`, `monitor_index`, `name`, and `enabled`.
+>
+> **Installed builds** read and write `~/.ambilight/configuration.yaml` (seeded from the bundled default on first run); the repo `configuration.yaml` is the default template.
 
 ---
 
@@ -590,11 +614,12 @@ If no GPU is detected the system silently falls back to NumPy on CPU.
 
 #### DRM-protected content appears black
 
-- Use the **WGC backend** (`method: wgc`) — it captures the GPU compositor
-  surface which includes decoded video on most streaming apps.
-- Install `winsdk` and `comtypes`: `pip install winsdk comtypes pywin32`.
-- Some apps (e.g. Netflix UWP) block even WGC; use browser-based streaming
-  instead.
+- **Known limitation:** functional DRM-bypass capture is not implemented yet. The
+  WGC backend currently degrades to DXGI/MSS, which cannot read protected
+  surfaces, so DRM fullscreen video (e.g. Netflix, Disney+) reads as black.
+- Workaround: play in a browser tab / windowed mode where the frame is part of
+  the normal desktop composition, or use content without hardware DRM.
+- Tracking: native Direct3D 11 WGC capture is on the [Roadmap](#roadmap).
 
 #### High CPU usage
 
@@ -659,303 +684,181 @@ Logs include per-frame RGB values, zone analysis results, and timing data.
 
 ---
 
-## Planned Service Architecture 🚧
+## Service Architecture ✅
 
-> **Status: Planned / In Active Development** — The features described in this section are architectural goals. Some foundational pieces are already in the codebase (REST API, pipeline controller, NSIS installer hooks); others are not yet implemented. Nothing here should be read as "currently working out of the box." Check the [Development Status](#development-status) section for what works today.
+> **Status: implemented and verified on Windows.** Install, configure, forget — the service runs whenever you're logged in, survives the UI window closing, and restarts itself after a crash. macOS/Linux builds are configured but lightly tested.
 
-### Vision: Install, Configure, Forget
-
-The long-term goal is a system that runs silently in the background from the moment your PC boots. You should never think about it. Plug in your LED controller, install the app, and your display perimeter is lit — automatically, every time, even after crashes, sleep/wake cycles, or display changes.
-
-This means two properties must hold:
-- **Persistent operation**: the lighting engine keeps running whether the desktop UI is open or closed.
-- **Zero-maintenance recovery**: the service restarts itself after any failure — no manual intervention required.
-
-### Dual-Component Architecture 🚧
-
-The planned architecture separates concerns cleanly into two independent components:
+### Two cooperating components
 
 ```
 ┌─────────────────────────────────────┐     ┌──────────────────────────────────────┐
-│         Python Background Service   │     │        Electron Desktop UI           │
+│        Python Background Service    │     │        Electron Desktop App          │
 │                                     │     │                                      │
-│  • Screen capture (WGC/DXGI/MSS)   │     │  • Real-time metrics dashboard       │
-│  • Colour analysis + smoothing      │◄────┤  • Profile management                │
-│  • LED output (MagicHome TCP)       │     │  • Effects & mode switching          │
-│  • REST API  :7826                  │────►│  • Device management                 │
-│  • WebSocket :7825                  │     │  • Settings editor                   │
-│  • Profile & config management      │     │  • Log viewer                        │
+│  • Screen capture (DXGI/MSS; WGC →) │     │  • Spawns & supervises the service   │
+│  • Colour analysis + smoothing      │◄────┤  • Tray + minimise-to-tray           │
+│  • LED output (MagicHome TCP)       │     │  • Onboarding, dashboard, diagnostics│
+│  • REST API + WebSocket  :7826      │────►│  • Profiles / devices / settings     │
+│  • Profile & config management      │     │  • Auto-update prompts               │
 │                                     │     │                                      │
-│  Runs always — UI is optional       │     │  Optional — close it anytime         │
+│  Runs in the user session          │     │  Minimise to tray — keeps running    │
 └─────────────────────────────────────┘     └──────────────────────────────────────┘
-         ▲
-         │  OS Service Manager
-         │  (Windows Service / launchd / systemd)
-         │
-    Starts at login, restarts on crash
+         ▲                                            │
+         │ start-on-login launcher (autostart.py)     │ spawn + health-check + restart
+         │ Win Startup / launchd / systemd            │ (Electron watchdog)
+         └────────────────────────────────────────────┘
 ```
 
-**What's implemented today:**
-- ✅ Python service core: `ambilight/api_server.py`, `ambilight/pipeline_controller.py` — FastAPI + multiprocessing pipeline, fully functional when launched manually
-- ✅ Electron UI: `ui/electron/main.js` — connects to the running API server, forwards WebSocket metrics, exposes IPC for profiles/config/mode
-- ✅ NSIS installer hooks: `ui/installer/nsis_hooks.nsh` — Windows Service registration via `sc.exe` with `sc failure` crash recovery (written, not yet distributed as a packaged build)
-- ✅ Display event recovery: `ambilight/pipeline_controller.py` — pause/resume on system sleep, wake, lock/unlock events
+**Lifecycle model (why no Windows Service):** a screen-capture process must run inside the *interactive user session* — a Session-0 SYSTEM service can't see the desktop/GPU output. So the service is **not** installed as a Windows Service. Instead:
 
-**What is NOT yet implemented:**
-- 🚧 Electron-managed service lifecycle: the Electron app does not yet spawn, health-check, or restart the Python service — it expects the service to already be running
-- 🚧 Service surviving UI closure: today, closing all Electron windows exits the app (`app.quit()`); the service does not persist independently
-- 🚧 macOS launchd / Linux systemd service registration
-- 🚧 Packaged installer distributing the Python service binary alongside the Electron app
-- 🚧 Electron-side health check loop and automatic crash recovery
+- The **Electron app spawns and supervises** the bundled service (`resources/service/ambilight-service`), health-checks `/health`, captures its stdout/stderr to `~/.ambilight/logs/service.out.log`, and **restarts it if it dies**. If a service is already healthy, it adopts it instead of double-spawning.
+- **Start-on-login** is registered per-user (no admin) by `ambilight/autostart.py` — a Startup launcher on Windows, a launchd agent on macOS, a systemd user unit on Linux — toggled from Settings / onboarding.
+- **Survives UI close** via minimise-to-tray; only an explicit Quit exits.
+- **Two-level crash recovery:** the Electron watchdog respawns the whole service process; inside the service, the capture pipeline runs in a `multiprocessing` worker that `pipeline_controller.py` restarts within ≤10 s.
+- **Display + device recovery:** pause/resume on sleep/wake/lock, rebuild capture on monitor connect/disconnect, reconnect to controllers with exponential backoff.
 
-### Service Lifecycle 🚧
+### Communication layer
 
-The planned service lifecycle, once fully implemented:
+| Channel | Endpoint | Purpose |
+|---------|----------|---------|
+| REST API (FastAPI) | `http://127.0.0.1:7826` | Config, profiles, devices, diagnostics, effects, autostart, pipeline control |
+| WebSocket | `ws://127.0.0.1:7826/ws?token=…` | Real-time metrics (~10 Hz) |
+| Auth token | `~/.ambilight/auth_token` (0600) | Bearer token shared between service and UI |
 
-```
-OS Boot / User Login
-       │
-       ▼
-  OS Service Manager  ─────────── registers at install time
-  (NSSM on Windows / launchd / systemd)
-       │ auto-starts
-       ▼
-  Python Service (ambilight.service)
-       │
-       ├── Read config from ~/.ambilight/config.yaml
-       ├── Write auth_token  → ~/.ambilight/auth_token
-       ├── Start REST API    → :7826
-       ├── Start WebSocket   → :7825
-       ├── Start display event watcher
-       ├── Start device discovery
-       └── Start capture pipeline
-              │
-              RUNNING ──────────────────────────────────────────┐
-              │                                                  │
-              ├── Screen sync loop (30 FPS)                      │
-              ├── [Sleep / wake]    → pause / resume pipeline    │
-              ├── [Display change]  → restart capture            │
-              ├── [Config change]   → hot-reload settings        │
-              ├── [API call]        → update state from UI       │
-              └── [Device drop]     → reconnect loop             │
-                                                                  │
-  ┌───────────────────────────────────────────────────────────────┘
-  │  Service crash / OOM / unhandled exception
-  │
-  └──► OS watchdog restarts service within 5–30 s
-       (Windows: `sc failure` restart policy — written in nsis_hooks.nsh)
-       (macOS:   `KeepAlive: true` in launchd plist — planned)
-       (Linux:   `Restart=on-failure` in systemd unit — planned)
+The Electron main process reads the token from disk and forwards it as a Bearer header (re-reading on 401/403 since the service regenerates it each start). The renderer never sees the token — all calls proxy through main. The API binds **loopback only** (NFR-S-01).
+
+### Single-installer distribution ✅
+
+A single installer bundles the Electron app **and** the Python service (compiled to a self-contained one-dir binary via PyInstaller, shipped under `resources/service`). No system Python required after install.
+
+- **Windows:** NSIS `.exe` (per-machine, branded). Uninstall stops the service and removes the start-on-login launcher while preserving `~/.ambilight`.
+- **macOS:** `.dmg` · **Linux:** `.AppImage` + `.deb` (configured; lightly tested).
+- **Auto-update:** wired via `electron-updater` against **GitHub Releases** (each build emits `latest.yml`). Dormant until you publish a release from a real repo with `GH_TOKEN`.
+- **Code signing / notarization:** env-driven config is in place (`WIN_CSC_LINK`/`CSC_KEY_PASSWORD`, Apple `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`). Until you supply certs, installers build **unsigned**.
+
+### Building installers
+
+```bash
+# Python 3.12 + Node 20 + pnpm required. From the repo root:
+
+# 1. Build the service binary (PyInstaller one-dir) → dist/service/ambilight-service
+pip install pyinstaller
+python build.py --service
+
+# 2. Build the app + installer for the current OS
+cd ui
+pnpm install
+pnpm run dist:win      # or dist:mac / dist:linux  (each runs gen:icons + vite build first)
+# → installer in ui/release/  (e.g. "Ambilight Desktop Setup <version>.exe" + latest.yml)
 ```
 
-Key lifecycle properties:
-- **Auto-start on login**: the service is registered as an OS-level service at install time, starting automatically before any user action.
-- **Survives UI closure**: the LED sync continues even after the Electron desktop app window is closed.
-- **Crash recovery**: if the Python process terminates unexpectedly, the OS service manager restarts it automatically — no manual restart needed.
-- **Internal subsystem recovery**: within a running service, capture process crashes are detected and restarted independently (planned; watchdog loop not yet implemented).
+`python build.py` (no flags) builds both the service and the UI for the host OS. CI mirrors this: `.github/workflows/build.yml` (PR/branch artifacts) and `.github/workflows/release.yml` (tag `v*` → signed build + publish to GitHub Releases).
 
-### Communication Layer ✅ / 🚧
-
-The communication layer between the Python service and the Electron UI is the API already implemented in the current codebase:
-
-| Channel | Port | Purpose | Status |
-|---------|------|---------|--------|
-| REST API (FastAPI) | 7826 | Configuration, profiles, pipeline control, mode switching | ✅ Implemented |
-| WebSocket | 7825 (via `/ws` on port 7826) | Real-time metrics, live log streaming | ✅ Implemented |
-| Auth token | `~/.ambilight/auth_token` | Bearer token shared between service and UI | ✅ Implemented |
-
-The Electron main process reads the auth token from disk and forwards it as a Bearer header on all REST calls. WebSocket connections pass the token as a query parameter. The renderer process never sees the token — all API calls proxy through the Electron main process.
-
-For the full API specification, see [TRD Section 7](docs/03_trd.md) and the [Electron Architecture doc](docs/05_electron_architecture.md).
-
-### Single-Installer Distribution 🚧
-
-The current setup requires you to install Python, create a virtual environment, and run from source. The planned distribution model eliminates all of that:
-
-- A single NSIS installer (`.exe` on Windows) will contain both the Python service (compiled to a self-contained binary via PyInstaller) and the Electron desktop app.
-- The installer registers the Python binary as a Windows Service automatically — no manual `python main.py` required after installation.
-- macOS (`.dmg`) and Linux (`.AppImage` / `.deb`) packaging is planned for a later milestone.
-
-The NSIS installer hooks (`ui/installer/nsis_hooks.nsh`) for Windows service registration are already written. The remaining work is integrating the PyInstaller build of the Python service into the electron-builder packaging pipeline.
-
-> For full details on the service architecture design, see [Service Architecture doc](docs/06_service_architecture.md) and [Electron Architecture doc](docs/05_electron_architecture.md).
+> Design details: [Service Architecture doc](docs/06_service_architecture.md) · [Electron Architecture doc](docs/05_electron_architecture.md).
 
 
 ---
 
 ## 🚨 Known Limitations & Future Work
 
-### Critical Gaps (Blocking Full Feature Set)
+The service lifecycle, crash/display recovery, tray, start-on-login, multi-device, profiles, diagnostics, and packaged installers that earlier drafts of this README listed as "planned" are now **implemented and verified** (see [Feature Implementation Status](#-feature-implementation-status)). The genuine remaining gaps:
 
-1. **Service Auto-Start** (❌ Not implemented)
-   - The API server must be started manually (`python main.py`)
-   - Does NOT run as a Windows Service automatically on boot
-   - Status: Requires integration with Windows SCM (partial code in nsis_hooks.nsh)
+### Not yet implemented
+- **Audio-reactive mode** (FR-EFF-05) — no beat/level-driven effect yet.
+- **Scene presets** (FR-EFF-06) — only `candle`; sunrise/sunset/ocean/ambient pending.
+- **Zone-layout editor** (FR-UI-06) — zone counts are editable in Settings, but there is no visual drag editor.
+- **Web dashboard** — no browser UI.
+- **Functional WGC / DRM capture** (FR-CAP-05) — WGC currently degrades to DXGI/MSS; a from-scratch native Direct3D 11 path is required for DRM-protected content (Netflix/Disney+).
+- **Auto profile switching by foreground app** (FR-PROF-07).
 
-2. **Background Service Persistence** (❌ Not implemented)
-   - Closing the Electron UI does NOT keep the LED sync running
-   - The service terminates when the main process exits
-   - Status: Requires service/UI process separation
+### Caveats
+- **macOS / Linux**: installers are configured and the pipeline runs, but testing is light and capture is MSS-only (no GPU-accelerated or DRM capture).
+- **Signing & auto-update**: config is in place but **inert** until you supply code-signing certs and a GitHub repo + `GH_TOKEN`. Unsigned Windows builds trigger SmartScreen; macOS auto-update needs signing + notarization.
+- **Long-term NFRs** (CPU ≤ 5%, memory ≤ 150 MB, MTBF ≥ 7 days) are not yet profiled over extended runs.
+- **Multi-device discovery**: give each managed device a real IP or MAC — an unreachable entry with no MAC can fall back to the first responsive controller on the subnet.
 
-3. **Auto-Restart on Crash** (❌ Not implemented)
-   - If the Python process crashes, it stays crashed
-   - No watchdog loop or OS-level crash recovery is active
-   - Status: Windows watchdog code written, not enabled
+---
 
-4. **Advanced UI Components** (❌ Mostly missing)
-   - No device manager UI (show connected devices, health status)
-   - No settings editor (must edit YAML manually)
-   - No zone/layout editor for LED strip configuration
-   - No effect preview or audio-reactive effects
-   - Status: Basic Dashboard and Diagnostics tabs work, everything else planned
+## Roadmap
 
-5. **Packaged Installer** (❌ Not distributed)
-   - Single-installer distribution not ready for end-users
-   - Requires running from source with Python installed
-   - Status: NSIS hooks written; PyInstaller integration pending
+**Delivered**
+- ✅ Background service + REST/WebSocket API, loopback-only, token-secured
+- ✅ Display-event + two-level crash recovery (Electron watchdog + in-service pipeline watchdog)
+- ✅ Electron app: tray, minimise-to-tray, onboarding wizard, dashboard, diagnostics, logs, settings, devices, profiles
+- ✅ Start-on-login (Windows Startup / macOS launchd / Linux systemd)
+- ✅ Multi-device + multi-monitor, gradient engine, built-in profiles, import/export, effect scheduler + plugins
+- ✅ Packaged installers (PyInstaller + electron-builder), code-sign config, electron-updater, release CI
+- ✅ Per-user (`~/.ambilight`) config/profile persistence
 
-6. **macOS & Linux Support** (❌ Untested)
-   - Code is cross-platform, but only tested on Windows
-   - WGC capture is Windows-specific (DXCam fallback on other platforms)
-   - Service registration (launchd/systemd) not implemented
-   - Status: Linux/macOS support planned post-MVP
+**Next**
+- [ ] Audio-reactive mode (system-audio beat/level detection)
+- [ ] Scene presets (sunrise / sunset / candlelight / ocean / ambient)
+- [ ] Visual zone-layout editor
+- [ ] Functional WGC / DRM-protected capture (native D3D11)
+- [ ] Web dashboard
+- [ ] Activate signed builds + auto-update (supply certs + GitHub release feed)
+- [ ] macOS / Linux hardening + long-term performance profiling
 
-### Partial Implementations (Work In Progress)
-
-| Component | Status | Details |
-|-----------|--------|---------|
-| **WebSocket Metrics** | ⚠️ Partial | Token auth issue on `/ws` endpoint needs debugging |
-| **Multi-Monitor Config** | ⚠️ Partial | Config supports `monitor_index`, but no UI to select which monitor |
-| **Device Health Display** | ⚠️ Partial | Device status tracked internally, not exposed in UI |
-| **Effect Library** | ⚠️ Partial | Only 4 modes in UI; audio-reactive & presets not implemented |
-| **Profile Management** | ⚠️ Partial | Save/load/apply work via API; no built-in profiles or auto-switch |
-| **Log Level Filter** | ⚠️ Partial | Logs display; no filter by level in UI |
-| **Hot-Reload Config** | ⚠️ Partial | Event system ready, no UI to trigger reload |
-
-### Roadmap - Next Steps
-
-**Phase 2 (Planned):** Service Architecture & Windows Service Integration
-- [ ] Enable Windows Service auto-start on boot
-- [ ] Separate service process from Electron UI process
-- [ ] Add service health check and auto-restart watchdog
-- [ ] Implement process crash recovery loop
-- **Estimated:** 2-3 weeks
-
-**Phase 3 (Planned):** Advanced UI Components
-- [ ] Device manager panel (list, health, capability probe)
-- [ ] Settings editor (visual config builder, no manual YAML)
-- [ ] Zone editor for LED strip layout configuration
-- [ ] Effect library browser with live preview
-- [ ] Service start/stop/restart buttons in UI
-- **Estimated:** 3-4 weeks
-
-**Phase 4 (Planned):** Audio & Advanced Effects
-- [ ] Audio-reactive beat detection via microphone/system audio
-- [ ] Scene presets (Sunrise, Sunset, Candlelight, Ocean, Ambient)
-- [ ] Custom effect scripting API (Python-based, safe sandbox)
-- [ ] Effect scheduling (cron-like: "night mode at 22:00")
-- **Estimated:** 2-3 weeks
-
-**Phase 5 (Planned):** Packaged Installer & Distribution
-- [ ] Integrate PyInstaller for Python service binary
-- [ ] Single-click NSIS installer for Windows
-- [ ] macOS `.dmg` and Linux `.AppImage` / `.deb` packaging
-- [ ] Auto-update mechanism with rollback
-- **Estimated:** 1-2 weeks
-
-**Phase 6+ (Post-MVP):** Platform Expansion & Enhancements
-- [ ] macOS launchd / Linux systemd service registration
-- [ ] Multi-device support (multiple LED controllers per system)
-- [ ] HTTP2/gRPC for faster API communication
-- [ ] Plug-in/extension system for community effects
-- [ ] Cloud sync of profiles and settings
-- [ ] Mobile companion app for remote control
+**Later**
+- [ ] Custom effect SDK / community plugin marketplace
+- [ ] Auto profile switching by foreground application
+- [ ] Cloud profile sync · mobile companion app
 
 ---
 
 ## 📡 REST API Reference
 
-All endpoints require `Authorization: Bearer <token>` header. Token is generated on first startup and written to `auth_token` file.
+All endpoints require an `Authorization: Bearer <token>` header **except** `GET /health`. The token is regenerated on each service start and written 0600 to `~/.ambilight/auth_token`. The API binds to `127.0.0.1` only (NFR-S-01).
 
-### Health & Status
+### Health & status
+- `GET /health` — unauthenticated liveness/readiness (used by the Electron supervisor).
+- `GET /api/status` — service + pipeline status.
+- `POST /api/service/restart` — restart the pipeline in-process.
 
-```
-GET /api/status
-```
-Returns service status and pipeline PID.
 ```json
-{
-  "status": "running" | "stopped",
-  "paused": false,
-  "pid": 12345
-}
+// GET /health
+{ "status": "ok", "pipeline_alive": true, "paused": false, "restarts": 0,
+  "fps": 29.3, "latency_ms": 34.2, "uptime_s": 3600.5 }
 ```
+
+### Pipeline control
+- `POST /api/pipeline/start` · `POST /api/pipeline/stop`
+- `POST /api/pipeline/pause` · `POST /api/pipeline/resume`
 
 ### Configuration
-
-```
-GET /api/config
-```
-Returns current configuration (all 21 fields).
+- `GET /api/config` — full current configuration.
+- `PUT /api/config` — delta update (unchanged fields preserved); persisted to the loaded config file and broadcast as a `CONFIG_UPDATE` hot-reload.
 
 ```
 PUT /api/config
-Content-Type: application/json
-
 { "color": { "mode": "kmeans" }, "capture": { "fps_target": 60 } }
 ```
-Updates configuration fields (delta update; unchanged fields are preserved).
 
 ### Profiles
+- `GET /api/profiles` → `{ "profiles": ["gaming", "movie", "night"] }`
+- `GET /api/profiles/{name}` — retrieve a profile.
+- `POST /api/profiles/{name}` — save current config as a named profile.
+- `DELETE /api/profiles/{name}` — delete a profile.
+- `POST /api/profiles/{name}/apply` — load and apply a profile.
+- `POST /api/profiles/{name}/import` — import a profile from a JSON body.
 
-```
-GET /api/profiles
-```
-Returns list of saved profile names.
-```json
-{ "profiles": ["gaming", "movie", "productivity"] }
-```
+### Devices
+- `GET /api/devices` — known/cached devices.
+- `POST /api/devices/scan` — scan the subnet for controllers.
+- `POST /api/devices/test` — flash a device: `{ "ip": "...", "port": 5577 }`.
+- `GET /api/devices/{ip}/capabilities` — probe single-RGB vs addressable/zones.
 
-```
-POST /api/profiles/{name}
-```
-Save current configuration as a named profile.
-
-```
-GET /api/profiles/{name}
-```
-Retrieve a specific profile's configuration.
-
-```
-DELETE /api/profiles/{name}
-```
-Delete a profile.
-
-```
-POST /api/profiles/{name}/apply
-```
-Load and apply a profile.
-
-### Pipeline Control
-
-```
-POST /api/pipeline/start
-POST /api/pipeline/stop
-```
-Start or stop the capture pipeline.
-
-### Effects & Modes
-
+### Effects & modes
 ```
 PUT /api/mode
-Content-Type: application/json
-
-{
-  "mode": "screen_sync" | "static" | "breathing" | "rainbow",
-  "params": { "r": 255, "g": 100, "b": 50, "speed": 1.0 }
-}
+{ "mode": "screen_sync" | "static" | "breathing" | "rainbow" | "candle",
+  "params": { "r": 255, "g": 100, "b": 50, "speed": 1.0 } }
 ```
-Switch to an effect mode.
+- `GET /api/effects` — list selectable modes (built-ins + loaded plugins).
+
+### Diagnostics, logs & auto-start
+- `GET /api/diagnostics` — metrics history + system info.
+- `GET /api/logs?level=INFO` — recent log lines (optional level filter).
+- `GET /api/autostart` · `POST /api/autostart/enable` · `POST /api/autostart/disable`.
 
 ### WebSocket (Real-Time Metrics)
 
