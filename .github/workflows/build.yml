@@ -95,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest,  ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -150,7 +150,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -182,10 +182,10 @@ jobs:
         working-directory: ui
         run: pnpm exec electron-builder --win --win --publish never
 
-      - name: Build installer (macOS)
-        if: runner.os == 'macOS'
-        working-directory: ui
-        run: pnpm exec electron-builder --mac --mac --publish never
+      # - name: Build installer (macOS)
+      #   if: runner.os == 'macOS'
+      #   working-directory: ui
+      #   run: pnpm exec electron-builder --mac --mac --publish never
 
       - name: Build installer (Linux)
         if: runner.os == 'Linux'
@@ -218,7 +218,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Download Service Artifact
