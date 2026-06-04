@@ -42,8 +42,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "ambilight-desktop",
-      "repo": "ambilight"
+      "owner": "LMC4910",
+      "repo": "ambilightRepo"
     },
     "win": {
       "target": "nsis",
