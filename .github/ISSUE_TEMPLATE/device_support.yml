@@ -1,0 +1,36 @@
+name: Device Support Request
+description: Request support for a lighting device
+title: "[Device]: "
+labels:
+  - device-support
+
+body:
+  - type: input
+    id: brand
+    attributes:
+      label: Brand
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection Type
+      options:
+        - WiFi
+        - USB
+        - Bluetooth
+        - Other
+
+  - type: textarea
+    id: docs
+    attributes:
+      label: Documentation Links
+
+  - type: textarea
+    id: reason
+    attributes:
+      label: Why Is Support Needed?
