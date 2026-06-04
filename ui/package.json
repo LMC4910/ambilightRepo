@@ -79,6 +79,15 @@
     }
   },
   "comment": "Only runtime requires of electron/main.cjs belong in dependencies; React/lucide/zustand/fontsource are bundled into dist by Vite and live in devDependencies so electron-builder doesn't pack them.",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sharp",
+      "esbuild",
+      "electron",
+      "electron-builder",
+      "electron-winstaller"
+    ]
+  },
   "dependencies": {
     "electron-updater": "^6.6.2",
     "ws": "^8.21.0"
