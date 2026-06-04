@@ -6,6 +6,7 @@ import {
 import Devices from './pages/Devices'
 import Settings from './pages/Settings'
 import Profiles from './pages/Profiles'
+import Effects from './pages/Effects'
 import Logs from './pages/Logs'
 import Diagnostics from './pages/Diagnostics'
 import Onboarding from './pages/Onboarding'
@@ -13,7 +14,7 @@ import ZonePreview from './components/ZonePreview'
 import ZoneEditor from './components/ZoneEditor'
 import UpdateBanner from './components/UpdateBanner'
 
-const TABS = ['dashboard', 'devices', 'zones', 'profiles', 'settings', 'logs', 'diagnostics']
+const TABS = ['dashboard', 'devices', 'zones', 'profiles', 'effects', 'settings', 'logs', 'diagnostics']
 
 // [label, mode, params]
 const MODES = [
@@ -49,7 +50,7 @@ function MetricCard({ title, value, unit, icon: Icon, delay }) {
 }
 
 function App() {
-  const { status, metrics, setStatus, setMetrics, fetchSettings } = useStore()
+  const { status, metrics, settings, setStatus, setMetrics, fetchSettings } = useStore()
   const [activeTab, setActiveTab] = useState('dashboard')
   const [showOnboarding, setShowOnboarding] = useState(false)
 
@@ -159,7 +160,7 @@ function App() {
           <h2 className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 mb-4">Modes</h2>
           <div className="grid grid-cols-2 gap-2 mb-4">
             {MODES.map(([label, mode, params]) => (
-              <button key={label} onClick={() => setMode(mode, params)}
+              <button key={label} onClick={() => setMode(mode, { ...(params || {}), ...(settings?.effects?.params?.[mode] || {}) })}
                 className={`text-[11px] py-2 px-1 rounded-lg border transition-colors ${
                   metrics.mode === mode ? 'nav-item-active border-transparent font-semibold'
                                         : 'bg-white/5 hover:bg-white/10 border-white/5 text-slate-300'}`}>
@@ -241,6 +242,7 @@ function App() {
           {activeTab === 'devices' && <Devices />}
           {activeTab === 'zones' && <ZoneEditor />}
           {activeTab === 'profiles' && <Profiles />}
+          {activeTab === 'effects' && <Effects />}
           {activeTab === 'settings' && <Settings />}
           {activeTab === 'logs' && <Logs />}
           {activeTab === 'diagnostics' && <Diagnostics />}

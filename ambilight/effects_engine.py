@@ -198,6 +198,28 @@ class AudioReactiveEffect(BaseEffect):
         self.capture.stop()
 
 
+class CustomSequenceEffect(BaseEffect):
+    """Cycle through a user-defined ordered colour list with smooth interpolation
+    at a configurable speed (FR-EFF-07: "what colours in what order")."""
+    name = "custom"
+
+    def __init__(self, colors=None, speed: float = 1.0):
+        seq = colors or [[255, 0, 0], [0, 255, 0], [0, 0, 255]]
+        self.colors = [tuple(int(x) for x in c[:3]) for c in seq] or [(0, 0, 0)]
+        self.speed = max(0.05, float(speed))
+        self.start_time = time.monotonic()
+
+    def update(self) -> Tuple[int, int, int]:
+        n = len(self.colors)
+        if n == 1:
+            return self.colors[0]
+        pos = ((time.monotonic() - self.start_time) * 0.2 * self.speed) % n
+        i = int(pos)
+        frac = pos - i
+        c0, c1 = self.colors[i % n], self.colors[(i + 1) % n]
+        return tuple(int(round(c0[k] + (c1[k] - c0[k]) * frac)) for k in range(3))  # type: ignore[return-value]
+
+
 # Built-in effect classes keyed by their `name`.
 BUILTIN_EFFECTS = {
     "static": StaticColorEffect,
@@ -209,6 +231,7 @@ BUILTIN_EFFECTS = {
     "ocean": OceanEffect,
     "ambient": AmbientEffect,
     "audio": AudioReactiveEffect,
+    "custom": CustomSequenceEffect,
 }
 
 

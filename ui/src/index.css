@@ -52,6 +52,20 @@
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
+/* Dropdowns: the native option popup ignores translucent backgrounds and
+   rendered white-on-white until hovered. Force a solid dark popup with light
+   text so options are readable at rest. */
+select.custom-input {
+  color: #e2e8f0;
+  -webkit-appearance: none;
+  appearance: none;
+}
+select.custom-input option,
+select.custom-input optgroup {
+  background-color: #171b30;
+  color: #e2e8f0;
+}
+
 /* Buttons */
 .btn-neon-blue {
   background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);

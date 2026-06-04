@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { RefreshCw, Lightbulb, Plus, Wifi, Trash2, Check } from 'lucide-react'
+import Toggle from '../components/Toggle'
 
 function SectionHeader({ children }) {
   return (
@@ -24,7 +25,10 @@ export default function Devices() {
   }, [])
 
   const managed = settings?.devices || []
-  const monitorOptions = monitors.length ? monitors.map((m) => m.index) : [0, 1, 2, 3]
+  const monitorChoices = monitors.length
+    ? monitors
+    : [0, 1, 2, 3].map((i) => ({ index: i, name: `Display ${i + 1}`, width: 0, height: 0 }))
+  const monitorLabel = (m) => `${m.index} — ${m.name}${m.width ? ` (${m.width}×${m.height})` : ''}${m.primary ? ' • primary' : ''}`
   const saveManaged = (list) => updateSettings({ devices: list })
   const addManaged = (d) => {
     if (managed.some((m) => m.ip === d.ip)) return
@@ -121,15 +125,20 @@ export default function Devices() {
                   </div>
 
                   <div className="w-full max-w-sm space-y-4 bg-white/5 p-6 rounded-2xl border border-white/5">
-                    <label className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Name</span>
+                      <input type="text" className="custom-input rounded-xl text-sm w-48 py-2 px-3" placeholder={m.ip}
+                        value={m.name || ''} onChange={(e) => updateManaged(i, 'name', e.target.value)} />
+                    </div>
+                    <div className="flex items-center justify-between">
                       <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Enabled</span>
-                      <input type="checkbox" checked={m.enabled !== false} onChange={(e) => updateManaged(i, 'enabled', e.target.checked)} className="rounded text-indigo-500" />
-                    </label>
+                      <Toggle checked={m.enabled !== false} onChange={(v) => updateManaged(i, 'enabled', v)} />
+                    </div>
                     <div className="flex items-center justify-between">
                       <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Target Monitor</span>
-                      <select className="custom-input rounded-xl text-sm font-bold w-24 py-2 px-3" value={m.monitor_index ?? 0}
+                      <select className="custom-input rounded-xl text-sm font-semibold w-56 py-2 px-3" value={m.monitor_index ?? 0}
                         onChange={(e) => updateManaged(i, 'monitor_index', Number(e.target.value))}>
-                        {monitorOptions.map((mi) => <option key={mi} value={mi}>{mi}</option>)}
+                        {monitorChoices.map((mc) => <option key={mc.index} value={mc.index}>{monitorLabel(mc)}</option>)}
                       </select>
                     </div>
                     <div className="flex items-center justify-between">

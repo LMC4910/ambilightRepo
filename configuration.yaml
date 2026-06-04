@@ -20,10 +20,10 @@ device:
   enabled: true
 devices:
 - ip: 192.168.1.29
-  mac: 30:3a:29:00:0c:00
+  mac: 0b:0d:23:00:0c:00
   monitor_index: 2
   led_count: 30
-  name: 192.168.1.29
+  name: Rgb light
   enabled: true
 zones:
   top: 7
@@ -51,8 +51,42 @@ gradient:
 effects:
   plugins_dir: ''
   schedule: []
+  params:
+    static:
+      r: 255
+      g: 60
+      b: 0
+    breathing:
+      r: 0
+      g: 255
+      b: 42
+      speed: 1
+    rainbow:
+      speed: 1
+    candle:
+      speed: 0.8
+    ocean:
+      speed: 1
+    ambient:
+      speed: 1
+    sunrise:
+      duration: 300
+    sunset:
+      duration: 300
+    custom:
+      colors:
+      - - 255
+        - 0
+        - 0
+      - - 0
+        - 255
+        - 0
+      - - 0
+        - 0
+        - 255
+      speed: 1
 auto_profile:
-  enabled: true
+  enabled: false
   poll_interval: 1
   default_profile: gaming
   rules:

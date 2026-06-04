@@ -5,6 +5,7 @@ import datetime
 from ambilight.effects_engine import (
     EffectsManager, EffectScheduler, CandleEffect,
     SunriseEffect, SunsetEffect, OceanEffect, AmbientEffect,
+    CustomSequenceEffect,
     _parse_window, _in_window, _gradient_at,
 )
 
@@ -77,6 +78,31 @@ def test_sunrise_progresses_dark_to_warm():
     s.start_time -= 100.0                                 # force t>1 → end (warm)
     r1, g1, b1 = s.update()
     assert (r1 + g1 + b1) > (r0 + g0 + b0)               # brighter at the end
+
+
+def test_custom_sequence_registered_and_applies():
+    m = EffectsManager()
+    assert "custom" in m.list_effects()
+    assert m.set_mode("custom", {"colors": [[255, 0, 0], [0, 0, 255]], "speed": 1.5}) is True
+    color = m.update()
+    assert color is not None and len(color) == 3
+    assert all(0 <= c <= 255 for c in color)
+
+
+def test_custom_sequence_single_colour_is_static():
+    eff = CustomSequenceEffect(colors=[[10, 20, 30]])
+    assert eff.update() == (10, 20, 30)
+
+
+def test_custom_sequence_cycles_through_colours():
+    eff = CustomSequenceEffect(colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]], speed=1.0)
+    seen = set()
+    for _ in range(200):
+        eff.start_time -= 0.5   # advance time without sleeping
+        r, g, b = eff.update()
+        assert 0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255
+        seen.add((r > 80, g > 80, b > 80))
+    assert len(seen) > 1        # output actually changes over time
 
 
 def test_audio_mode_degrades_without_backend():

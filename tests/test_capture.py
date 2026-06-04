@@ -69,7 +69,7 @@ class _FakeBackend(CaptureBackend):
         self._can_open = can_open
         self.closed = False
 
-    def open(self, monitor_index):
+    def open(self, monitor_index, target_size=None, fps_target=30):
         return self._can_open
 
     def grab(self):

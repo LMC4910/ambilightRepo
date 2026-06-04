@@ -38,6 +38,7 @@ class ProfileManager:
             profiles_dir = _default_profiles_dir()
         self.profiles_dir = Path(profiles_dir)
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        self.active_profile: Optional[str] = None  # last successfully applied profile
         self._seed_builtins()
 
     def _seed_builtins(self) -> None:
@@ -145,6 +146,7 @@ class ProfileManager:
             # Never let a profile overwrite the auto-switch rules (FR-PROF-07).
             data.pop("auto_profile", None)
             ConfigManager.update(data)
+            self.active_profile = name
             logger.info(f"Applied profile '{name}'")
             return True
         except Exception as e:

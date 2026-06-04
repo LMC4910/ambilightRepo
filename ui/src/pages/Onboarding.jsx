@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { Monitor, Wifi, Lightbulb, Layers, Power, ChevronRight, ChevronLeft, Check } from 'lucide-react'
+import Toggle from '../components/Toggle'
 
 const STEPS = ['Monitor', 'Device', 'Test', 'Profile', 'Auto-start']
 
@@ -53,7 +54,7 @@ export default function Onboarding({ onDone }) {
                 monitors.map((m, i) => (
                   <label key={i} className={radioCard}>
                     <input type="radio" name="mon" checked={monitorIdx === i} onChange={() => chooseMonitor(i)} className="text-indigo-500" />
-                    <span className="text-sm">Monitor {i} — <span className="font-mono">{m.width}×{m.height}</span></span>
+                    <span className="text-sm">{i} — {m.name || `Display ${i + 1}`} <span className="font-mono text-slate-400">({m.width}×{m.height}{m.primary ? ', primary' : ''})</span></span>
                   </label>
                 ))}
             </div>
@@ -95,10 +96,10 @@ export default function Onboarding({ onDone }) {
             <div className="space-y-3">
               <h3 className="flex items-center gap-2 text-white font-semibold"><Power className="w-5 h-5 text-indigo-400" /> Start on login</h3>
               <p className="text-slate-400 text-sm">Launch Ambient automatically when you log in?</p>
-              <label className="glass-panel rounded-xl p-3 flex justify-between items-center cursor-pointer">
+              <div className="glass-panel rounded-xl p-3 flex justify-between items-center">
                 <span className="text-sm">Enable auto-start</span>
-                <input type="checkbox" checked={autostart} onChange={toggleAutostart} className="rounded text-indigo-500" />
-              </label>
+                <Toggle checked={autostart} onChange={toggleAutostart} />
+              </div>
             </div>
           )}
         </div>

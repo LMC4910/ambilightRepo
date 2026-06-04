@@ -434,6 +434,15 @@ class AmbilightPipeline:
                 fast_threshold=s.adaptive_fast_threshold,
                 min_change=s.min_change,
             )
+        # Re-apply the active effect with its (possibly edited) params so changes
+        # to speed/colour/custom-sequence take effect live without a mode switch.
+        mode = self._effects.current_mode
+        if self._power and mode != "screen_sync":
+            params = (getattr(self._cfg.effects, "params", {}) or {}).get(mode, {})
+            try:
+                self._effects.set_mode(mode, params)
+            except Exception as exc:
+                logger.debug("[Pipeline] effect re-apply failed: %s", exc)
         logger.info("[Pipeline] Hot-reloaded configuration (%d channel(s)).", len(self._channels))
 
     # ------------------------------------------------------------------
@@ -504,6 +513,7 @@ class AmbilightPipeline:
         for mi in sorted({sp["monitor_index"] for sp in specs}):
             cap = ScreenCaptureManager(
                 preferred_method=cfg.capture.method, monitor_index=mi, fps_target=cfg.capture.fps_target,
+                analysis_width=cfg.capture.analysis_width, analysis_height=cfg.capture.analysis_height,
             )
             cap.start()
             caps[mi] = cap

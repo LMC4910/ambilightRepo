@@ -44,10 +44,12 @@ class CaptureBackend(ABC):
     name: str = "base"
 
     @abstractmethod
-    def open(self, monitor_index: int) -> bool:
+    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
         """
         Initialise the backend for *monitor_index*.
 
+        ``target_size`` is the optional ``(width, height)`` the backend may
+        pre-downscale to (used by WGC); ``fps_target`` caps delivery rate.
         Returns *True* on success, *False* if the backend is unavailable.
         """
 
@@ -71,15 +73,21 @@ class CaptureBackend(ABC):
 # Windows Graphics Capture backend
 # ---------------------------------------------------------------------------
 
-def _bgra_to_bgr(buffer: np.ndarray) -> np.ndarray:
-    """Convert a WGC ``frame_buffer`` (H×W×4 BGRA) to a contiguous H×W×3 BGR array.
+def _bgra_to_bgr(buffer: np.ndarray, target_size=None) -> np.ndarray:
+    """Convert a WGC ``frame_buffer`` (H×W×4 BGRA) to a contiguous H×W×3 BGR array,
+    optionally downscaling to ``target_size`` = ``(width, height)``.
 
     The library reuses its buffer between callbacks, so the result is copied to
-    decouple it from the capture thread.
+    decouple it from the capture thread. Pillow's resize releases the GIL.
     """
     arr = np.asarray(buffer)
     if arr.ndim == 3 and arr.shape[2] >= 3:
         arr = arr[:, :, :3]
+    if target_size is not None:
+        tw, th = target_size
+        if tw and th and (arr.shape[1] != tw or arr.shape[0] != th):
+            from PIL import Image
+            arr = np.asarray(Image.fromarray(arr).resize((tw, th), Image.BILINEAR))
     return np.ascontiguousarray(arr)
 
 
@@ -108,16 +116,22 @@ class WGCBackend(CaptureBackend):
         self._available = False
         self._latest_frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
+        self._target_size: Optional[tuple[int, int]] = None  # (width, height) to pre-downscale to
 
     def _store_frame(self, buffer: np.ndarray) -> None:
-        """Callback sink: stash the most recent frame as contiguous BGR."""
-        bgr = _bgra_to_bgr(buffer)
+        """Callback sink (runs on the capture thread): downscale to the analysis
+        size *here* and stash it. Downscaling in the callback (vs. copying the
+        full ~25 MB frame and resizing in the pipeline) is what keeps screen-sync
+        fast during high-FPS games — Pillow's resize releases the GIL, so the
+        pipeline thread isn't starved."""
+        bgr = _bgra_to_bgr(buffer, self._target_size)
         with self._lock:
             self._latest_frame = bgr
 
-    def open(self, monitor_index: int) -> bool:
+    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
         try:
             import sys
+            import time as _time
             if sys.platform != "win32":
                 return False
 
@@ -125,10 +139,17 @@ class WGCBackend(CaptureBackend):
             # extension is missing, which the manager handles by failing over.
             from windows_capture import WindowsCapture  # type: ignore[import-untyped]
 
+            self._target_size = target_size
+            # Cap delivery to the target FPS (ms) so a 144 FPS game doesn't flood
+            # the callback. Without this the GIL is held copying frames at the
+            # game's rate and the pipeline collapses to 1-2 FPS.
+            min_interval_ms = max(1, int(round(1000.0 / max(fps_target, 1))))
+
             # windows-capture monitor_index is 1-based; our config is 0-based.
             capture = WindowsCapture(
                 cursor_capture=False,
                 draw_border=False,
+                minimum_update_interval=min_interval_ms,
                 monitor_index=monitor_index + 1,
             )
 
@@ -145,7 +166,14 @@ class WGCBackend(CaptureBackend):
 
             self._control = capture.start_free_threaded()
             self._available = True
-            logger.info("[WGC] Capture session started for monitor %d.", monitor_index)
+            # Wait briefly for the first frame so the manager doesn't treat the
+            # async startup gap as a backend failure and fall over to DXGI/MSS.
+            for _ in range(50):
+                with self._lock:
+                    if self._latest_frame is not None:
+                        break
+                _time.sleep(0.02)
+            logger.info("[WGC] Capture session started for monitor %d (cap %d ms).", monitor_index, min_interval_ms)
             return True
 
         except Exception as exc:
@@ -156,7 +184,7 @@ class WGCBackend(CaptureBackend):
         if not self._available:
             return None
         with self._lock:
-            return self._latest_frame  # BGR uint8, or None until the first frame
+            return self._latest_frame  # BGR uint8 (already downscaled), or None until first frame
 
     def close(self) -> None:
         try:
@@ -188,7 +216,7 @@ class DXGIBackend(CaptureBackend):
     def __init__(self) -> None:
         self._camera: Optional[object] = None
 
-    def open(self, monitor_index: int) -> bool:
+    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
         try:
             import sys
             if sys.platform != "win32":
@@ -245,7 +273,7 @@ class MSSBackend(CaptureBackend):
         self._sct: Optional[object] = None
         self._monitor: Optional[dict] = None
 
-    def open(self, monitor_index: int) -> bool:
+    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
         try:
             import mss  # type: ignore[import-untyped]
             self._sct = mss.mss()
@@ -317,10 +345,13 @@ class ScreenCaptureManager:
         preferred_method: str = "wgc",
         monitor_index: int = 0,
         fps_target: int = 30,
+        analysis_width: int = 80,
+        analysis_height: int = 45,
     ) -> None:
         self._monitor_index = monitor_index
         self._fps_target = fps_target
         self._frame_interval = 1.0 / max(fps_target, 1)
+        self._target_size = (analysis_width, analysis_height)
         self._last_grab_time: float = 0.0
         self._consecutive_failures: int = 0
 
@@ -341,7 +372,7 @@ class ScreenCaptureManager:
     def start(self) -> None:
         """Open the highest-priority available backend."""
         for backend in self._candidates:
-            if backend.open(self._monitor_index):
+            if backend.open(self._monitor_index, self._target_size, self._fps_target):
                 self._active = backend
                 logger.info(
                     "[Capture] Active backend: %s", backend.name.upper()
@@ -412,7 +443,7 @@ class ScreenCaptureManager:
         self._consecutive_failures = 0
 
         for backend in self._candidates:
-            if backend.open(self._monitor_index):
+            if backend.open(self._monitor_index, self._target_size, self._fps_target):
                 self._active = backend
                 logger.info(
                     "[Capture] Switched to backend: %s", backend.name.upper()

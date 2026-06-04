@@ -96,6 +96,9 @@ class GpuConfig:
 class EffectsConfig:
     plugins_dir: str = ""            # default resolved to ~/.ambilight/plugins at load
     schedule: list = field(default_factory=list)  # [{effect, params, window}]
+    # Per-mode user params, e.g. {"rainbow": {"speed": 1.0},
+    # "static": {"r":255,"g":0,"b":0}, "custom": {"colors": [[r,g,b],...], "speed": 1.0}}
+    params: dict = field(default_factory=dict)
 
 
 @dataclass

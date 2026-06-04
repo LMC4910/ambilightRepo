@@ -15,6 +15,7 @@ export const useStore = create((set, get) => ({
   },
   settings: null,
   profiles: [],
+  activeProfile: null,
   devices: [],
   scanning: false,
   saving: false,
@@ -80,7 +81,7 @@ export const useStore = create((set, get) => ({
   fetchProfiles: async () => {
     try {
       const data = await window.api.profiles.list();
-      set({ profiles: data.profiles || [] });
+      set({ profiles: data.profiles || [], activeProfile: data.active || null });
     } catch (e) {
       console.error(e);
     }
@@ -89,7 +90,9 @@ export const useStore = create((set, get) => ({
   applyProfile: async (name) => {
     try {
       await window.api.profiles.apply(name);
+      set({ activeProfile: name });
       get().fetchSettings();
+      get().fetchProfiles();
     } catch (e) {
       console.error(e);
     }

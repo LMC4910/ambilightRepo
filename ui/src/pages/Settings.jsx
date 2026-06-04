@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { Save, Sliders, RefreshCw } from 'lucide-react'
+import Toggle from '../components/Toggle'
 
 const SECTIONS = [
   ['capture', 'Capture'], ['device', 'Device'], ['zones', 'Zones'], ['color', 'Color'],
@@ -17,7 +18,7 @@ function Field({ section, name, value, onChange }) {
   const label = name.replace(/_/g, ' ')
   let control
   if (typeof value === 'boolean') {
-    control = <input type="checkbox" checked={value} onChange={(e) => onChange(name, e.target.checked)} className="rounded text-indigo-500" />
+    control = <Toggle checked={value} onChange={(v) => onChange(name, v)} />
   } else if (ENUMS[key]) {
     control = (
       <select className="custom-input rounded-lg px-2 py-1.5 text-sm" value={value} onChange={(e) => onChange(name, e.target.value)}>
@@ -82,7 +83,7 @@ export default function Settings() {
 
       <div className="glass-panel rounded-2xl p-4 flex justify-between items-center">
         <span className="text-slate-400 text-sm">Start on login</span>
-        <input type="checkbox" checked={autostart} onChange={toggleAutostart} className="rounded text-indigo-500" />
+        <Toggle checked={autostart} onChange={toggleAutostart} />
       </div>
 
       <div className="glass-panel rounded-2xl p-4 flex justify-between items-center">

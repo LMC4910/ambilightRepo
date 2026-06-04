@@ -163,6 +163,7 @@ async def get_status() -> Dict[str, Any]:
         "paused": st["paused"],
         "pid": st["pid"],
         "restarts": st["restarts"],
+        "active_profile": getattr(profile_manager, "active_profile", None),
     }
 
 
@@ -205,14 +206,18 @@ async def get_config() -> Dict[str, Any]:
 @app.put("/api/config", dependencies=[Depends(verify_token)])
 async def update_config(override: Dict[str, Any]) -> Dict[str, str]:
     ConfigManager.update(override)
+    # A manual settings edit no longer matches a saved profile (unless it *is*
+    # the auto_profile rules being toggled).
+    if set(override.keys()) - {"auto_profile"}:
+        profile_manager.active_profile = None
     cfg = ConfigManager.get()
     await bus.publish("CONFIG_UPDATE", cfg)
     return {"message": "Config updated"}
 
 
 @app.get("/api/profiles", dependencies=[Depends(verify_token)])
-async def list_profiles() -> Dict[str, List[str]]:
-    return {"profiles": profile_manager.list_profiles()}
+async def list_profiles() -> Dict[str, Any]:
+    return {"profiles": profile_manager.list_profiles(), "active": profile_manager.active_profile}
 
 
 @app.get("/api/profiles/{name}", dependencies=[Depends(verify_token)])
@@ -288,14 +293,8 @@ async def list_effects() -> Dict[str, List[str]]:
 async def diagnostics() -> Dict[str, Any]:
     """System + runtime diagnostics for the UI Diagnostics page (FR-UI-12)."""
     cfg = ConfigManager.get()
-    monitors: List[Dict[str, Any]] = []
-    try:
-        import mss  # type: ignore
-        with mss.mss() as sct:
-            for i, mon in enumerate(sct.monitors[1:]):
-                monitors.append({"index": i, "width": mon["width"], "height": mon["height"]})
-    except Exception:
-        pass
+    from .monitors import list_monitors
+    monitors = await asyncio.get_running_loop().run_in_executor(None, list_monitors)
     return {
         "platform": platform.platform(),
         "python": platform.python_version(),
