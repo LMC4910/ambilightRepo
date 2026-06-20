@@ -240,9 +240,99 @@ class ConfigManager:
         if not isinstance(config, AppConfig):
             config = AppConfig()
 
+        cls._normalize_and_validate(config)
+
         cls._instance = config
         cls._loaded_path = str(path)
         return config
+
+    # ------------------------------------------------------------------
+    # Normalisation / validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_index(value: Any, default: int, label: str) -> int:
+        """Coerce a monitor index to a non-negative int, warning on bad input.
+
+        Config drift (e.g. ``monitor_index: '2'`` as a YAML string, or a value
+        pointing at a monitor that doesn't exist) silently breaks capture: the
+        wrong monitor — or none — gets grabbed and the LEDs freeze. Coerce here
+        and let the pipeline clamp against the real monitor count at start.
+        """
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[Config] %s=%r is not an integer; falling back to %d.",
+                label, value, default,
+            )
+            return default
+        if idx < 0:
+            logger.warning("[Config] %s=%d is negative; using 0.", label, idx)
+            return 0
+        return idx
+
+    @classmethod
+    def _normalize_and_validate(cls, config: AppConfig) -> None:
+        """Coerce types and surface obviously-broken values at load time.
+
+        Doesn't mutate the user's intent — it fixes type drift (string indices),
+        and *warns* about suspicious values (out-of-range LED counts, conflicting
+        MACs) so misconfigurations are visible in the log instead of manifesting
+        as "service active but lights static".
+        """
+        # 1. monitor_index must be a non-negative int on capture, device, and
+        #    every multi-device entry.
+        config.capture.monitor_index = cls._coerce_index(
+            config.capture.monitor_index, 0, "capture.monitor_index"
+        )
+        config.device.monitor_index = cls._coerce_index(
+            config.device.monitor_index, config.capture.monitor_index, "device.monitor_index"
+        )
+        for i, dev in enumerate(config.devices):
+            if isinstance(dev, dict) and "monitor_index" in dev:
+                dev["monitor_index"] = cls._coerce_index(
+                    dev["monitor_index"], 0, f"devices[{i}].monitor_index"
+                )
+
+        # 2. led_count sanity — a single-RGB strip is one channel; even long
+        #    addressable strips rarely exceed a few hundred LEDs. Absurd values
+        #    (e.g. 3000) usually mean a stale/typo'd config.
+        def _check_led_count(count: Any, label: str) -> None:
+            try:
+                n = int(count)
+            except (TypeError, ValueError):
+                logger.warning("[Config] %s=%r is not an integer.", label, count)
+                return
+            if n <= 0 or n > 1000:
+                logger.warning(
+                    "[Config] %s=%d looks wrong (expected 1–1000). Single-RGB "
+                    "strips use 30; check your config.", label, n,
+                )
+
+        _check_led_count(config.device.led_count, "device.led_count")
+        for i, dev in enumerate(config.devices):
+            if isinstance(dev, dict) and "led_count" in dev:
+                _check_led_count(dev["led_count"], f"devices[{i}].led_count")
+
+        # 3. MAC consistency — discovery keys off MAC to recover after an IP
+        #    change, so conflicting MACs across device/devices defeat it. Warn
+        #    (don't rewrite — we can't know which is correct).
+        def _norm_mac(mac: Any) -> str:
+            return str(mac or "").lower().replace("-", ":").strip()
+
+        dev_mac = _norm_mac(config.device.mac)
+        for i, dev in enumerate(config.devices):
+            if not isinstance(dev, dict):
+                continue
+            entry_mac = _norm_mac(dev.get("mac"))
+            same_ip = str(dev.get("ip", "")) == str(config.device.ip)
+            if dev_mac and entry_mac and same_ip and dev_mac != entry_mac:
+                logger.warning(
+                    "[Config] MAC mismatch for %s: device.mac=%s vs devices[%d].mac=%s. "
+                    "Discovery may target the wrong controller; reconcile them.",
+                    config.device.ip, dev_mac, i, entry_mac,
+                )
 
     @classmethod
     def get(cls) -> AppConfig:

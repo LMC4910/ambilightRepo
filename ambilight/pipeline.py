@@ -538,14 +538,36 @@ class AmbilightPipeline:
             return
         cfg = self._cfg
         specs = _device_specs(cfg)
+
+        # Clamp requested monitor indices to the displays that actually exist.
+        # A stale index (e.g. monitor_index: 3 on a 2-monitor PC) otherwise grabs
+        # the wrong screen — or nothing — leaving the LEDs frozen while the
+        # service reports "active".
+        try:
+            from .monitors import list_monitors
+            monitor_count = len(list_monitors())
+        except Exception:
+            monitor_count = 0
+
         caps: dict[int, ScreenCaptureManager] = {}
-        for mi in sorted({sp["monitor_index"] for sp in specs}):
+        # Key each capture by the *requested* monitor index so the channel
+        # lookup in the grab loop (small_by_mon.get(ch.monitor_index)) still
+        # resolves; open the backend on the *clamped* index so it grabs a real
+        # display.
+        for raw_mi in sorted({sp["monitor_index"] for sp in specs}):
+            mi = raw_mi
+            if monitor_count > 0 and mi > monitor_count - 1:
+                logger.warning(
+                    "[Pipeline] monitor_index %d is out of range (%d display(s) "
+                    "detected); falling back to monitor 0.", raw_mi, monitor_count,
+                )
+                mi = 0
             cap = ScreenCaptureManager(
                 preferred_method=cfg.capture.method, monitor_index=mi, fps_target=cfg.capture.fps_target,
                 analysis_width=cfg.capture.analysis_width, analysis_height=cfg.capture.analysis_height,
             )
             cap.start()
-            caps[mi] = cap
+            caps[raw_mi] = cap
         self._captures = caps
         logger.info("[Pipeline] Capture acquired (%d monitor(s)).", len(caps))
 
