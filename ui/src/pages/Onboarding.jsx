@@ -6,18 +6,25 @@ import Toggle from '../components/Toggle'
 const STEPS = ['Monitor', 'Device', 'Test', 'Profile', 'Auto-start']
 
 export default function Onboarding({ onDone }) {
-  const { updateSettings, devices, scanning, scanDevices, testDevice, profiles, fetchProfiles, applyProfile } = useStore()
+  const { updateSettings, devices, scanning, scanDevices, testDevice, profiles, fetchProfiles, applyProfile, settings, monitors, fetchMonitors } = useStore()
   const [step, setStep] = useState(0)
-  const [monitors, setMonitors] = useState([])
   const [monitorIdx, setMonitorIdx] = useState(0)
   const [selectedIp, setSelectedIp] = useState(null)
   const [tested, setTested] = useState(false)
   const [autostart, setAutostart] = useState(false)
 
   useEffect(() => {
-    window.api.diagnostics.get().then((d) => setMonitors(d.monitors || [])).catch(() => {})
+    fetchMonitors()
     fetchProfiles()
   }, [])
+
+  // Reflect the monitor already saved in config (default to primary, else 0)
+  // once displays/settings are known, instead of always pre-selecting 0.
+  useEffect(() => {
+    const saved = settings?.capture?.monitor_index
+    if (typeof saved === 'number') setMonitorIdx(saved)
+    else if (monitors.length) setMonitorIdx((monitors.find((m) => m.primary) || monitors[0]).index)
+  }, [settings, monitors])
 
   const next = () => setStep((s) => Math.min(STEPS.length - 1, s + 1))
   const back = () => setStep((s) => Math.max(0, s - 1))
@@ -51,10 +58,10 @@ export default function Onboarding({ onDone }) {
               <h3 className="flex items-center gap-2 text-white font-semibold"><Monitor className="w-5 h-5 text-indigo-400" /> Choose a monitor</h3>
               <p className="text-slate-400 text-sm">Which display should drive the LEDs?</p>
               {monitors.length === 0 ? <p className="text-slate-500 text-sm">Detecting monitors…</p> :
-                monitors.map((m, i) => (
-                  <label key={i} className={radioCard}>
-                    <input type="radio" name="mon" checked={monitorIdx === i} onChange={() => chooseMonitor(i)} className="text-indigo-500" />
-                    <span className="text-sm">{i} — {m.name || `Display ${i + 1}`} <span className="font-mono text-slate-400">({m.width}×{m.height}{m.primary ? ', primary' : ''})</span></span>
+                monitors.map((m) => (
+                  <label key={m.index} className={radioCard}>
+                    <input type="radio" name="mon" checked={monitorIdx === m.index} onChange={() => chooseMonitor(m.index)} className="text-indigo-500" />
+                    <span className="text-sm">{m.index} — {m.name || `Display ${m.index + 1}`} <span className="font-mono text-slate-400">({m.width}×{m.height}{m.primary ? ', primary' : ''})</span></span>
                   </label>
                 ))}
             </div>
