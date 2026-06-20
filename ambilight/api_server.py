@@ -19,6 +19,7 @@ import pydantic
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from . import __version__ as APP_VERSION
 from .config import ConfigManager
 from .events import bus
 from .platform_monitor import get_platform_monitor
@@ -135,6 +136,55 @@ async def shutdown_event() -> None:
 # REST ENDPOINTS
 # ---------------------------------------------------------------------------
 
+def _health_assessment() -> Dict[str, Any]:
+    """Decide whether the service is actually *doing its job*, not just alive.
+
+    The process being alive (``controller.status()["running"]``) is necessary
+    but not sufficient — the LEDs can be frozen while the pipeline is up, e.g.
+    capture is producing no frames (fullscreen game on the MSS backend, bad
+    monitor_index, DRM) or the controller is unreachable. We fold those signals,
+    published each frame in ``latest_metrics``, into the status so the UI can say
+    "running but not syncing" instead of a flat green "active".
+
+    Intentional non-syncing states (powered off, paused for sleep/lock) are NOT
+    degraded.
+    """
+    st = controller.status()
+    m = latest_metrics or {}
+    running = bool(st["running"])
+    paused = bool(st["paused"])
+    power = bool(m.get("power", True))
+    mode = m.get("mode", "")
+    connected = int(m.get("devices_connected", 0))
+    capture_ok = bool(m.get("capture_ok", True))
+
+    reasons: list[str] = []
+    if not running:
+        reasons.append("pipeline_not_running")
+    elif power and not paused:
+        # Actively supposed to be driving the strip right now.
+        if connected == 0:
+            reasons.append("no_device_connected")
+        if mode == "screen_sync" and not capture_ok:
+            reasons.append("capture_unavailable")
+
+    status = "ok" if not reasons else "degraded"
+    return {
+        "status": status,
+        "version": APP_VERSION,
+        "pipeline_alive": running,
+        "paused": paused,
+        "restarts": st["restarts"],
+        "fps": round(m.get("fps", 0.0), 1),
+        "latency_ms": round(m.get("latency_ms", 0.0), 1),
+        "uptime_s": round(time.monotonic() - service_start_time, 1),
+        "devices_connected": connected,
+        "capture_ok": capture_ok,
+        "capture_backend": m.get("capture_backend"),
+        "degraded_reasons": reasons,
+    }
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     """Unauthenticated structured health probe (FR-SVC-08).
@@ -142,23 +192,23 @@ async def health() -> Dict[str, Any]:
     Intentionally token-free so watchdogs / the Electron supervisor can poll it
     cheaply. It exposes no sensitive data — only liveness and coarse metrics.
     """
-    st = controller.status()
-    return {
-        "status": "ok" if st["running"] else "degraded",
-        "pipeline_alive": st["running"],
-        "paused": st["paused"],
-        "restarts": st["restarts"],
-        "fps": round(latest_metrics.get("fps", 0.0), 1),
-        "latency_ms": round(latest_metrics.get("latency_ms", 0.0), 1),
-        "uptime_s": round(time.monotonic() - service_start_time, 1),
-    }
+    return _health_assessment()
 
 
 @app.get("/api/status", dependencies=[Depends(verify_token)])
 async def get_status() -> Dict[str, Any]:
     st = controller.status()
+    health = _health_assessment()
     return {
         "status": "running" if st["running"] else "stopped",
+        "version": APP_VERSION,
+        # Whether the strip is actually being driven right now (vs. just alive).
+        "syncing": health["status"] == "ok" and st["running"] and not st["paused"],
+        "health": health["status"],
+        "degraded_reasons": health["degraded_reasons"],
+        "devices_connected": health["devices_connected"],
+        "capture_ok": health["capture_ok"],
+        "capture_backend": health["capture_backend"],
         "paused": st["paused"],
         "pid": st["pid"],
         "restarts": st["restarts"],
