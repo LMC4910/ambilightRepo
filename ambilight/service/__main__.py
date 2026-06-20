@@ -98,6 +98,9 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
 
+    from ambilight import __version__ as app_version
+    logger.info("[Service] Ambilight Desktop service v%s", app_version)
+
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
     # 1. Resolve the config path. In an installed (frozen) build the working
