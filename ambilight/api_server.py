@@ -27,7 +27,7 @@ from .pipeline_controller import PipelineController
 from .auth import generate_and_save_token, verify_token
 from . import auth
 from .profile_manager import profile_manager
-from .discovery import DeviceScanner, DeviceCache, DeviceInfo, CapabilityProbe, classify_device
+from .discovery import DeviceScanner, DeviceCache, DeviceInfo, CapabilityProbe, classify_device, full_scan
 from .led_output import MagicHomeController
 from .config_watcher import ConfigWatcher
 from .auto_profile import AutoProfileSwitcher
@@ -426,11 +426,12 @@ async def list_devices() -> Dict[str, List[Dict[str, Any]]]:
 
 @app.post("/api/devices/scan", dependencies=[Depends(verify_token)])
 async def scan_devices() -> Dict[str, List[Dict[str, Any]]]:
-    """Run a live subnet scan for MagicHome controllers and refresh the cache."""
+    """Run a live device discovery (UDP broadcast + TCP scan fallback) and refresh the cache."""
     cfg = ConfigManager.get()
-    scanner = DeviceScanner(subnet=cfg.device.subnet, connect_timeout=cfg.device.discovery_timeout)
     loop = asyncio.get_running_loop()
-    devices = await loop.run_in_executor(None, scanner.scan)
+    devices = await loop.run_in_executor(
+        None, full_scan, cfg.device.subnet, cfg.device.discovery_timeout,
+    )
     if devices:
         await loop.run_in_executor(None, DeviceCache(path=cfg.device.cache_file).save, devices)
     return {"devices": [d.to_dict() for d in devices]}

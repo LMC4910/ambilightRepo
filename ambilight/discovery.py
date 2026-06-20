@@ -7,21 +7,22 @@ to disk, and verifies connectivity before use.
 
 Discovery strategy
 ------------------
-1. **Cache hit** — load the saved ``device_cache.json`` and verify each entry
-   is still reachable on TCP port 5577.
-2. **Active scan** — parallel TCP port scan of the configured subnet.
-3. **Interrogation** — send the MagicHome ``0x81 0x8a 0x8b`` status request
-   and parse the response to confirm the device is a compatible LED controller
-   and to extract the firmware version.
+1. **Direct IP** — verify the configured IP first (fastest, no scanning).
+2. **UDP broadcast** — send ``HF-A11ASSISTHREAD`` to 255.255.255.255:48899.
+   Every MagicHome controller replies with ``{ip},{mac},{model}``, giving the
+   real hardware MAC and current IP in 1–2 s regardless of subnet changes.
+3. **Cache hit** — if a matching MAC is cached, verify that IP still answers.
+4. **TCP scan** — parallel TCP port 5577 scan of the auto-detected local /24
+   subnet (falls back to the configured subnet prefix).
 
 The results are cached to ``device_cache.json`` for fast start-up next time.
 
 MAC-based identification
 ------------------------
-MagicHome controllers expose their MAC address in the status response.  When
-a ``mac`` is configured, the discovery module ignores IP changes and searches
-for the device with the matching MAC on every scan — making the system robust
-to DHCP address changes.
+The MAC address is obtained from the UDP discovery response — **not** from
+the TCP status response.  Bytes 6–11 of the ``0x81 0x8A 0x8B`` reply contain
+RGB/W colour data, not the hardware MAC.  Using colour bytes as a MAC would
+give a fake ``00:00:00:00:00:00`` for an off device and wrong values otherwise.
 """
 
 from __future__ import annotations
@@ -43,7 +44,136 @@ _MAGIC_PORT = 5577
 
 # Status query command (0x81 0x8a 0x8b) — standard for flux_led protocol
 _STATUS_QUERY = bytes([0x81, 0x8A, 0x8B])
-_STATUS_RESPONSE_LEN = 14
+
+# UDP broadcast discovery — standard MagicHome LAN discovery protocol
+_UDP_DISCOVERY_MSG = b"HF-A11ASSISTHREAD"
+_UDP_DISCOVERY_PORT = 48899
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _local_subnets() -> list[str]:
+    """
+    Return ``/24`` subnet prefixes for active local interfaces.
+
+    Uses a UDP routing trick: create a socket and call ``connect()`` toward a
+    public address; the OS fills in the source IP via the routing table without
+    sending any packets.  No extra dependencies, no admin rights required.
+    """
+    subnets: set[str] = set()
+    for target in ("8.8.8.8", "1.1.1.1"):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((target, 80))
+            ip = s.getsockname()[0]
+            s.close()
+            prefix = ".".join(ip.split(".")[:3]) + "."
+            subnets.add(prefix)
+            break
+        except OSError:
+            pass
+    return list(subnets) if subnets else ["192.168.1."]
+
+
+def _udp_discover(timeout: float = 2.0) -> "list[DeviceInfo]":
+    """
+    Broadcast the MagicHome discovery message and parse device responses.
+
+    Each MagicHome controller replies on UDP port 48899 with::
+
+        {ip},{mac_no_colons},{model}
+
+    e.g. ``192.168.1.29,0B0D23000C00,HF-LPB100-ZJ200``
+
+    Returns one :class:`DeviceInfo` per responding device with the real
+    hardware MAC.  ``device_type`` is left at 0 — call
+    :meth:`CapabilityProbe.probe` afterwards to classify the device.
+    """
+    found: dict[str, "DeviceInfo"] = {}
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(0.1)          # short per-recv timeout; loop checks deadline
+        sock.bind(("", 0))
+        sock.sendto(_UDP_DISCOVERY_MSG, ("255.255.255.255", _UDP_DISCOVERY_PORT))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                data, _ = sock.recvfrom(1024)
+                text = data.decode("ascii", errors="replace").strip()
+                parts = text.split(",")
+                if len(parts) >= 2:
+                    ip = parts[0].strip()
+                    mac_raw = parts[1].strip().replace(":", "").replace("-", "")
+                    model = parts[2].strip() if len(parts) >= 3 else "MagicHome"
+                    if len(ip.split(".")) == 4 and len(mac_raw) == 12:
+                        mac = ":".join(mac_raw[i:i + 2].lower() for i in range(0, 12, 2))
+                        found[ip] = DeviceInfo(ip=ip, mac=mac, model=model, last_seen=time.time())
+                        logger.debug("[UDP] Found %s  MAC=%s  model=%s", ip, mac, model)
+            except socket.timeout:
+                continue
+        sock.close()
+    except OSError as exc:
+        logger.debug("[UDP Discovery] Error: %s", exc)
+    if found:
+        logger.info("[UDP Discovery] %d device(s) found.", len(found))
+    return list(found.values())
+
+
+def full_scan(
+    configured_subnet: str = "192.168.1.",
+    discovery_timeout: float = 0.5,
+    udp_timeout: float = 2.0,
+) -> "list[DeviceInfo]":
+    """
+    Full discovery: UDP broadcast first, TCP scan fallback.
+
+    Designed for the ``POST /api/devices/scan`` endpoint so the UI always
+    gets real MACs and doesn't depend on the configured subnet being correct.
+
+    Steps
+    -----
+    1. UDP broadcast → collect all respondents (real IP + MAC).
+    2. If UDP returns nothing, TCP-scan the auto-detected subnet(s) plus the
+       configured subnet.
+    3. Enrich every discovered device with ``device_type`` via a parallel
+       :class:`CapabilityProbe` pass (needed for addressable vs single-RGB UI).
+    """
+    by_ip: dict[str, DeviceInfo] = {}
+
+    # 1. UDP broadcast
+    for dev in _udp_discover(timeout=udp_timeout):
+        by_ip[dev.ip] = dev
+
+    # 2. TCP scan fallback when UDP finds nothing
+    if not by_ip:
+        subnets_to_scan = list({configured_subnet} | set(_local_subnets()))
+        logger.info("[Scan] UDP returned nothing; TCP-scanning %s", subnets_to_scan)
+        for subnet in subnets_to_scan:
+            scanner = DeviceScanner(subnet=subnet, connect_timeout=discovery_timeout)
+            for dev in scanner.scan():
+                if dev.ip not in by_ip:
+                    by_ip[dev.ip] = dev
+
+    # 3. Enrich device_type via parallel TCP capability probe
+    if by_ip:
+        cap = CapabilityProbe(connect_timeout=max(discovery_timeout, 0.8))
+        with ThreadPoolExecutor(max_workers=min(len(by_ip), 20)) as pool:
+            futures = {pool.submit(cap.probe, ip): ip for ip in list(by_ip.keys())}
+            for fut in as_completed(futures):
+                ip = futures[fut]
+                try:
+                    info = fut.result()
+                    if info and ip in by_ip:
+                        by_ip[ip].device_type = info.device_type
+                        by_ip[ip].supports_addressable = info.supports_addressable
+                        by_ip[ip].supports_rgbw = info.supports_rgbw
+                except Exception:
+                    pass
+
+    return list(by_ip.values())
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +267,11 @@ class DeviceScanner:
         Connect to *ip*:5577, send a status query, and parse the response.
 
         Returns *None* if the host is unreachable or not a MagicHome device.
+
+        Validation: a valid MagicHome status reply always has ``byte[0] == 0x81``
+        and is at least 2 bytes long.  MAC address is **not** extracted here —
+        bytes 6–11 of the response are RGB/W colour data, not the hardware MAC.
+        Use :func:`_udp_discover` to obtain real MACs.
         """
         try:
             with socket.create_connection((ip, _MAGIC_PORT), timeout=self._timeout) as sock:
@@ -150,20 +285,19 @@ class DeviceScanner:
                 if not data:
                     return None
 
-                mac, firmware, device_type = self._parse_status(data)
-                if not mac:
+                # byte 0 of a genuine MagicHome status reply is always 0x81
+                if len(data) < 2 or data[0] != 0x81:
                     return None
 
+                _, firmware, device_type = self._parse_status(data)
                 info = DeviceInfo(
                     ip=ip,
-                    mac=mac,
-                    firmware=firmware,
                     device_type=device_type,
                     supports_addressable=device_type in (0x04, 0x35),
                     supports_rgbw=device_type in (0x44, 0x35),
                     last_seen=time.time(),
                 )
-                logger.debug("[Scanner] Found device at %s (MAC=%s, Type=0x%02x).", ip, mac or "?", device_type)
+                logger.debug("[Scanner] Found device at %s (Type=0x%02x).", ip, device_type)
                 return info
 
         except (OSError, ConnectionRefusedError, socket.timeout):
@@ -172,20 +306,35 @@ class DeviceScanner:
     @staticmethod
     def _parse_status(data: bytes) -> tuple[str, str, int]:
         """
-        Parse MagicHome status response.
+        Parse MagicHome TCP status response.
 
-        The 14-byte response encodes device state; bytes 6-11 contain the
-        6-byte MAC address in many firmware revisions. Byte 1 is device type.
-        If parsing fails we return empty strings and 0.
+        Response layout (``0x81 0x8A 0x8B`` query, 11–14 bytes):
+
+        ======  =====================================================
+        Byte    Meaning
+        ======  =====================================================
+        0       ``0x81``  (response header — always this value)
+        1       device_type  (``0x44``=RGB, ``0x04``=addressable, …)
+        2       power state  (``0x23``=on, ``0x24``=off)
+        3       mode  (``0x61``=static, …)
+        4       speed
+        5       Red
+        6       Green   **← colour data, NOT part of MAC**
+        7       Blue
+        8       White
+        9–12    padding
+        13      checksum
+        ======  =====================================================
+
+        **The MAC address is not carried in this response.**  It is obtained
+        from the UDP discovery broadcast (``HF-A11ASSISTHREAD``) instead.
         """
         mac = ""
         firmware = ""
         device_type = 0
-        if len(data) >= _STATUS_RESPONSE_LEN:
+        if len(data) >= 2 and data[0] == 0x81:
             try:
                 device_type = data[1]
-                mac_bytes = data[6:12]
-                mac = ":".join(f"{b:02x}" for b in mac_bytes)
             except Exception:
                 pass
         return mac, firmware, device_type
@@ -224,15 +373,17 @@ class CapabilityProbe:
                 try:
                     data = sock.recv(128)
                 except socket.timeout:
-                    data = b""
+                    return None
             if not data:
                 logger.debug("[CapabilityProbe] %s connected but returned no data.", ip)
                 return None
-            mac, firmware, device_type = DeviceScanner._parse_status(data)
+            if len(data) < 2 or data[0] != 0x81:
+                logger.debug("[CapabilityProbe] %s returned non-MagicHome response (byte0=0x%02x).", ip, data[0])
+                return None
+            _, firmware, device_type = DeviceScanner._parse_status(data)
             return DeviceInfo(
                 ip=ip,
                 port=port,
-                mac=mac,
                 firmware=firmware,
                 device_type=device_type,
                 supports_addressable=device_type in (0x04, 0x35),
@@ -335,18 +486,21 @@ class DeviceDiscovery:
         self._preferred_ip = preferred_ip
         self._preferred_mac = preferred_mac.lower().replace("-", ":").strip()
         self._connect_timeout = connect_timeout
-        self._scanner = DeviceScanner(subnet=subnet, connect_timeout=discovery_timeout)
+        self._discovery_timeout = discovery_timeout
+        self._subnet = subnet
         self._cache = DeviceCache(path=cache_file)
 
     def find_device(self) -> Optional[DeviceInfo]:
         """
         Locate the best MagicHome device.
 
-        Strategy:
-
-        1. If *preferred_ip* is set, verify it first.
-        2. Check the cache for a matching MAC.
-        3. Fall back to an active subnet scan.
+        Strategy
+        --------
+        1. If *preferred_ip* is configured, verify it first (no scanning).
+        2. UDP broadcast discovery — fast, gets the real current IP and MAC
+           even after a DHCP lease change.
+        3. Cache lookup by MAC — avoids a full scan when the IP is known.
+        4. TCP subnet scan — parallel probe of the auto-detected local /24.
 
         Returns
         -------
@@ -361,11 +515,33 @@ class DeviceDiscovery:
                 return info
             else:
                 logger.warning(
-                    "[Discovery] Configured IP %s unreachable; scanning network.",
+                    "[Discovery] Configured IP %s unreachable; trying UDP discovery.",
                     self._preferred_ip,
                 )
 
-        # 2. Cache lookup by MAC
+        # 2. UDP broadcast discovery (fast, real MACs)
+        logger.info("[Discovery] Running UDP broadcast discovery…")
+        udp_devices = _udp_discover(timeout=2.0)
+        if udp_devices:
+            # Prefer MAC match if a preferred MAC is configured
+            if self._preferred_mac:
+                for dev in udp_devices:
+                    if dev.mac.lower() == self._preferred_mac:
+                        logger.info("[Discovery] MAC match via UDP: %s (MAC %s).", dev.ip, dev.mac)
+                        self._enrich_device_type(dev)
+                        self._cache.save(udp_devices)
+                        return dev
+                logger.warning(
+                    "[Discovery] UDP found %d device(s) but none matched MAC %s; "
+                    "using first device.",
+                    len(udp_devices), self._preferred_mac,
+                )
+            dev = udp_devices[0]
+            self._enrich_device_type(dev)
+            self._cache.save(udp_devices)
+            return dev
+
+        # 3. Cache lookup by MAC
         cached = self._cache.load()
         if self._preferred_mac:
             for device in cached:
@@ -384,25 +560,33 @@ class DeviceDiscovery:
                             device.ip, device.mac,
                         )
 
-        # 3. Full subnet scan
-        found = self._scanner.scan()
-        if not found:
-            logger.error("[Discovery] No MagicHome devices found on subnet.")
-            return None
+        # 4. TCP subnet scan on auto-detected + configured subnet
+        subnets = list({self._subnet} | set(_local_subnets()))
+        for subnet in subnets:
+            found = DeviceScanner(subnet=subnet, connect_timeout=self._discovery_timeout).scan()
+            if not found:
+                continue
+            if self._preferred_mac:
+                for dev in found:
+                    if dev.mac.lower() == self._preferred_mac:
+                        logger.info("[Discovery] MAC match after TCP scan: %s.", dev.ip)
+                        self._cache.save(found)
+                        return dev
+            logger.info("[Discovery] TCP scan found %d device(s) on subnet %s.", len(found), subnet)
+            self._cache.save(found)
+            return found[0]
 
-        # Prefer MAC match
-        if self._preferred_mac:
-            for dev in found:
-                if dev.mac.lower() == self._preferred_mac:
-                    logger.info(
-                        "[Discovery] MAC match after scan: %s.", dev.ip
-                    )
-                    self._cache.save(found)
-                    return dev
+        logger.error("[Discovery] No MagicHome devices found after all discovery methods.")
+        return None
 
-        # Return first responsive device
-        self._cache.save(found)
-        return found[0]
+    def _enrich_device_type(self, dev: DeviceInfo) -> None:
+        """Fill device_type / supports_* via a quick TCP capability probe."""
+        probe = CapabilityProbe(connect_timeout=self._connect_timeout)
+        info = probe.probe(dev.ip, dev.port)
+        if info:
+            dev.device_type = info.device_type
+            dev.supports_addressable = info.supports_addressable
+            dev.supports_rgbw = info.supports_rgbw
 
     def _verify(self, ip: str) -> bool:
         """Return True if *ip* responds on port 5577 within timeout."""
