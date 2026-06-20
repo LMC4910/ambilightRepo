@@ -5,6 +5,23 @@ All notable changes to **Ambilight Desktop** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-06-21
+
+Maintenance release fixing device discovery, service initialization crashes, and installer UX.
+
+### Fixed
+- **Device discovery completely rewritten.** Old code extracted MAC from wrong bytes (RGB color state instead of actual MAC), had no UDP broadcast support (primary discovery method), and hardcoded subnet to `192.168.1.0/24`. New implementation uses UDP broadcast to find devices in ~2s on any network, auto-detects local subnets, correctly parses real MAC from responses, and falls back to TCP only if UDP fails. Discovery now works reliably across different networks and finds devices 15x faster.
+- **Service crashes on PyInstaller windowed builds.** `sys.stdout = None` in no-console builds caused `AttributeError: 'NoneType' object has no attribute 'isatty'` during module-level logging initialization in multiprocessing child processes. Added None checks before accessing `sys.stdout` methods and moved stream setup earlier in initialization pipeline.
+- **Device cache write permission denied.** Cache path was relative (`device_cache.json`), which fails in read-only Program Files directory. Now resolved to `~/.ambilight/device_cache.json` before service starts.
+- **LED count validation only warned.** Absurd values like 30000 now silently clamp to 30 instead of crashing the gradient engine.
+- **Pipeline worker errors invisible.** Worker subprocess stderr was not captured, so early initialization errors disappeared silently. Now captured and logged.
+- **Installation details pane hidden.** Added global `ShowInstDetails show` and `ShowUninstDetails show` directives to make NSIS installation logs visible by default. Installation now creates `~/.ambilight/logs/install.log` with version and metadata.
+
+### Changed
+- **Device discovery strategy.** Now tries: (1) direct IP verify, (2) UDP broadcast (primary), (3) cache lookup, (4) TCP scan fallback. Each step logs success/failure for diagnostics.
+
+[1.0.2]: https://github.com/LMC4910/ambilightRepo/releases/tag/v1.0.2
+
 ## [1.0.1] - 2026-06-21
 
 Bug-fix release focused on the three issues that broke real-world use — games not

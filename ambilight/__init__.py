@@ -6,4 +6,4 @@
 # building the service binary (see build.py:_check_version_sync). Bump both
 # together on every release (semver: patch for fixes, minor for features, major
 # for breaking changes).
-__version__ = "1.0.1"
+__version__ = "1.0.2"
