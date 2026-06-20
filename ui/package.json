@@ -43,7 +43,8 @@
     "publish": {
       "provider": "github",
       "owner": "LMC4910",
-      "repo": "ambilightRepo"
+      "repo": "ambilightRepo",
+      "releaseType": "release"
     },
     "win": {
       "target": "nsis",
