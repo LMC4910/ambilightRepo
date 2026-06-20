@@ -10,12 +10,13 @@
   "homepage": "https://github.com/ambilight-desktop/ambilight",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "sync:version": "node ../scripts/sync-version.mjs",
     "gen:icons": "node scripts/gen-icons.mjs",
     "build": "vite build",
-    "electron:build": "pnpm run gen:icons && vite build && electron-builder --win",
-    "dist:win": "pnpm run gen:icons && vite build && electron-builder --win",
-    "dist:mac": "pnpm run gen:icons && vite build && electron-builder --mac",
-    "dist:linux": "pnpm run gen:icons && vite build && electron-builder --linux",
+    "electron:build": "pnpm run sync:version && pnpm run gen:icons && vite build && electron-builder --win",
+    "dist:win": "pnpm run sync:version && pnpm run gen:icons && vite build && electron-builder --win",
+    "dist:mac": "pnpm run sync:version && pnpm run gen:icons && vite build && electron-builder --mac",
+    "dist:linux": "pnpm run sync:version && pnpm run gen:icons && vite build && electron-builder --linux",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -26,7 +27,9 @@
       "output": "release",
       "buildResources": "build"
     },
-    "electronLanguages": ["en-US"],
+    "electronLanguages": [
+      "en-US"
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*"

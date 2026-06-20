@@ -55,33 +55,46 @@ def _check_tool(name: str, version_flag: str = "--version") -> None:
 def _check_version_sync() -> str:
     """Fail the build if the Python and Electron versions disagree.
 
-    ``ui/package.json`` ``version`` is the single source of truth: it drives the
-    installer name and the electron-updater feed. The Python service carries its
-    own ``ambilight.__version__`` (exposed on /health and /api/status). They must
-    match so the running service reports the same version the user installed —
-    otherwise auto-update decisions and bug reports reference the wrong build.
+    The VERSION file at the repo root is the single source of truth. Both
+    ui/package.json and ambilight/__version__ must match it. The Python service
+    version (exposed on /health and /api/status) is read dynamically from the
+    VERSION file, and package.json is synced by scripts/sync-version.mjs before
+    building.
     Returns the agreed version string.
     """
     import json
     import re
 
+    # Read VERSION file (single source of truth)
+    version_file = ROOT / "VERSION"
+    canonical_version = version_file.read_text(encoding="utf-8").strip()
+    if not canonical_version:
+        print("[FATAL] VERSION file is empty")
+        sys.exit(1)
+
+    # Validate semver format
+    if not re.match(r"^\d+\.\d+\.\d+$", canonical_version):
+        print(f"[FATAL] Invalid version format in VERSION file: {canonical_version}")
+        print("        Expected format: X.Y.Z (semver)")
+        sys.exit(1)
+
+    # Check package.json version
     pkg_path = UI_DIR / "package.json"
     pkg_version = json.loads(pkg_path.read_text(encoding="utf-8"))["version"]
 
-    init_text = (ROOT / "ambilight" / "__init__.py").read_text(encoding="utf-8")
-    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_text)
-    py_version = m.group(1) if m else None
-
-    if py_version != pkg_version:
+    if pkg_version != canonical_version:
         print(
-            f"[FATAL] Version mismatch: ui/package.json={pkg_version!r} but "
-            f"ambilight.__version__={py_version!r}. Bump both to the same value "
-            f"before building."
+            f"[WARN] Version mismatch: VERSION={canonical_version!r} but "
+            f"ui/package.json={pkg_version!r}. Run 'node scripts/sync-version.mjs' "
+            f"to sync, then rebuild."
         )
         sys.exit(1)
 
-    print(f"[OK] Version in sync: {pkg_version}")
-    return pkg_version
+    # Python service reads VERSION dynamically, so no need to check ambilight/__version__
+    # (it's loaded at runtime from the file)
+
+    print(f"[OK] Version in sync: {canonical_version}")
+    return canonical_version
 
 
 def build_service(gpu: bool = False) -> None:
