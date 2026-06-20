@@ -38,6 +38,27 @@ DEFAULT_HOST = "127.0.0.1"  # NFR-S-01: bind to loopback only
 DEFAULT_PORT = 7826
 
 
+def _ensure_std_streams() -> None:
+    """Guarantee ``sys.stdout``/``sys.stderr`` are writable before logging starts.
+
+    ``python -m ambilight.service`` under ``pythonw.exe`` (the windowless dev
+    spawn) — and any no-console launch — has both streams set to ``None``, which
+    makes ``logging.basicConfig(stream=sys.stdout)`` and uvicorn crash. The
+    Electron supervisor wires real file handles to fd 1/2, so rebind to those;
+    fall back to the null device when no descriptor is available. (The frozen
+    binary also applies this in ``service_entry.py`` for spawned workers.)
+    """
+    import os
+    for name, fd in (("stdout", 1), ("stderr", 2)):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            stream = os.fdopen(fd, "w", buffering=1)
+        except OSError:
+            stream = open(os.devnull, "w")
+        setattr(sys, name, stream)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ambilight.service",
@@ -64,6 +85,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _ensure_std_streams()
     # Give the parent/API process a stream handler up front. The rotating FILE
     # handler is owned solely by the pipeline worker (single writer — avoids a
     # multi-process rotation race); this handler just makes the parent's boot

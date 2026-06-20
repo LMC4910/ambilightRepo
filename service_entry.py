@@ -19,10 +19,38 @@ build.py keeps the package bundled despite the import living inside the guard.
 
 import multiprocessing
 
+
+def _ensure_std_streams() -> None:
+    """Guarantee ``sys.stdout``/``sys.stderr`` are writable file objects.
+
+    A windowed (no-console) PyInstaller build — and ``pythonw.exe`` in dev — sets
+    both streams to ``None`` because there's no console attached. uvicorn and
+    ``logging.basicConfig(stream=sys.stdout)`` then crash on ``None.write``. The
+    Electron supervisor launches us with real file handles wired to fd 1/2
+    (``service.out.log``), so rebind Python's streams to those descriptors; that
+    keeps boot/crash output captured. When no valid descriptor exists (e.g. the
+    Startup launcher with no redirection) fall back to the null device — the
+    rotating file log under ``~/.ambilight/logs`` is unaffected either way.
+    """
+    import os
+    import sys
+
+    for name, fd in (("stdout", 1), ("stderr", 2)):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            stream = os.fdopen(fd, "w", buffering=1)
+        except OSError:
+            stream = open(os.devnull, "w")
+        setattr(sys, name, stream)
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
     import sys
+
+    _ensure_std_streams()
 
     # Frozen builds re-exec this binary for spawn; pin the method explicitly
     # (default on Windows/macOS, but be deterministic for the frozen child).

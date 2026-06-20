@@ -110,6 +110,14 @@ def build_service(gpu: bool = False) -> None:
         "pyinstaller",
         "--noconfirm",
         "--onedir",
+        # Build a windowed (no-console) binary. The service is a background
+        # process supervised by the Electron shell / launched via the Startup
+        # launcher — a console subsystem exe (PyInstaller's default) pops up a
+        # terminal window on every launch that neither `windowsHide` nor
+        # `start /min` can suppress. stdout/stderr still reach the Electron
+        # capture log because the supervisor passes real file handles for fd
+        # 1/2; service_entry.py rebinds sys.stdout/err to them when frozen.
+        "--windowed",
         "--name", SERVICE_NAME,
         "--distpath", str(SERVICE_DIST),
         "--specpath", str(DIST / "build_spec"),
