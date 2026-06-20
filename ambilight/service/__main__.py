@@ -135,6 +135,18 @@ def main(argv: list[str] | None = None) -> None:
         cfg.logging.file = os.path.join(ambilight_dir, cfg.logging.file)
     os.makedirs(os.path.dirname(cfg.logging.file), exist_ok=True)
 
+    # Resolve cache_file to an absolute path for the same reason: the service is
+    # installed under Program Files (read-only). A relative "device_cache.json"
+    # would trigger Permission Denied on first write, silently breaking MAC-based
+    # device re-discovery after a DHCP IP change.
+    def _resolve_cache(path: str) -> str:
+        return path if os.path.isabs(path) else os.path.join(ambilight_dir, path)
+
+    cfg.device.cache_file = _resolve_cache(cfg.device.cache_file)
+    for dev in cfg.devices:
+        if isinstance(dev, dict) and not os.path.isabs(dev.get("cache_file", "")):
+            dev["cache_file"] = _resolve_cache(dev.get("cache_file", "device_cache.json"))
+
     if args.host != DEFAULT_HOST:
         logger.warning(
             "[Service] Binding to non-loopback host %s — the API has no network "

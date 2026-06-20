@@ -298,22 +298,24 @@ class ConfigManager:
         # 2. led_count sanity — a single-RGB strip is one channel; even long
         #    addressable strips rarely exceed a few hundred LEDs. Absurd values
         #    (e.g. 3000) usually mean a stale/typo'd config.
-        def _check_led_count(count: Any, label: str) -> None:
+        def _check_led_count(count: Any, label: str) -> int:
             try:
                 n = int(count)
             except (TypeError, ValueError):
-                logger.warning("[Config] %s=%r is not an integer.", label, count)
-                return
+                logger.warning("[Config] %s=%r is not an integer; defaulting to 30.", label, count)
+                return 30
             if n <= 0 or n > 1000:
                 logger.warning(
                     "[Config] %s=%d looks wrong (expected 1–1000). Single-RGB "
-                    "strips use 30; check your config.", label, n,
+                    "strips use 30; clamping to 30.", label, n,
                 )
+                return 30
+            return n
 
-        _check_led_count(config.device.led_count, "device.led_count")
+        config.device.led_count = _check_led_count(config.device.led_count, "device.led_count")
         for i, dev in enumerate(config.devices):
             if isinstance(dev, dict) and "led_count" in dev:
-                _check_led_count(dev["led_count"], f"devices[{i}].led_count")
+                dev["led_count"] = _check_led_count(dev["led_count"], f"devices[{i}].led_count")
 
         # 3. MAC consistency — discovery keys off MAC to recover after an IP
         #    change, so conflicting MACs across device/devices defeat it. Warn

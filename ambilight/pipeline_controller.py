@@ -29,6 +29,27 @@ _RESTART_DELAY = 1.0
 
 def _pipeline_worker(config: Optional[AppConfig], stop_event: multiprocessing.Event, pause_event: multiprocessing.Event, metrics_queue: multiprocessing.Queue, command_queue: multiprocessing.Queue) -> None:
     """Entry point for the isolated pipeline process."""
+    # Guarantee stdout/stderr are writable in no-console frozen builds. The
+    # main process runs _ensure_std_streams() in service_entry.py, but spawned
+    # child processes re-execute the binary and bypass that call entirely.
+    import sys, os
+    for _name, _fd in (("stdout", 1), ("stderr", 2)):
+        if getattr(sys, _name, None) is None:
+            try:
+                setattr(sys, _name, os.fdopen(_fd, "w", buffering=1))
+            except OSError:
+                setattr(sys, _name, open(os.devnull, "w"))
+
+    # Install a minimal stderr handler so any crash before setup_logging() is
+    # visible in the service's captured output rather than silently dropped.
+    import logging as _logging
+    if not _logging.root.handlers:
+        _logging.basicConfig(
+            level=_logging.INFO,
+            stream=sys.stderr,
+            format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        )
+
     try:
         # On spawn-based platforms (Windows) the child does not inherit the
         # ConfigManager singleton, so seed it from the passed config.
