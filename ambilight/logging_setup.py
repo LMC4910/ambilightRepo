@@ -36,7 +36,7 @@ _COLOURS: dict[int, str] = {
 _RESET = "\033[0m"
 
 _COLOUR_SUPPORT: bool = (
-    sys.stdout.isatty()
+    (sys.stdout is not None and sys.stdout.isatty())
     or os.environ.get("FORCE_COLOR", "").lower() in ("1", "true", "yes")
 )
 
@@ -198,13 +198,13 @@ def setup_logging(
     fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     date_fmt = "%Y-%m-%d %H:%M:%S"
 
-    # Console handler — uses the (possibly verbose) console level.
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(numeric_console)
-    console_handler.setFormatter(
-        _ColouredFormatter(fmt=fmt, datefmt=date_fmt)
-    )
-    root.addHandler(console_handler)
+    # Console handler — only added when stdout is available (windowed/no-console
+    # PyInstaller builds set sys.stdout to None).
+    if sys.stdout is not None:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(numeric_console)
+        console_handler.setFormatter(_ColouredFormatter(fmt=fmt, datefmt=date_fmt))
+        root.addHandler(console_handler)
 
     # Rotating file handler — bounded by size, and kept at file_level so DEBUG
     # console output does not bloat the on-disk log.
