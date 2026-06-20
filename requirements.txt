@@ -75,10 +75,13 @@ windows-capture>=2.0.0 ; sys_platform == "win32"
 # Install from https://pytorch.org/get-started/locally/ to match your CUDA.
 # torch>=2.2.0
 
-# ---- Optional — Fast Windows capture backends --------------------------------
+# ---- Fast Windows capture backends -------------------------------------------
+# WGC (windows-capture, above) is REQUIRED on Windows to capture fullscreen
+# games and hardware-overlay video — without it capture falls back to MSS, which
+# renders those BLACK. dxcam is the DXGI fallback when WGC is unavailable.
 
 # dxcam — DXGI Desktop Duplication wrapper (Windows only)
-# dxcam>=0.0.5
+dxcam>=0.0.5 ; sys_platform == "win32"
 
 # winsdk — Windows Graphics Capture API Python bindings (Windows 10 1903+)
 # winsdk>=1.0.0b10

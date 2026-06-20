@@ -287,6 +287,12 @@ class AmbilightPipeline:
 
                 t0 = time.monotonic()
                 r, g, b = (0, 0, 0)
+                # Capture health for this iteration. Effect modes don't capture,
+                # so they're trivially "ok"; screen-sync sets this from the grab.
+                capture_ok = True
+                capture_backend = next(
+                    (cap.active_backend for cap in self._captures.values()), None
+                )
 
                 # --- Effect Processing (applies to every device) ---
                 if self._effects.current_mode != "screen_sync":
@@ -305,6 +311,25 @@ class AmbilightPipeline:
                         small_by_mon[mi] = self._gpu.resize(frame, w, h) if frame is not None else None  # type: ignore[union-attr]
 
                     if not any(v is not None for v in small_by_mon.values()):
+                        # Every monitor returned nothing this round — capture is
+                        # producing no frames (fullscreen game on the MSS backend,
+                        # a bad monitor_index, DRM, etc.). Surface it as a degraded
+                        # snapshot so the UI shows "running but not syncing"
+                        # instead of a frozen strip masquerading as healthy.
+                        if self._metrics_queue is not None:
+                            import queue
+                            try:
+                                self._metrics_queue.put_nowait({
+                                    "fps": 0.0, "latency_ms": 0.0,
+                                    "uptime_s": time.monotonic() - (self._start_time or time.monotonic()),
+                                    "mode": self._effects.current_mode, "power": self._power,
+                                    "color": [int(r), int(g), int(b)], "zones": self._last_zone_colors,
+                                    "devices": len(self._channels),
+                                    "devices_connected": sum(1 for ch in self._channels if ch.led.is_connected),
+                                    "capture_ok": False, "capture_backend": capture_backend,
+                                })
+                            except queue.Full:
+                                pass
                         time.sleep(0.01)
                         continue
 
@@ -330,6 +355,8 @@ class AmbilightPipeline:
                         else:
                             ch.led.set_rgb(r, g, b)
                     sent = True
+                    # Capture delivered at least one usable frame this round.
+                    capture_ok = any(cap.is_healthy for cap in self._captures.values())
                     # Live preview reflects the first channel.
                     self._last_zone_colors = self._channels[0].last_zone_colors if self._channels else []
 
@@ -351,8 +378,10 @@ class AmbilightPipeline:
                     "zones": self._last_zone_colors,  # per-zone RGB for live preview
                     "devices": len(self._channels),
                     "devices_connected": connected,
+                    "capture_ok": capture_ok,
+                    "capture_backend": capture_backend,
                 }
-                
+
                 if self._metrics is not None:
                     self._metrics.record_frame(latency_ms)
                     
