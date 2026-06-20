@@ -13,22 +13,21 @@ function SectionHeader({ children }) {
 }
 
 export default function Devices() {
-  const { devices, scanning, fetchDevices, scanDevices, testDevice, settings, updateSettings } = useStore()
+  const { devices, scanning, fetchDevices, scanDevices, testDevice, settings, updateSettings, monitors, fetchMonitors } = useStore()
   const [manualIp, setManualIp] = useState('')
   const [manualMac, setManualMac] = useState('')
   const [testingIp, setTestingIp] = useState(null)
-  const [monitors, setMonitors] = useState([])
 
   useEffect(() => {
     fetchDevices()
-    window.api.diagnostics?.get().then((d) => setMonitors(d.monitors || [])).catch(() => {})
+    fetchMonitors()
   }, [])
 
   const managed = settings?.devices || []
   const monitorChoices = monitors.length
     ? monitors
     : [0, 1, 2, 3].map((i) => ({ index: i, name: `Display ${i + 1}`, width: 0, height: 0 }))
-  const monitorLabel = (m) => `${m.index} — ${m.name}${m.width ? ` (${m.width}×${m.height})` : ''}${m.primary ? ' • primary' : ''}`
+  const monitorLabel = (m) => `${m.index} — ${m.name || `Display ${m.index + 1}`}${m.width ? ` (${m.width}×${m.height})` : ''}${m.primary ? ' • primary' : ''}`
   const saveManaged = (list) => updateSettings({ devices: list })
   const addManaged = (d) => {
     if (managed.some((m) => m.ip === d.ip)) return

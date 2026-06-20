@@ -52,7 +52,17 @@ export default function Diagnostics() {
         <InfoRow label="Device IP" value={diag.device?.ip} />
         <InfoRow label="Device MAC" value={diag.device?.mac || 'unknown'} />
         <InfoRow label="LED count" value={diag.device?.led_count} />
-        <InfoRow label="Monitors" value={(diag.monitors || []).map((m) => `${m.width}×${m.height}`).join(', ') || 'none'} />
+        {(diag.monitors || []).length === 0 ? (
+          <InfoRow label="Monitors" value="none" />
+        ) : (
+          (diag.monitors || []).map((m) => (
+            <InfoRow
+              key={m.index}
+              label={`Display ${m.index}`}
+              value={`${m.name || `Display ${m.index + 1}`} — ${m.width}×${m.height}${m.primary ? ' · primary' : ''}`}
+            />
+          ))
+        )}
       </div>
     </section>
   )

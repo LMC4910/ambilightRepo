@@ -52,6 +52,38 @@ def _check_tool(name: str, version_flag: str = "--version") -> None:
         sys.exit(1)
 
 
+def _check_version_sync() -> str:
+    """Fail the build if the Python and Electron versions disagree.
+
+    ``ui/package.json`` ``version`` is the single source of truth: it drives the
+    installer name and the electron-updater feed. The Python service carries its
+    own ``ambilight.__version__`` (exposed on /health and /api/status). They must
+    match so the running service reports the same version the user installed —
+    otherwise auto-update decisions and bug reports reference the wrong build.
+    Returns the agreed version string.
+    """
+    import json
+    import re
+
+    pkg_path = UI_DIR / "package.json"
+    pkg_version = json.loads(pkg_path.read_text(encoding="utf-8"))["version"]
+
+    init_text = (ROOT / "ambilight" / "__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_text)
+    py_version = m.group(1) if m else None
+
+    if py_version != pkg_version:
+        print(
+            f"[FATAL] Version mismatch: ui/package.json={pkg_version!r} but "
+            f"ambilight.__version__={py_version!r}. Bump both to the same value "
+            f"before building."
+        )
+        sys.exit(1)
+
+    print(f"[OK] Version in sync: {pkg_version}")
+    return pkg_version
+
+
 def build_service(gpu: bool = False) -> None:
     print(f"\n[1/2] Building Python service with PyInstaller ({'GPU' if gpu else 'lean CPU'})…")
     _check_tool("pyinstaller")
@@ -110,6 +142,14 @@ def build_service(gpu: bool = False) -> None:
         "pyinstaller",
         "--noconfirm",
         "--onedir",
+        # Build a windowed (no-console) binary. The service is a background
+        # process supervised by the Electron shell / launched via the Startup
+        # launcher — a console subsystem exe (PyInstaller's default) pops up a
+        # terminal window on every launch that neither `windowsHide` nor
+        # `start /min` can suppress. stdout/stderr still reach the Electron
+        # capture log because the supervisor passes real file handles for fd
+        # 1/2; service_entry.py rebinds sys.stdout/err to them when frozen.
+        "--windowed",
         "--name", SERVICE_NAME,
         "--distpath", str(SERVICE_DIST),
         "--specpath", str(DIST / "build_spec"),
@@ -146,6 +186,10 @@ def main() -> None:
     parser.add_argument("--gpu", action="store_true",
                         help="Bundle CuPy/CUDA + OpenCV (large GPU build). Default is lean CPU-only.")
     args = parser.parse_args()
+
+    # Single-source-of-truth version gate — keeps the service binary and the
+    # installer/updater feed reporting the same version.
+    _check_version_sync()
 
     build_all = not args.service and not args.ui
     if build_all or args.service:

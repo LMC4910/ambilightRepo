@@ -377,11 +377,30 @@ class ScreenCaptureManager:
                 logger.info(
                     "[Capture] Active backend: %s", backend.name.upper()
                 )
+                self._warn_if_degraded(backend)
                 return
         raise RuntimeError(
             "No screen capture backend could be initialised.  "
             "Ensure mss is installed: pip install mss"
         )
+
+    def _warn_if_degraded(self, backend: CaptureBackend) -> None:
+        """Loudly flag a fallback to MSS on Windows.
+
+        MSS uses GDI/BitBlt, which renders **black** for exclusive-fullscreen
+        games and hardware-accelerated overlay video — the exact "lights don't
+        react to my game" symptom. If we landed on MSS on Windows it means
+        ``windows-capture`` (WGC) and ``dxcam`` (DXGI) are both unavailable; tell
+        the user how to fix it rather than silently degrading.
+        """
+        import sys
+        if backend.name == "mss" and sys.platform == "win32":
+            logger.warning(
+                "[Capture] Using the MSS backend on Windows — fullscreen games "
+                "and hardware-overlay video will appear BLACK. Install the WGC "
+                "backend for proper capture: pip install windows-capture "
+                "(optional DXGI fallback: pip install dxcam)."
+            )
 
     def stop(self) -> None:
         """Close the active backend."""
@@ -448,6 +467,26 @@ class ScreenCaptureManager:
                 logger.info(
                     "[Capture] Switched to backend: %s", backend.name.upper()
                 )
+                self._warn_if_degraded(backend)
                 return
 
         logger.error("[Capture] All backends exhausted — no capture source available.")
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    @property
+    def active_backend(self) -> Optional[str]:
+        """Name of the backend currently in use (``"wgc"``/``"dxgi"``/``"mss"``),
+        or ``None`` if every backend has been exhausted."""
+        return self._active.name if self._active is not None else None
+
+    @property
+    def is_healthy(self) -> bool:
+        """True while a backend is open and delivering frames.
+
+        Goes False when all backends are exhausted, or when the active backend
+        has returned ``None`` for a sustained run (``_FAIL_THRESHOLD``) — i.e.
+        capture is producing nothing, which is what freezes the LEDs."""
+        return self._active is not None and self._consecutive_failures < self._FAIL_THRESHOLD

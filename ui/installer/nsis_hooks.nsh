@@ -32,3 +32,27 @@
   ; NOTE: user configuration, profiles, logs and metrics in %USERPROFILE%\.ambilight
   ; are intentionally preserved across uninstall.
 !macroend
+
+!macro customRemoveFiles
+  ; Clean upgrade (FR-I: a new version must replace the old one completely).
+  ;
+  ; electron-builder's default file removal only deletes paths recorded in the
+  ; install manifest. The bundled PyInstaller service under resources\service
+  ; writes files the manifest never tracked — __pycache__/*.pyc compiled on
+  ; first run, and any new/renamed bundle files between versions — so a plain
+  ; in-place update would leave STALE old-version files behind (a classic source
+  ; of "works on a clean install but breaks after an update" bugs). On both an
+  ; update (electron-builder runs the previous version's uninstaller first) and
+  ; a manual uninstall, wipe the whole install directory so nothing from the old
+  ; version survives before the new files are laid down.
+  ;
+  ; Safe because: (1) the uninstaller runs from a temp copy, not from $INSTDIR,
+  ; so it can delete its own directory; (2) user data lives in
+  ; %USERPROFILE%\.ambilight, OUTSIDE $INSTDIR, and is untouched.
+  ${if} $INSTDIR != ""
+  ${andif} $INSTDIR != "$PROGRAMFILES"
+  ${andif} $INSTDIR != "$PROGRAMFILES64"
+  ${andif} $INSTDIR != "$WINDIR"
+    RMDir /r "$INSTDIR"
+  ${endif}
+!macroend

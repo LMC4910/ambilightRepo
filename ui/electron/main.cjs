@@ -123,11 +123,21 @@ function resolveServiceCommand() {
   }
 
   // Development: run the module from the repo with the local venv if present.
+  // On Windows prefer pythonw.exe — the windowless interpreter — so running from
+  // source (pnpm run dev) doesn't pop up a console window. Fall back to the
+  // console python.exe only if pythonw is missing. stdout/stderr still reach the
+  // capture log: the service rebinds them to the fd 1/2 we pass in spawnService.
   const repoRoot = path.join(__dirname, '..', '..');
-  const venvPy = process.platform === 'win32'
-    ? path.join(repoRoot, '.venv', 'Scripts', 'python.exe')
-    : path.join(repoRoot, '.venv', 'bin', 'python');
-  const python = fs.existsSync(venvPy) ? venvPy : (process.platform === 'win32' ? 'python' : 'python3');
+  const venvDir = path.join(repoRoot, '.venv', process.platform === 'win32' ? 'Scripts' : 'bin');
+  let python;
+  if (process.platform === 'win32') {
+    const venvPyw = path.join(venvDir, 'pythonw.exe');
+    const venvPy = path.join(venvDir, 'python.exe');
+    python = fs.existsSync(venvPyw) ? venvPyw : (fs.existsSync(venvPy) ? venvPy : 'pythonw');
+  } else {
+    const venvPy = path.join(venvDir, 'python');
+    python = fs.existsSync(venvPy) ? venvPy : 'python3';
+  }
   return { cmd: python, args: ['-m', 'ambilight.service'], cwd: repoRoot };
 }
 

@@ -17,6 +17,7 @@ export const useStore = create((set, get) => ({
   profiles: [],
   activeProfile: null,
   devices: [],
+  monitors: [],
   scanning: false,
   saving: false,
 
@@ -25,6 +26,28 @@ export const useStore = create((set, get) => ({
   setSettings: (settings) => set({ settings }),
   setProfiles: (profiles) => set({ profiles }),
   setDevices: (devices) => set({ devices }),
+
+  // Fetch the connected displays (name + resolution). The setup wizard opens
+  // the instant the app launches — often before the background service has
+  // finished booting — so a single attempt frequently fails and the UI would
+  // otherwise fall back to generic "Display N" placeholders. Retry until the
+  // service answers with a real list so proper monitor names always appear.
+  fetchMonitors: async (retries = 8, delayMs = 750) => {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const d = await window.api.diagnostics?.get();
+        const mons = d?.monitors || [];
+        if (mons.length) {
+          set({ monitors: mons });
+          return mons;
+        }
+      } catch (e) {
+        // Service may still be starting; fall through to retry.
+      }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return get().monitors;
+  },
 
   fetchSettings: async () => {
     try {

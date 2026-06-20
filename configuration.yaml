@@ -1,21 +1,21 @@
 capture:
   method: wgc
-  monitor_index: 3
+  monitor_index: 2
   fps_target: 30
   analysis_width: 80
   analysis_height: 45
 device:
   ip: 192.168.1.29
   port: 5577
-  mac: 30:3a:29:00:0c:00
+  mac: 0b:0d:23:00:0c:00
   subnet: 192.168.1.
   connect_timeout: 2.0
   send_timeout: 1.0
   reconnect_interval: 5.0
   discovery_timeout: 0.5
   cache_file: device_cache.json
-  led_count: 3000
-  monitor_index: '2'
+  led_count: 30
+  monitor_index: 2
   name: RGB Light Strip
   enabled: true
 devices:
@@ -23,7 +23,7 @@ devices:
   mac: 0b:0d:23:00:0c:00
   monitor_index: 2
   led_count: 30
-  name: Rgb light
+  name: RGB Light Strip
   enabled: true
 zones:
   top: 7
