@@ -145,9 +145,15 @@ class DeviceScanner:
                 try:
                     data = sock.recv(128)
                 except socket.timeout:
-                    data = b""
+                    return None
+
+                if not data:
+                    return None
 
                 mac, firmware, device_type = self._parse_status(data)
+                if not mac:
+                    return None
+
                 info = DeviceInfo(
                     ip=ip,
                     mac=mac,
@@ -219,6 +225,9 @@ class CapabilityProbe:
                     data = sock.recv(128)
                 except socket.timeout:
                     data = b""
+            if not data:
+                logger.debug("[CapabilityProbe] %s connected but returned no data.", ip)
+                return None
             mac, firmware, device_type = DeviceScanner._parse_status(data)
             return DeviceInfo(
                 ip=ip,
