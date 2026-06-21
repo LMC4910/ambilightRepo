@@ -505,9 +505,9 @@ function createWindow() {
   // --- Devices ---
   ipcMain.handle('api:devices:list', async () => fetchApi('/api/devices'))
   ipcMain.handle('api:devices:scan', async () => fetchApi('/api/devices/scan', { method: 'POST' }))
-  ipcMain.handle('api:devices:test', async (e, ip, port) => fetchApi('/api/devices/test', {
+  ipcMain.handle('api:devices:test', async (e, ip, port, protocol) => fetchApi('/api/devices/test', {
     method: 'POST',
-    body: JSON.stringify({ ip, port })
+    body: JSON.stringify({ ip, port, protocol })
   }))
 
   // --- Foreground app (auto-profile rules helper) ---

@@ -43,7 +43,7 @@ contextBridge.exposeInMainWorld('api', {
   devices: {
     list: () => ipcRenderer.invoke('api:devices:list'),
     scan: () => ipcRenderer.invoke('api:devices:scan'),
-    test: (ip, port) => ipcRenderer.invoke('api:devices:test', ip, port)
+    test: (ip, port, protocol) => ipcRenderer.invoke('api:devices:test', ip, port, protocol)
   },
   metrics: {
     subscribe: (callback) => {
