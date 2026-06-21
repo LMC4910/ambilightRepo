@@ -49,6 +49,15 @@ soundcard>=0.4.3
 # NOTE: WGC does NOT bypass hardware DRM (HDCP/PlayReady stays black).
 windows-capture>=2.0.0 ; sys_platform == "win32"
 
+# ---- Optional — device protocols --------------------------------------------
+#  WLED is supported out of the box (realtime UDP + JSON API over stdlib).
+#  zeroconf is OPTIONAL and only enables _wled._tcp mDNS auto-discovery; without
+#  it WLED devices are still found via an HTTP subnet probe and manual IP entry.
+#  For mDNS in the frozen installer, install this in the build env and add it to
+#  the PyInstaller hidden-imports.
+#    pip install zeroconf
+# zeroconf>=0.131.0
+
 # ---- Development / tests ----------------------------------------------------
 #   pip install pytest    # run the suite with:  pytest
 #   (CI installs pytest + flake8 separately; see .github/workflows/build.yml)

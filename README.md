@@ -534,7 +534,9 @@ logging:
   fps_interval: float     # seconds between FPS log lines, default 5.0
 ```
 
-> **Multi-device:** add a `devices:` list (each entry a device block with `ip`, `mac`, `monitor_index`, `led_count`, `name`, `enabled`) to drive several controllers at once. When omitted, the single `device:` + `capture.monitor_index` is used. The `device:` block also accepts `led_count`, `monitor_index`, `name`, and `enabled`.
+> **Multi-device:** add a `devices:` list (each entry a device block with `ip`, `mac`, `monitor_index`, `led_count`, `name`, `protocol`, `enabled`) to drive several controllers at once. When omitted, the single `device:` + `capture.monitor_index` is used. The `device:` block also accepts `led_count`, `monitor_index`, `name`, `protocol`, and `enabled`.
+>
+> **Device protocols:** each device has a `protocol` — `magichome` (default) or `wled`. WLED strips stream per-pixel over realtime UDP and use the JSON API for power; see [docs/wled.md](docs/wled.md).
 >
 > **Installed builds** read and write `~/.ambilight/configuration.yaml` (seeded from the bundled default on first run); the repo `configuration.yaml` is the default template.
 
