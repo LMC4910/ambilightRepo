@@ -170,8 +170,12 @@ function spawnService() {
   // Route stdout+stderr to the capture file (fall back to 'ignore' if it could
   // not be opened) so crashes/tracebacks are always recoverable.
   const stdio = logFd !== null ? ['ignore', logFd, logFd] : 'ignore';
+  // Hand the service our PID so its parent-watchdog can self-terminate if this
+  // shell is force-quit (Task Manager / taskbar "End task") without running our
+  // graceful before-quit cleanup — otherwise the service would be orphaned.
+  const childEnv = { ...process.env, AMBILIGHT_PARENT_PID: String(process.pid) };
   try {
-    serviceProc = spawn(cmd, args, { cwd, env: process.env, stdio, windowsHide: true });
+    serviceProc = spawn(cmd, args, { cwd, env: childEnv, stdio, windowsHide: true });
   } catch (err) {
     console.error('[Service] Failed to spawn:', err.message);
     if (logFd !== null) { try { fs.closeSync(logFd); } catch (_) {} }
@@ -216,10 +220,29 @@ async function startService() {
   spawnService();
 }
 
+// Kill the service AND its descendants. The bundled PyInstaller service spawns
+// a child plus a multiprocessing pipeline worker; a plain serviceProc.kill()
+// only signals the launcher and would orphan those, so on Windows we use
+// taskkill /T (tree) /F (force). POSIX gets a SIGTERM to the process group.
+function killServiceTree(proc) {
+  if (!proc || proc.killed) return;
+  const pid = proc.pid;
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') {
+      require('child_process').execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      try { process.kill(-pid, 'SIGTERM'); } catch (_) { proc.kill('SIGTERM'); }
+    }
+  } catch (_) {
+    try { proc.kill(); } catch (_) {}
+  }
+}
+
 function stopService() {
   serviceShouldRun = false;
   if (serviceProc) {
-    try { serviceProc.kill(); } catch (_) {}
+    killServiceTree(serviceProc);
     serviceProc = null;
   }
 }
@@ -609,8 +632,15 @@ app.on('window-all-closed', function () {
   if (isQuitting && process.platform !== 'darwin') app.quit()
 })
 
-// Ensure we don't leave an orphaned service process behind.
-app.on('before-quit', () => {
+// Ensure we don't leave an orphaned service process behind. before-quit covers
+// a graceful exit; will-quit is a second chance if something short-circuited it;
+// process 'exit' is a last synchronous best-effort. (A hard force-kill of this
+// shell runs none of these — that case is handled by the service's own
+// parent-watchdog, which sees our PID vanish and shuts itself down.)
+function shutdownCleanup() {
   if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
   stopService();
-})
+}
+app.on('before-quit', shutdownCleanup)
+app.on('will-quit', shutdownCleanup)
+process.on('exit', () => { try { killServiceTree(serviceProc); } catch (_) {} })

@@ -155,20 +155,42 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     try:
+        import threading
+        import time
         import uvicorn
         # Import the app object directly (rather than the "module:attr" string)
         # so a frozen PyInstaller build statically bundles ambilight.api_server
         # and its transitive imports. We don't use reload/multiple workers, so
         # passing the object is equivalent to the string form.
         from ambilight.api_server import app
+        from ambilight.parent_watchdog import start_parent_watchdog
         logger.info("[Service] Starting uvicorn on %s:%s (frozen=%s)",
                     args.host, args.port, getattr(sys, "frozen", False))
-        uvicorn.run(
+
+        # Build the server explicitly so the parent watchdog can ask it to shut
+        # down *gracefully* (fires the API shutdown event → stops the pipeline →
+        # turns the strip off) when the Electron shell is force-quit, instead of
+        # leaving an orphaned service behind.
+        config = uvicorn.Config(
             app,
             host=args.host,
             port=args.port,
             log_level=cfg.logging.level.lower(),
         )
+        server = uvicorn.Server(config)
+
+        def _on_parent_exit() -> None:
+            server.should_exit = True
+            # Failsafe: if graceful shutdown stalls (e.g. a wedged device send),
+            # hard-exit so the service can never linger after the shell is gone.
+            def _force() -> None:
+                time.sleep(8.0)
+                logger.warning("[Service] Graceful shutdown timed out after parent exit; forcing exit.")
+                os._exit(0)
+            threading.Thread(target=_force, name="watchdog-failsafe", daemon=True).start()
+
+        start_parent_watchdog(_on_parent_exit)
+        server.run()
     except Exception as exc:  # pragma: no cover - fatal boot failure
         logging.getLogger(__name__).critical(
             "[Service] Fatal error: %s", exc, exc_info=True
