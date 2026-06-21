@@ -252,14 +252,18 @@ class MagicHomeController(LedDriver):
         """
         color = (r & 0xFF, g & 0xFF, b & 0xFF)
 
-        # Duplicate suppression
-        if color == self._last_color:
-            return True
-
-        # Rate limiting
-        now = time.monotonic()
-        if now - self._last_send_time < self._min_update_interval:
-            return True
+        # Duplicate suppression + rate limiting — only while connected. When the
+        # socket is down these must NOT short-circuit, or a static scene (same
+        # colour every frame) would never reach _send_raw and the backoff
+        # reconnect would stall indefinitely.
+        if self._connected:
+            if color == self._last_color:
+                return True
+            now = time.monotonic()
+            if now - self._last_send_time < self._min_update_interval:
+                return True
+        else:
+            now = time.monotonic()
 
         cmd = _build_rgb_command(*color)
         success = self._send_raw(cmd)

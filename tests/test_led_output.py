@@ -65,3 +65,26 @@ def test_ensure_on_noop_when_already_on(monkeypatch):
     monkeypatch.setattr(c, "turn_on", lambda: calls.append(1))
     assert c.ensure_on() is True
     assert calls == []                   # no redundant turn-on
+
+
+def test_set_rgb_dedupes_identical_when_connected(monkeypatch):
+    c = MagicHomeController("127.0.0.1")
+    calls = []
+    monkeypatch.setattr(c, "_send_raw", lambda data: (calls.append(data), True)[1])
+    c._connected = True
+    c.set_rgb(10, 20, 30)
+    c._last_send_time = 0                # bypass rate limiter
+    c.set_rgb(10, 20, 30)               # identical + connected → suppressed
+    assert len(calls) == 1
+
+
+def test_set_rgb_resends_identical_when_disconnected(monkeypatch):
+    # Regression: while disconnected, an unchanged colour must still attempt a
+    # send so _send_raw's backoff reconnect can recover on a static scene.
+    c = MagicHomeController("127.0.0.1")
+    calls = []
+    monkeypatch.setattr(c, "_send_raw", lambda data: (calls.append(data), False)[1])
+    c._connected = False
+    c._last_color = (10, 20, 30)        # same colour as the next call
+    c.set_rgb(10, 20, 30)
+    assert calls, "disconnected set_rgb must still attempt a send"

@@ -215,11 +215,15 @@ class WledDriver(LedDriver):
         modes that call this every frame stay fast. Dedupes + rate-limits like
         the MagicHome driver."""
         color = (r & 0xFF, g & 0xFF, b & 0xFF)
-        if color == self._last_color:
-            return True
+        # Suppress duplicates + rate-limit only while connected. When
+        # disconnected these must not short-circuit, or a static scene would
+        # never reach _send_realtime (which drives the backoff reconnect).
         now = time.monotonic()
-        if now - self._last_send_time < self._min_update_interval:
-            return True
+        if self._connected:
+            if color == self._last_color:
+                return True
+            if now - self._last_send_time < self._min_update_interval:
+                return True
 
         ok = self._send_realtime([color] * max(1, self.led_count))
         if ok:

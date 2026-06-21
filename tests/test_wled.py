@@ -68,12 +68,24 @@ def test_set_rgb_fills_whole_strip(monkeypatch):
     assert d.last_color == (7, 8, 9)
 
 
-def test_set_rgb_dedupes_identical_color(monkeypatch):
+def test_set_rgb_dedupes_identical_color_when_connected(monkeypatch):
     d, sent = _driver(monkeypatch, led_count=3)
+    d._connected = True               # dedup only applies while connected
     d.set_rgb(1, 2, 3)
-    d._last_send_time = 0  # bypass the rate limiter
+    d._last_send_time = 0             # bypass the rate limiter
     assert d.set_rgb(1, 2, 3) is True
-    assert len(sent) == 1  # second identical call suppressed
+    assert len(sent) == 1            # second identical call suppressed
+
+
+def test_set_rgb_resends_when_disconnected(monkeypatch):
+    # Regression: a static scene must keep sending while disconnected so the
+    # backoff reconnect in _send_realtime can recover (no dedup short-circuit).
+    d, sent = _driver(monkeypatch, led_count=3)
+    d._connected = False
+    d.set_rgb(1, 2, 3)
+    d._last_send_time = 0
+    d.set_rgb(1, 2, 3)               # identical, but disconnected → still sent
+    assert len(sent) == 2
 
 
 def test_set_pixels_passes_through(monkeypatch):
