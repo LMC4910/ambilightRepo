@@ -38,7 +38,9 @@ def create_driver(spec: dict[str, Any]) -> LedDriver:
 
     if protocol == "wled":
         from .wled import WledDriver
-        return WledDriver(port=int(spec.get("port", 21324)), **common)
+        # `port` is WLED's HTTP/JSON API port (default 80); the realtime UDP port
+        # is fixed at 21324.
+        return WledDriver(port=int(spec.get("port", 80)), **common)
 
     if protocol != "magichome":
         logger.warning(
