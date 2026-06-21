@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useStore } from './store'
 import {
   Activity, Cpu, MonitorPlay, Zap, ServerCrash, Play, Square, RotateCw, Clock, Power,
+  AlertTriangle, ShieldAlert, CheckCircle2, Sparkles,
 } from 'lucide-react'
 import Devices from './pages/Devices'
 import Settings from './pages/Settings'
@@ -32,6 +33,50 @@ const STATUS_STYLES = {
   connected: { wrap: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400', dot: 'bg-emerald-500', ping: 'bg-emerald-400', label: 'Service Online' },
   connecting: { wrap: 'bg-blue-500/10 border-blue-500/20 text-blue-400', dot: 'bg-blue-500', ping: 'bg-blue-400', label: 'Connecting…' },
   disconnected: { wrap: 'bg-red-500/10 border-red-500/20 text-red-400', dot: 'bg-red-500', ping: '', label: 'Service Offline' },
+}
+
+// Translate the pipeline's capture-health metrics into a human banner. The
+// strip can be silently dark even while the service is "online" — a fullscreen
+// game on the MSS backend (or DRM content) yields black frames — so we surface
+// the cause and the fix rather than a flat green "active".
+function CaptureHealthBanner({ metrics }) {
+  const backend = (metrics.capture_backend || '').toUpperCase()
+  const hdr = !!metrics.hdr_active
+  const reason = metrics.capture_reason || 'ok'
+  const captureOk = metrics.capture_ok !== false
+
+  let tone, Icon, text
+  if (!captureOk && reason === 'black') {
+    tone = 'bg-red-500/10 border-red-500/30 text-red-300'; Icon = AlertTriangle
+    text = 'Not syncing — capture is black. A fullscreen game on the MSS backend renders black; install the WGC backend (windows-capture) for proper capture.'
+  } else if (!captureOk && reason === 'drm_suspected') {
+    tone = 'bg-amber-500/10 border-amber-500/30 text-amber-300'; Icon = ShieldAlert
+    text = 'Not syncing — the screen is black. DRM-protected content (Netflix, Disney+, etc.) is blocked by Windows and can’t be captured.'
+  } else if (!captureOk && reason === 'no_frames') {
+    tone = 'bg-red-500/10 border-red-500/30 text-red-300'; Icon = AlertTriangle
+    text = 'Not syncing — capture is producing no frames. Check the selected monitor in Devices, or that a capture backend is available.'
+  } else if (!captureOk) {
+    tone = 'bg-red-500/10 border-red-500/30 text-red-300'; Icon = AlertTriangle
+    text = 'Not syncing — capture is unavailable.'
+  } else if (metrics.degraded || metrics.capture_degraded) {
+    tone = 'bg-amber-500/10 border-amber-500/30 text-amber-300'; Icon = AlertTriangle
+    text = 'Capture fell back to MSS — fullscreen games and overlay video may appear black. Install windows-capture for the WGC backend.'
+  } else {
+    tone = 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'; Icon = CheckCircle2
+    text = `Syncing${backend ? ` • ${backend}` : ''}`
+  }
+
+  return (
+    <div className={`flex items-center gap-2 border px-3 py-2 rounded-xl text-xs font-medium ${tone}`}>
+      <Icon className="w-4 h-4 shrink-0" />
+      <span className="min-w-0">{text}</span>
+      {hdr && (
+        <span className="ml-auto shrink-0 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/30 px-2 py-0.5 rounded-full">
+          <Sparkles className="w-3 h-3" /> HDR
+        </span>
+      )}
+    </div>
+  )
 }
 
 function MetricCard({ title, value, unit, icon: Icon, delay }) {
@@ -200,6 +245,12 @@ function App() {
                   </div>
                 )}
               </header>
+
+              {online && !isOff && metrics.mode === 'screen_sync' && (
+                <section className="animate-fade-up" style={{ animationDelay: '0.15s' }}>
+                  <CaptureHealthBanner metrics={metrics} />
+                </section>
+              )}
 
               {status !== 'disconnected' && (
                 <>
