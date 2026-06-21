@@ -39,8 +39,16 @@ def create_driver(spec: dict[str, Any]) -> LedDriver:
     if protocol == "wled":
         from .wled import WledDriver
         # `port` is WLED's HTTP/JSON API port (default 80); the realtime UDP port
-        # is fixed at 21324.
-        return WledDriver(port=int(spec.get("port", 80)), **common)
+        # is fixed at 21324. 5577 is the MagicHome TCP port AND the legacy
+        # device.port default, so a WLED spec that inherited it (any caller that
+        # doesn't pre-resolve the port) must fall back to 80 rather than probe
+        # http://<ip>:5577/json/info — this keeps the factory safe on its own.
+        try:
+            raw_port = int(spec.get("port") or 0)
+        except (TypeError, ValueError):
+            raw_port = 0
+        http_port = raw_port if raw_port and raw_port != 5577 else 80
+        return WledDriver(port=http_port, **common)
 
     if protocol != "magichome":
         logger.warning(

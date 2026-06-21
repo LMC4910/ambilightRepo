@@ -49,3 +49,24 @@ def test_factory_builds_wled():
     d = create_driver({"protocol": "wled", "ip": "1.2.3.4", "led_count": 120})
     assert isinstance(d, WledDriver)
     assert d.is_addressable is True
+
+
+def test_factory_wled_defaults_http_port_80():
+    d = create_driver({"protocol": "wled", "ip": "1.2.3.4"})  # no port
+    assert d._http_port == 80
+
+
+def test_factory_wled_ignores_inherited_magichome_port():
+    # A WLED spec that inherited the MagicHome default 5577 must not probe :5577.
+    d = create_driver({"protocol": "wled", "ip": "1.2.3.4", "port": 5577})
+    assert d._http_port == 80
+
+
+def test_factory_wled_honours_explicit_http_port():
+    d = create_driver({"protocol": "wled", "ip": "1.2.3.4", "port": 8080})
+    assert d._http_port == 8080
+
+
+def test_factory_magichome_keeps_explicit_port():
+    d = create_driver({"protocol": "magichome", "ip": "1.2.3.4", "port": 5577})
+    assert d._port == 5577  # MagicHome legitimately uses 5577
