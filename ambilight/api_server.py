@@ -157,6 +157,11 @@ def _health_assessment() -> Dict[str, Any]:
     mode = m.get("mode", "")
     connected = int(m.get("devices_connected", 0))
     capture_ok = bool(m.get("capture_ok", True))
+    # Why capture isn't usable (ok|no_frames|black|drm_suspected) and whether the
+    # active backend is itself degraded (MSS on Windows — fullscreen games go
+    # black). Both come from the pipeline's per-frame metrics.
+    capture_reason = str(m.get("capture_reason", "ok"))
+    capture_degraded = bool(m.get("degraded", False))
 
     reasons: list[str] = []
     if not running:
@@ -166,6 +171,8 @@ def _health_assessment() -> Dict[str, Any]:
         if connected == 0:
             reasons.append("no_device_connected")
         if mode == "screen_sync" and not capture_ok:
+            # "capture_unavailable" kept for back-compat; capture_reason carries
+            # the specific cause (no_frames / black / drm_suspected) for the UI.
             reasons.append("capture_unavailable")
 
     status = "ok" if not reasons else "degraded"
@@ -181,6 +188,9 @@ def _health_assessment() -> Dict[str, Any]:
         "devices_connected": connected,
         "capture_ok": capture_ok,
         "capture_backend": m.get("capture_backend"),
+        "capture_reason": capture_reason,
+        "capture_degraded": capture_degraded,
+        "hdr_active": bool(m.get("hdr_active", False)),
         "degraded_reasons": reasons,
     }
 
@@ -209,6 +219,9 @@ async def get_status() -> Dict[str, Any]:
         "devices_connected": health["devices_connected"],
         "capture_ok": health["capture_ok"],
         "capture_backend": health["capture_backend"],
+        "capture_reason": health["capture_reason"],
+        "capture_degraded": health["capture_degraded"],
+        "hdr_active": health["hdr_active"],
         "paused": st["paused"],
         "pid": st["pid"],
         "restarts": st["restarts"],

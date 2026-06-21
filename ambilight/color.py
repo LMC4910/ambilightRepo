@@ -97,6 +97,21 @@ def _rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
     return np.stack([h, s, v], axis=1)
 
 
+def _boost_saturation(rgb: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
+    """Scale chroma about per-colour luma to make game colours pop (vibrance).
+
+    ``factor`` of 1.0 is a no-op; >1 pushes the colour away from grey while
+    preserving its brightness (Rec. 709 luma). Used as a post-analysis step so
+    every colour mode benefits without changing its core math.
+    """
+    if factor == 1.0:
+        return rgb
+    r, g, b = rgb
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    out = tuple(int(np.clip(luma + (c - luma) * factor, 0, 255)) for c in (r, g, b))
+    return (out[0], out[1], out[2])
+
+
 def _filter_extremes(
     pixels: np.ndarray,
     black_threshold: int,
@@ -397,6 +412,9 @@ class ColorAnalyzer:
         Exponent for the ``saturation_weighted`` mode.
     min_saturation:
         Minimum saturation for the ``saturation_weighted`` mode.
+    vibrance:
+        Post-analysis chroma boost applied to every extracted colour
+        (1.0 = off). Higher values make fast game scenes more vivid.
     """
 
     def __init__(
@@ -407,8 +425,10 @@ class ColorAnalyzer:
         kmeans_clusters: int = 3,
         saturation_weight_power: float = 2.0,
         min_saturation: float = 0.05,
+        vibrance: float = 1.0,
     ) -> None:
         self.mode = mode
+        self._vibrance = vibrance
         self._kwargs = dict(
             black_threshold=black_threshold,
             white_threshold=white_threshold,
@@ -440,7 +460,7 @@ class ColorAnalyzer:
         """
         if region.size == 0:
             return (0, 0, 0)
-        return self._fn(region, **self._kwargs)
+        return _boost_saturation(self._fn(region, **self._kwargs), self._vibrance)
 
     def analyze_zones(
         self,

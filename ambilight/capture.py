@@ -34,6 +34,28 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# Mean-luminance (0-255) at or below which an analysis frame is considered
+# "black". Deliberately tiny so only near-perfect black trips it — a genuine
+# dark scene still sits well above this, while a stuck/no-signal capture
+# (fullscreen game on the MSS backend, or DRM-protected content) reads ~0.
+BLACK_LUMA_THRESHOLD: float = 6.0
+
+
+def is_black_frame(frame: Optional[np.ndarray], threshold: float = BLACK_LUMA_THRESHOLD) -> bool:
+    """Return True when *frame* is (near-)uniformly black.
+
+    Used by the pipeline to distinguish a capture that is *delivering* frames
+    but producing nothing visible — the silent "lights don't react to my game"
+    symptom when an exclusive-fullscreen game lands on the MSS backend (which
+    returns a valid all-black frame rather than ``None``) or when DRM-protected
+    content is on screen. A ``None`` frame is a capture *failure*, not a black
+    frame, so it returns False here (the manager handles failures separately).
+    """
+    if frame is None or frame.size == 0:
+        return False
+    return float(frame.mean()) <= threshold
+
+
 # ---------------------------------------------------------------------------
 # Abstract backend
 # ---------------------------------------------------------------------------
