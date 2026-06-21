@@ -78,6 +78,7 @@ class ColorConfig:
     ignore_white_threshold: int = 225  # pixels brighter than this (all channels) are ignored
     saturation_weight_power: float = 2.0
     min_saturation: float = 0.05
+    vibrance: float = 1.0              # post-analysis chroma boost (1.0 = off)
 
 
 @dataclass

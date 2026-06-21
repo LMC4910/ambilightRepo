@@ -547,6 +547,7 @@ class AmbilightPipeline:
                 kmeans_clusters=c.kmeans_clusters,
                 saturation_weight_power=c.saturation_weight_power,
                 min_saturation=c.min_saturation,
+                vibrance=getattr(c, "vibrance", 1.0),
             )
             ch.smoother = SmoothingEngine(
                 enabled=s.enabled,
@@ -611,6 +612,7 @@ class AmbilightPipeline:
                     mode=c.mode, black_threshold=c.ignore_black_threshold,
                     white_threshold=c.ignore_white_threshold, kmeans_clusters=c.kmeans_clusters,
                     saturation_weight_power=c.saturation_weight_power, min_saturation=c.min_saturation,
+                    vibrance=getattr(c, "vibrance", 1.0),
                 ),
                 smoother=SmoothingEngine(
                     enabled=s.enabled, base_alpha=s.base_alpha, fast_alpha=s.adaptive_fast_alpha,

@@ -47,6 +47,35 @@ def test_unknown_mode_raises():
         ColorAnalyzer("not_a_mode")
 
 
+def _spread(rgb):
+    """Chroma proxy: max-min channel spread."""
+    return max(rgb) - min(rgb)
+
+
+def test_vibrance_default_is_identity():
+    # A muted (low-chroma) colour must come back unchanged at vibrance 1.0.
+    region = _solid((90, 110, 140))  # BGR, low spread
+    base = ColorAnalyzer("average", vibrance=1.0).analyze(region)
+    plain = ColorAnalyzer("average").analyze(region)
+    assert base == plain
+
+
+def test_vibrance_increases_chroma_without_overflow():
+    region = _solid((90, 110, 140))
+    base = ColorAnalyzer("average", vibrance=1.0).analyze(region)
+    boosted = ColorAnalyzer("average", vibrance=1.6).analyze(region)
+    assert _spread(boosted) > _spread(base)
+    for v in boosted:
+        assert 0 <= v <= 255  # clipped, no wraparound
+
+
+def test_vibrance_preserves_grey():
+    # Pure grey has no chroma to boost — stays grey.
+    region = _solid((128, 128, 128))
+    r, g, b = ColorAnalyzer("average", vibrance=2.0).analyze(region)
+    assert r == g == b
+
+
 def test_combine_zone_colors_prefers_saturated():
     analyzer = ColorAnalyzer("average")
     zone_colors = [(object(), (10, 10, 10)), (object(), (255, 0, 0))]
