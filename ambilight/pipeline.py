@@ -40,7 +40,7 @@ from .tonemap import tonemap_bgr
 from .config import AppConfig, ConfigManager
 from .discovery import DeviceDiscovery, DeviceInfo
 from .gpu import GpuAccelerator, detect_backend
-from .led_output import MagicHomeController
+from .devices import LedDriver, create_driver
 from .logging_setup import PerformanceMetrics, setup_logging
 from .smoothing import SmoothingEngine
 from .zones import ZoneManager
@@ -80,7 +80,7 @@ class _Channel:
     """
     name: str
     monitor_index: int
-    led: "MagicHomeController"
+    led: "LedDriver"
     zones: "ZoneManager"
     analyzer: "ColorAnalyzer"
     smoother: "SmoothingEngine"
@@ -110,6 +110,7 @@ def _device_specs(cfg) -> list[dict]:
                 "monitor_index": int(d.get("monitor_index", 0)),
                 "led_count": int(d.get("led_count", 30)),
                 "name": d.get("name") or d.get("ip") or "device",
+                "protocol": str(d.get("protocol", getattr(dev, "protocol", "magichome"))).lower(),
                 "connect_timeout": float(d.get("connect_timeout", dev.connect_timeout)),
                 "send_timeout": float(d.get("send_timeout", dev.send_timeout)),
                 "reconnect_interval": float(d.get("reconnect_interval", dev.reconnect_interval)),
@@ -123,6 +124,7 @@ def _device_specs(cfg) -> list[dict]:
             "monitor_index": cfg.capture.monitor_index,
             "led_count": getattr(dev, "led_count", 30),
             "name": getattr(dev, "name", "") or dev.ip,
+            "protocol": str(getattr(dev, "protocol", "magichome")).lower(),
             "connect_timeout": dev.connect_timeout, "send_timeout": dev.send_timeout,
             "reconnect_interval": dev.reconnect_interval, "subnet": dev.subnet,
             "discovery_timeout": dev.discovery_timeout, "cache_file": dev.cache_file,
@@ -593,14 +595,20 @@ class AmbilightPipeline:
         # One channel per device.
         self._channels = []
         for sp in specs:
-            info = self._discover_spec(sp)
-            ip = info.ip if info else sp["ip"]
-            kind = classify_device(info) if info else "single"
-            led = MagicHomeController(
-                ip=ip, port=sp["port"], connect_timeout=sp["connect_timeout"],
-                send_timeout=sp["send_timeout"], reconnect_interval=sp["reconnect_interval"],
-                min_update_interval=min_interval, kind=kind, led_count=sp["led_count"],
-            )
+            protocol = sp.get("protocol", "magichome")
+            # MagicHome's MAC-aware discovery recovers a controller after a DHCP
+            # IP change; it doesn't apply to other protocols, which use the
+            # configured IP directly (WLED is always per-pixel addressable).
+            if protocol == "magichome":
+                info = self._discover_spec(sp)
+                ip = info.ip if info else sp["ip"]
+                kind = classify_device(info) if info else "single"
+            else:
+                ip = sp["ip"]
+                kind = "addressable"
+            led = create_driver({
+                **sp, "ip": ip, "kind": kind, "min_update_interval": min_interval,
+            })
             if led.connect():
                 led.turn_on()
             else:

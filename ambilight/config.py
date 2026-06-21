@@ -20,6 +20,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Supported device protocols (selects the LED driver via devices/factory.py).
+_KNOWN_PROTOCOLS = {"magichome", "wled"}
+
 # ---------------------------------------------------------------------------
 # Typed sub-config dataclasses
 # ---------------------------------------------------------------------------
@@ -58,6 +61,7 @@ class DeviceConfig:
     led_count: int = 30           # LEDs per strip (addressable devices only)
     monitor_index: int = 0        # which monitor this device mirrors
     name: str = ""                # friendly label (defaults to IP)
+    protocol: str = "magichome"   # magichome | wled — selects the LED driver
     enabled: bool = True          # include this device in the pipeline
 
 
@@ -347,6 +351,23 @@ class ConfigManager:
                     "Discovery may target the wrong controller; reconcile them.",
                     config.device.ip, dev_mac, i, entry_mac,
                 )
+
+        # 4. protocol — normalise to lowercase; unknown values fall back to the
+        #    historical default so a typo never breaks the pipeline.
+        def _norm_protocol(proto: Any, label: str) -> str:
+            p = str(proto or "magichome").strip().lower()
+            if p not in _KNOWN_PROTOCOLS:
+                logger.warning(
+                    "[Config] %s=%r is not a known protocol %s; using 'magichome'.",
+                    label, proto, sorted(_KNOWN_PROTOCOLS),
+                )
+                return "magichome"
+            return p
+
+        config.device.protocol = _norm_protocol(config.device.protocol, "device.protocol")
+        for i, dev in enumerate(config.devices):
+            if isinstance(dev, dict) and "protocol" in dev:
+                dev["protocol"] = _norm_protocol(dev["protocol"], f"devices[{i}].protocol")
 
     @classmethod
     def get(cls) -> AppConfig:
