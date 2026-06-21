@@ -594,9 +594,14 @@ class AmbilightPipeline:
     # ------------------------------------------------------------------
 
     def _topology_sig(self) -> tuple:
-        """Signature of the device/monitor layout; changes trigger a rebuild."""
+        """Signature of the device/monitor layout; changes trigger a rebuild.
+
+        Includes ``protocol`` and ``port`` because they determine *which* driver
+        is instantiated (and where it connects): changing only the protocol or
+        port must rebuild I/O, not reuse the already-constructed driver.
+        """
         return tuple(sorted(
-            (s["mac"] or s["ip"], s["monitor_index"], s["led_count"])
+            (s["mac"] or s["ip"], s["monitor_index"], s["led_count"], s["protocol"], s["port"])
             for s in _device_specs(self._cfg)
         ))
 

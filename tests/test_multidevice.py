@@ -1,7 +1,7 @@
 """Tests for multi-device / multi-monitor config normalisation (FR-DEV-05, FR-CAP-06)."""
 
 from ambilight.config import AppConfig
-from ambilight.pipeline import _device_specs
+from ambilight.pipeline import _device_specs, AmbilightPipeline
 
 
 def test_single_device_fallback():
@@ -73,6 +73,26 @@ def test_single_wled_device_defaults_to_http_80():
     s = _device_specs(cfg)[0]
     assert s["protocol"] == "wled"
     assert s["port"] == 80
+
+
+def test_topology_sig_changes_when_protocol_changes():
+    # Regression: switching only the Protocol dropdown must rebuild I/O (a new
+    # driver), so it has to alter the topology signature.
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.50", "protocol": "magichome", "led_count": 30}]
+    p = AmbilightPipeline(config=cfg)
+    before = p._topology_sig()
+    cfg.devices[0]["protocol"] = "wled"
+    assert p._topology_sig() != before
+
+
+def test_topology_sig_changes_when_port_changes():
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.50", "protocol": "wled"}]   # port → 80
+    p = AmbilightPipeline(config=cfg)
+    before = p._topology_sig()
+    cfg.devices[0]["port"] = 8080
+    assert p._topology_sig() != before
 
 
 def test_distinct_monitor_grouping():
