@@ -91,9 +91,9 @@ export const useStore = create((set, get) => ({
     }
   },
 
-  testDevice: async (ip, port) => {
+  testDevice: async (ip, port, protocol) => {
     try {
-      await window.api.devices.test(ip, port);
+      await window.api.devices.test(ip, port, protocol);
       return true;
     } catch (e) {
       console.error(e);

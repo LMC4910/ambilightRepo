@@ -40,7 +40,7 @@ from .tonemap import tonemap_bgr
 from .config import AppConfig, ConfigManager
 from .discovery import DeviceDiscovery, DeviceInfo
 from .gpu import GpuAccelerator, detect_backend
-from .led_output import MagicHomeController
+from .devices import LedDriver, create_driver
 from .logging_setup import PerformanceMetrics, setup_logging
 from .smoothing import SmoothingEngine
 from .zones import ZoneManager
@@ -80,7 +80,7 @@ class _Channel:
     """
     name: str
     monitor_index: int
-    led: "MagicHomeController"
+    led: LedDriver
     zones: "ZoneManager"
     analyzer: "ColorAnalyzer"
     smoother: "SmoothingEngine"
@@ -98,18 +98,38 @@ def _device_specs(cfg) -> list[dict]:
     raw = list(getattr(cfg, "devices", None) or [])
     dev = cfg.device
     specs: list[dict] = []
+
+    def _resolve_port(proto: str, explicit) -> int:
+        """Pick the control port for *proto*, protocol-aware.
+
+        WLED is controlled over its HTTP API (default 80); 5577 is the MagicHome
+        TCP port AND the legacy ``device.port`` default. The UI/onboarding persist
+        no port for WLED, so the entry inherits 5577 — which must NOT become the
+        WLED HTTP port (the pipeline would probe ``http://<ip>:5577/json/info``
+        and never connect). Treat an unset/5577 port as "use WLED's default 80".
+        """
+        try:
+            explicit = int(explicit) if explicit else 0
+        except (TypeError, ValueError):
+            explicit = 0
+        if proto == "wled":
+            return explicit if explicit and explicit != 5577 else 80
+        return explicit or int(dev.port)
+
     if raw:
         for d in raw:
             d = d if isinstance(d, dict) else dataclasses.asdict(d)
             if not d.get("enabled", True):
                 continue
+            proto = str(d.get("protocol", getattr(dev, "protocol", "magichome"))).lower()
             specs.append({
                 "ip": d.get("ip", ""),
                 "mac": d.get("mac", ""),
-                "port": int(d.get("port", dev.port)),
+                "port": _resolve_port(proto, d.get("port")),
                 "monitor_index": int(d.get("monitor_index", 0)),
                 "led_count": int(d.get("led_count", 30)),
                 "name": d.get("name") or d.get("ip") or "device",
+                "protocol": proto,
                 "connect_timeout": float(d.get("connect_timeout", dev.connect_timeout)),
                 "send_timeout": float(d.get("send_timeout", dev.send_timeout)),
                 "reconnect_interval": float(d.get("reconnect_interval", dev.reconnect_interval)),
@@ -118,11 +138,13 @@ def _device_specs(cfg) -> list[dict]:
                 "cache_file": d.get("cache_file", dev.cache_file),
             })
     else:
+        proto = str(getattr(dev, "protocol", "magichome")).lower()
         specs.append({
-            "ip": dev.ip, "mac": dev.mac, "port": dev.port,
+            "ip": dev.ip, "mac": dev.mac, "port": _resolve_port(proto, dev.port),
             "monitor_index": cfg.capture.monitor_index,
             "led_count": getattr(dev, "led_count", 30),
             "name": getattr(dev, "name", "") or dev.ip,
+            "protocol": proto,
             "connect_timeout": dev.connect_timeout, "send_timeout": dev.send_timeout,
             "reconnect_interval": dev.reconnect_interval, "subnet": dev.subnet,
             "discovery_timeout": dev.discovery_timeout, "cache_file": dev.cache_file,
@@ -413,7 +435,7 @@ class AmbilightPipeline:
                         if ch.led.is_addressable and self._cfg.gradient.enabled:
                             pixels = generate_gradient(
                                 self._cfg.gradient.mode, ch.last_zone_colors,
-                                ch.led.led_count, self._cfg.gradient.gamma,
+                                ch.led_count, self._cfg.gradient.gamma,
                             )
                             ch.led.set_pixels(pixels)
                         else:
@@ -572,9 +594,21 @@ class AmbilightPipeline:
     # ------------------------------------------------------------------
 
     def _topology_sig(self) -> tuple:
-        """Signature of the device/monitor layout; changes trigger a rebuild."""
+        """Signature of the device/monitor layout; changes trigger a rebuild.
+
+        Includes ``protocol`` and ``port`` because they determine *which* driver
+        is instantiated (and where it connects). Identity is protocol-aware:
+        MagicHome is keyed by ``mac or ip`` (MAC-stable across DHCP changes), but
+        WLED has no MAC-based rediscovery, so it is keyed by ``ip`` — otherwise
+        changing a WLED device's IP while a MAC is set would not rebuild.
+        """
+        def _identity(s: dict) -> str:
+            if s["protocol"] == "magichome":
+                return str(s["mac"] or s["ip"])
+            return str(s["ip"])
+
         return tuple(sorted(
-            (s["mac"] or s["ip"], s["monitor_index"], s["led_count"])
+            (s["protocol"], _identity(s), s["port"], s["monitor_index"], s["led_count"])
             for s in _device_specs(self._cfg)
         ))
 
@@ -593,14 +627,20 @@ class AmbilightPipeline:
         # One channel per device.
         self._channels = []
         for sp in specs:
-            info = self._discover_spec(sp)
-            ip = info.ip if info else sp["ip"]
-            kind = classify_device(info) if info else "single"
-            led = MagicHomeController(
-                ip=ip, port=sp["port"], connect_timeout=sp["connect_timeout"],
-                send_timeout=sp["send_timeout"], reconnect_interval=sp["reconnect_interval"],
-                min_update_interval=min_interval, kind=kind, led_count=sp["led_count"],
-            )
+            protocol = sp.get("protocol", "magichome")
+            # MagicHome's MAC-aware discovery recovers a controller after a DHCP
+            # IP change; it doesn't apply to other protocols, which use the
+            # configured IP directly (WLED is always per-pixel addressable).
+            if protocol == "magichome":
+                info = self._discover_spec(sp)
+                ip = info.ip if info else sp["ip"]
+                kind = classify_device(info) if info else "single"
+            else:
+                ip = sp["ip"]
+                kind = "addressable"
+            led = create_driver({
+                **sp, "ip": ip, "kind": kind, "min_update_interval": min_interval,
+            })
             if led.connect():
                 led.turn_on()
             else:
@@ -618,7 +658,11 @@ class AmbilightPipeline:
                     enabled=s.enabled, base_alpha=s.base_alpha, fast_alpha=s.adaptive_fast_alpha,
                     fast_threshold=s.adaptive_fast_threshold, min_change=s.min_change,
                 ),
-                led_count=sp["led_count"],
+                # Use the driver's live LED count (WLED refines it from /json/info
+                # on connect; MagicHome keeps the configured value) so the
+                # gradient is sized to the real strip, and the run loop can read
+                # ch.led_count without depending on a driver-specific attribute.
+                led_count=getattr(led, "led_count", sp["led_count"]),
             ))
 
         self._topology = self._topology_sig()

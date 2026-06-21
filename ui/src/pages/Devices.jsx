@@ -3,6 +3,12 @@ import { useStore } from '../store'
 import { RefreshCw, Lightbulb, Plus, Wifi, Trash2, Check } from 'lucide-react'
 import Toggle from '../components/Toggle'
 
+const PROTOCOLS = [
+  ['magichome', 'MagicHome'],
+  ['wled', 'WLED'],
+]
+const protocolLabel = (p) => (PROTOCOLS.find(([v]) => v === p)?.[1]) || 'MagicHome'
+
 function SectionHeader({ children }) {
   return (
     <div className="flex items-center gap-3 mb-6">
@@ -16,6 +22,7 @@ export default function Devices() {
   const { devices, scanning, fetchDevices, scanDevices, testDevice, settings, updateSettings, monitors, fetchMonitors } = useStore()
   const [manualIp, setManualIp] = useState('')
   const [manualMac, setManualMac] = useState('')
+  const [manualProtocol, setManualProtocol] = useState('magichome')
   const [testingIp, setTestingIp] = useState(null)
 
   useEffect(() => {
@@ -31,16 +38,21 @@ export default function Devices() {
   const saveManaged = (list) => updateSettings({ devices: list })
   const addManaged = (d) => {
     if (managed.some((m) => m.ip === d.ip)) return
-    saveManaged([...managed, { ip: d.ip, mac: d.mac || '', monitor_index: 0, led_count: d.led_count || 30, name: d.name || d.ip, enabled: true }])
+    const protocol = d.protocol || 'magichome'
+    saveManaged([...managed, {
+      ip: d.ip, mac: d.mac || '', monitor_index: 0,
+      led_count: d.led_count || 30, name: d.name || d.ip,
+      protocol, enabled: true,
+    }])
   }
   const updateManaged = (i, key, val) => saveManaged(managed.map((m, idx) => (idx === i ? { ...m, [key]: val } : m)))
   const removeManaged = (i) => saveManaged(managed.filter((_, idx) => idx !== i))
-  const handleTest = async (ip, port) => { setTestingIp(ip); await testDevice(ip, port); setTestingIp(null) }
+  const handleTest = async (ip, port, protocol) => { setTestingIp(ip); await testDevice(ip, port, protocol); setTestingIp(null) }
   const handleManualAdd = async (e) => {
     e.preventDefault()
     if (!manualIp) return
-    addManaged({ ip: manualIp, mac: manualMac, name: manualIp })
-    setManualIp(''); setManualMac('')
+    addManaged({ ip: manualIp, mac: manualMac, name: manualIp, protocol: manualProtocol })
+    setManualIp(''); setManualMac(''); setManualProtocol('magichome')
   }
 
   return (
@@ -80,11 +92,13 @@ export default function Devices() {
                 <div className="min-w-0">
                   <p className="text-2xl font-mono font-medium text-white tracking-tight">{d.ip}</p>
                   <p className="text-[11px] font-mono text-slate-500 uppercase tracking-wider mt-1">
-                    MAC: <span className="text-slate-400">{d.mac || 'unknown'}</span> · {d.supports_addressable ? 'ADDRESSABLE' : 'SINGLE-RGB'}
+                    MAC: <span className="text-slate-400">{d.mac || 'unknown'}</span>
+                    {' · '}<span className="text-indigo-300">{protocolLabel(d.protocol)}</span>
+                    {' · '}{d.supports_addressable ? 'ADDRESSABLE' : 'SINGLE-RGB'}
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button onClick={() => handleTest(d.ip, d.port)} disabled={testingIp === d.ip}
+                  <button onClick={() => handleTest(d.ip, d.port, d.protocol)} disabled={testingIp === d.ip}
                     className="px-6 py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 font-semibold text-sm transition-all flex items-center gap-2 disabled:opacity-40">
                     <Lightbulb className="h-4 w-4 text-indigo-400" /> {testingIp === d.ip ? 'Testing…' : 'Test'}
                   </button>
@@ -119,7 +133,7 @@ export default function Devices() {
                   <div className="text-center">
                     <h4 className="text-3xl font-mono font-bold text-white tracking-tight">{m.name || m.ip}</h4>
                     <p className="text-[10px] font-mono text-slate-500 uppercase tracking-[0.3em] mt-2">
-                      {m.enabled !== false ? 'Active' : 'Disabled'} · Controller
+                      {m.enabled !== false ? 'Active' : 'Disabled'} · {protocolLabel(m.protocol)}
                     </p>
                   </div>
 
@@ -132,6 +146,13 @@ export default function Devices() {
                     <div className="flex items-center justify-between">
                       <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Enabled</span>
                       <Toggle checked={m.enabled !== false} onChange={(v) => updateManaged(i, 'enabled', v)} />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Protocol</span>
+                      <select className="custom-input rounded-xl text-sm font-semibold w-48 py-2 px-3" value={m.protocol || 'magichome'}
+                        onChange={(e) => updateManaged(i, 'protocol', e.target.value)}>
+                        {PROTOCOLS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                      </select>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Target Monitor</span>
@@ -149,7 +170,7 @@ export default function Devices() {
 
                   <div className="flex items-center gap-4">
                     <button onClick={() => removeManaged(i)} title="Remove device" className="btn-neon-red p-4 rounded-2xl"><Trash2 className="h-5 w-5" /></button>
-                    <button onClick={() => handleTest(m.ip, m.port)}
+                    <button onClick={() => handleTest(m.ip, m.port, m.protocol)}
                       className="px-8 py-4 rounded-2xl bg-white/5 border border-white/10 text-slate-400 hover:text-white transition-all flex items-center gap-3">
                       <Lightbulb className="h-5 w-5" /><span className="font-bold text-sm uppercase tracking-wider">Test Hardware</span>
                     </button>
@@ -164,8 +185,12 @@ export default function Devices() {
         <form onSubmit={handleManualAdd} className="mt-8 flex gap-4">
           <input className="flex-grow custom-input rounded-2xl px-6 py-4 text-sm font-mono placeholder:font-sans placeholder:italic"
             placeholder="IP address (e.g. 192.168.1.29)" value={manualIp} onChange={(e) => setManualIp(e.target.value)} />
-          <input className="w-1/3 custom-input rounded-2xl px-6 py-4 text-sm font-mono placeholder:font-sans placeholder:italic"
+          <input className="w-1/4 custom-input rounded-2xl px-6 py-4 text-sm font-mono placeholder:font-sans placeholder:italic"
             placeholder="MAC (optional)" value={manualMac} onChange={(e) => setManualMac(e.target.value)} />
+          <select className="custom-input rounded-2xl px-4 py-4 text-sm font-semibold" value={manualProtocol}
+            onChange={(e) => setManualProtocol(e.target.value)}>
+            {PROTOCOLS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+          </select>
           <button type="submit" className="btn-neon-blue px-10 py-4 rounded-2xl font-bold text-sm tracking-widest flex items-center gap-2"><Plus className="h-4 w-4" /> ADD</button>
         </form>
       </section>

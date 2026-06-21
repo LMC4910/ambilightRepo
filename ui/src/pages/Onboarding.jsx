@@ -10,6 +10,7 @@ export default function Onboarding({ onDone }) {
   const [step, setStep] = useState(0)
   const [monitorIdx, setMonitorIdx] = useState(0)
   const [selectedIp, setSelectedIp] = useState(null)
+  const [selectedProtocol, setSelectedProtocol] = useState('magichome')
   const [tested, setTested] = useState(false)
   const [autostart, setAutostart] = useState(false)
 
@@ -30,8 +31,12 @@ export default function Onboarding({ onDone }) {
   const back = () => setStep((s) => Math.max(0, s - 1))
   const finish = async () => { try { await window.api.onboarding.complete() } catch (e) { /* ignore */ } onDone() }
   const chooseMonitor = async (i) => { setMonitorIdx(i); await updateSettings({ capture: { monitor_index: i } }) }
-  const chooseDevice = async (d) => { setSelectedIp(d.ip); await updateSettings({ device: { ip: d.ip, ...(d.mac ? { mac: d.mac } : {}) } }) }
-  const doTest = async () => { if (selectedIp) { await testDevice(selectedIp); setTested(true) } }
+  const chooseDevice = async (d) => {
+    const protocol = d.protocol || 'magichome'
+    setSelectedIp(d.ip); setSelectedProtocol(protocol)
+    await updateSettings({ device: { ip: d.ip, protocol, ...(d.mac ? { mac: d.mac } : {}) } })
+  }
+  const doTest = async () => { if (selectedIp) { await testDevice(selectedIp, undefined, selectedProtocol); setTested(true) } }
   const toggleAutostart = async () => {
     try { const r = autostart ? await window.api.autostart.disable() : await window.api.autostart.enable(); setAutostart(!!r?.enabled) } catch (e) { console.error(e) }
   }
@@ -75,6 +80,7 @@ export default function Onboarding({ onDone }) {
                   <label key={d.mac || d.ip} className={radioCard}>
                     <input type="radio" name="dev" checked={selectedIp === d.ip} onChange={() => chooseDevice(d)} className="text-indigo-500" />
                     <span className="text-sm font-mono">{d.ip} <span className="text-slate-500">({d.mac || 'no mac'})</span></span>
+                    <span className="ml-auto text-[10px] font-bold uppercase tracking-wider text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 px-2 py-0.5 rounded-full">{d.protocol === 'wled' ? 'WLED' : 'MagicHome'}</span>
                   </label>
                 ))}
               </div>

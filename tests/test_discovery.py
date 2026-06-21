@@ -1,5 +1,6 @@
 """Tests for device status parsing, capability classification, and discovery helpers."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 from ambilight.discovery import (
@@ -8,6 +9,8 @@ from ambilight.discovery import (
     classify_device,
     _local_subnets,
     _udp_discover,
+    _wled_probe,
+    discover_wled,
 )
 
 
@@ -130,3 +133,73 @@ def test_udp_discover_ignores_malformed_response():
         with patch("ambilight.discovery.time.monotonic", side_effect=[0.0, 0.0, 10.0]):
             devices = _udp_discover(timeout=2.0)
     assert devices == []
+
+
+# ---------------------------------------------------------------------------
+# WLED discovery
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_wled_probe_parses_json_info():
+    body = json.dumps({"leds": {"count": 150}, "name": "Desk", "mac": "aabbccddeeff",
+                       "ver": "0.14.0"}).encode()
+    with patch("urllib.request.urlopen", return_value=_FakeResp(body)):
+        info = _wled_probe("192.168.1.50")
+    assert info is not None
+    assert info.protocol == "wled"
+    assert info.supports_addressable is True
+    assert info.led_count == 150
+    assert info.mac == "aa:bb:cc:dd:ee:ff"
+    assert info.model == "Desk"
+
+
+def test_wled_probe_rejects_non_wled_json():
+    # A response without "leds" is not a WLED device.
+    with patch("urllib.request.urlopen", return_value=_FakeResp(b'{"foo": 1}')):
+        assert _wled_probe("192.168.1.51") is None
+
+
+def test_wled_probe_tolerates_malformed_led_count():
+    # A non-numeric count must not raise (would break the None-on-failure
+    # contract); it degrades to led_count 0.
+    body = json.dumps({"leds": {"count": "oops"}, "name": "X", "mac": ""}).encode()
+    with patch("urllib.request.urlopen", return_value=_FakeResp(body)):
+        info = _wled_probe("192.168.1.53")
+    assert info is not None and info.protocol == "wled" and info.led_count == 0
+
+
+def test_wled_probe_handles_unreachable():
+    with patch("urllib.request.urlopen", side_effect=OSError("refused")):
+        assert _wled_probe("192.168.1.52") is None
+
+
+def test_discover_wled_falls_back_to_http_when_no_mdns():
+    # zeroconf absent → mDNS yields nothing → HTTP subnet probe is used.
+    found = DeviceInfo(ip="192.168.1.60", protocol="wled", supports_addressable=True, led_count=60)
+    with patch("ambilight.discovery._wled_mdns", return_value=[]), \
+         patch("ambilight.discovery._wled_http_scan", return_value=[found]) as http_scan:
+        out = discover_wled("192.168.1.")
+    assert out == [found]
+    assert http_scan.called
+
+
+def test_discover_wled_prefers_mdns_when_present():
+    mdns_dev = DeviceInfo(ip="192.168.1.61", protocol="wled", supports_addressable=True)
+    with patch("ambilight.discovery._wled_mdns", return_value=[mdns_dev]), \
+         patch("ambilight.discovery._wled_http_scan", return_value=[]) as http_scan:
+        out = discover_wled("192.168.1.")
+    assert out == [mdns_dev]
+    assert not http_scan.called  # mDNS hit → no subnet sweep
