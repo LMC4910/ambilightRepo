@@ -190,6 +190,7 @@ def _health_assessment() -> Dict[str, Any]:
         "capture_backend": m.get("capture_backend"),
         "capture_reason": capture_reason,
         "capture_degraded": capture_degraded,
+        "hdr_active": bool(m.get("hdr_active", False)),
         "degraded_reasons": reasons,
     }
 
@@ -220,6 +221,7 @@ async def get_status() -> Dict[str, Any]:
         "capture_backend": health["capture_backend"],
         "capture_reason": health["capture_reason"],
         "capture_degraded": health["capture_degraded"],
+        "hdr_active": health["hdr_active"],
         "paused": st["paused"],
         "pid": st["pid"],
         "restarts": st["restarts"],

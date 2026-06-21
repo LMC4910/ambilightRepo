@@ -25,12 +25,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
+class HdrConfig:
+    # auto = tone-map only when the display reports HDR enabled; on = always;
+    # off = never. Tone-map runs on the downscaled analysis frame.
+    mode: str = "auto"            # auto | on | off
+    exposure: float = 1.0         # linear gain before the contrast curve
+    contrast: float = 1.15        # S-curve strength about mid-grey (1.0 = none)
+    saturation_recovery: float = 1.5  # chroma scale about luma (1.0 = none)
+
+
+@dataclass
 class CaptureConfig:
     method: str = "wgc"           # wgc | dxgi | mss
     monitor_index: int = 0        # 0 = primary
     fps_target: int = 30
     analysis_width: int = 80
     analysis_height: int = 45
+    hdr: HdrConfig = field(default_factory=HdrConfig)
 
 
 @dataclass

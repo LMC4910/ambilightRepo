@@ -35,6 +35,8 @@ import numpy as np
 
 from .capture import ScreenCaptureManager, is_black_frame
 from .color import ColorAnalyzer
+from .hdr import HdrDetector
+from .tonemap import tonemap_bgr
 from .config import AppConfig, ConfigManager
 from .discovery import DeviceDiscovery, DeviceInfo
 from .gpu import GpuAccelerator, detect_backend
@@ -160,6 +162,8 @@ class AmbilightPipeline:
         self._scheduler: Optional[EffectScheduler] = None
         self._scheduled_active: bool = False
         self._last_sched_check: float = 0.0
+        self._hdr: Optional[HdrDetector] = None
+        self._last_hdr_check: float = 0.0
         self._start_time: float = time.monotonic()
         self._last_zone_colors: list = []
         self._last_debug_log: float = 0.0
@@ -209,6 +213,10 @@ class AmbilightPipeline:
 
         # Captures (per monitor) + device channels.
         self._build_io()
+
+        # HDR detector: per-monitor advanced-color state, so the capture path can
+        # tone-map washed HDR frames back to SDR before colour analysis.
+        self._hdr = HdrDetector()
 
         # Effects: load plugins + build the schedule.
         import os
@@ -305,6 +313,14 @@ class AmbilightPipeline:
                     self._last_sched_check = time.monotonic()
                     self._apply_schedule()
 
+                # --- HDR state refresh (checked at most every 5 s) ---
+                # Cheap DISPLAYCONFIG query; polled rather than per-frame so
+                # toggling Windows HDR (or swapping displays) is picked up without
+                # cross-process event plumbing.
+                if self._hdr is not None and (time.monotonic() - self._last_hdr_check) > 5.0:
+                    self._last_hdr_check = time.monotonic()
+                    self._hdr.refresh()
+
                 # Capture is only needed while screen-syncing; release it for
                 # effect modes (self-correcting, also covers scheduler changes).
                 self._set_capture_active(self._effects.current_mode == "screen_sync")
@@ -336,7 +352,14 @@ class AmbilightPipeline:
                     small_by_mon: dict[int, Optional[np.ndarray]] = {}
                     for mi, cap in self._captures.items():
                         frame = cap.grab()
-                        small_by_mon[mi] = self._gpu.resize(frame, w, h) if frame is not None else None  # type: ignore[union-attr]
+                        small = self._gpu.resize(frame, w, h) if frame is not None else None  # type: ignore[union-attr]
+                        # Tone-map washed HDR frames back to SDR before analysis.
+                        if small is not None and self._should_tonemap(mi):
+                            hcfg = self._cfg.capture.hdr
+                            small = tonemap_bgr(
+                                small, hcfg.exposure, hcfg.contrast, hcfg.saturation_recovery,
+                            )
+                        small_by_mon[mi] = small
 
                     if not any(v is not None for v in small_by_mon.values()):
                         # Every monitor returned nothing this round — capture is
@@ -430,6 +453,12 @@ class AmbilightPipeline:
                     "capture_backend": capture_backend,
                     "capture_reason": capture_reason,
                     "degraded": degraded,
+                    # True when any captured monitor currently has HDR enabled —
+                    # lets the UI badge "HDR" and confirm tone-mapping is active.
+                    "hdr_active": bool(
+                        self._hdr is not None
+                        and any(self._hdr.is_hdr(mi) for mi in self._captures)
+                    ),
                 }
 
                 if self._metrics is not None:
@@ -466,6 +495,19 @@ class AmbilightPipeline:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _should_tonemap(self, monitor_index: int) -> bool:
+        """Whether to HDR→SDR tone-map *monitor_index* this frame.
+
+        ``off`` never, ``on`` always, ``auto`` only when the display reports HDR.
+        """
+        hcfg = self._cfg.capture.hdr
+        mode = getattr(hcfg, "mode", "auto")
+        if mode == "off":
+            return False
+        if mode == "on":
+            return True
+        return self._hdr is not None and self._hdr.is_hdr(monitor_index)
 
     def _apply_schedule(self) -> None:
         """Activate/deactivate scheduled effects for the current time (FR-EFF-08)."""
