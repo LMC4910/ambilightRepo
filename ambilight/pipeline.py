@@ -80,7 +80,7 @@ class _Channel:
     """
     name: str
     monitor_index: int
-    led: "LedDriver"
+    led: LedDriver
     zones: "ZoneManager"
     analyzer: "ColorAnalyzer"
     smoother: "SmoothingEngine"
@@ -435,7 +435,7 @@ class AmbilightPipeline:
                         if ch.led.is_addressable and self._cfg.gradient.enabled:
                             pixels = generate_gradient(
                                 self._cfg.gradient.mode, ch.last_zone_colors,
-                                ch.led.led_count, self._cfg.gradient.gamma,
+                                ch.led_count, self._cfg.gradient.gamma,
                             )
                             ch.led.set_pixels(pixels)
                         else:
@@ -597,11 +597,18 @@ class AmbilightPipeline:
         """Signature of the device/monitor layout; changes trigger a rebuild.
 
         Includes ``protocol`` and ``port`` because they determine *which* driver
-        is instantiated (and where it connects): changing only the protocol or
-        port must rebuild I/O, not reuse the already-constructed driver.
+        is instantiated (and where it connects). Identity is protocol-aware:
+        MagicHome is keyed by ``mac or ip`` (MAC-stable across DHCP changes), but
+        WLED has no MAC-based rediscovery, so it is keyed by ``ip`` — otherwise
+        changing a WLED device's IP while a MAC is set would not rebuild.
         """
+        def _identity(s: dict) -> str:
+            if s["protocol"] == "magichome":
+                return str(s["mac"] or s["ip"])
+            return str(s["ip"])
+
         return tuple(sorted(
-            (s["mac"] or s["ip"], s["monitor_index"], s["led_count"], s["protocol"], s["port"])
+            (s["protocol"], _identity(s), s["port"], s["monitor_index"], s["led_count"])
             for s in _device_specs(self._cfg)
         ))
 
@@ -651,7 +658,11 @@ class AmbilightPipeline:
                     enabled=s.enabled, base_alpha=s.base_alpha, fast_alpha=s.adaptive_fast_alpha,
                     fast_threshold=s.adaptive_fast_threshold, min_change=s.min_change,
                 ),
-                led_count=sp["led_count"],
+                # Use the driver's live LED count (WLED refines it from /json/info
+                # on connect; MagicHome keeps the configured value) so the
+                # gradient is sized to the real strip, and the run loop can read
+                # ch.led_count without depending on a driver-specific attribute.
+                led_count=getattr(led, "led_count", sp["led_count"]),
             ))
 
         self._topology = self._topology_sig()

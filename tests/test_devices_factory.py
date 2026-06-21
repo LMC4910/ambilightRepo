@@ -44,7 +44,6 @@ def test_factory_unknown_protocol_falls_back_to_magichome(caplog):
 
 
 def test_factory_builds_wled():
-    pytest.importorskip("ambilight.devices.wled")
     from ambilight.devices.wled import WledDriver
     d = create_driver({"protocol": "wled", "ip": "1.2.3.4", "led_count": 120})
     assert isinstance(d, WledDriver)

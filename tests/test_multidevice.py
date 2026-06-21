@@ -95,6 +95,28 @@ def test_topology_sig_changes_when_port_changes():
     assert p._topology_sig() != before
 
 
+def test_topology_sig_changes_when_wled_ip_changes_with_mac():
+    # WLED has no MAC-based rediscovery, so it's keyed by IP: changing a WLED
+    # device's IP must rebuild even when a MAC is present.
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.50", "mac": "aa:bb:cc:dd:ee:ff", "protocol": "wled"}]
+    p = AmbilightPipeline(config=cfg)
+    before = p._topology_sig()
+    cfg.devices[0]["ip"] = "192.168.1.99"
+    assert p._topology_sig() != before
+
+
+def test_topology_sig_magichome_keyed_by_mac_not_ip():
+    # MagicHome is MAC-stable: an IP change with the same MAC must NOT rebuild
+    # (discovery recovers it), preserving the existing behaviour.
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.50", "mac": "aa:bb:cc:dd:ee:ff", "protocol": "magichome"}]
+    p = AmbilightPipeline(config=cfg)
+    before = p._topology_sig()
+    cfg.devices[0]["ip"] = "192.168.1.99"
+    assert p._topology_sig() == before
+
+
 def test_distinct_monitor_grouping():
     cfg = AppConfig()
     cfg.devices = [
