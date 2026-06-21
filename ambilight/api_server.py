@@ -469,23 +469,34 @@ def _flash_device(ip: str, port: int, protocol: str = "magichome") -> bool:
     drv = create_driver({"protocol": protocol, "ip": ip, "port": port})
     if not drv.connect():
         return False
+    was_on = drv.query_power()   # remember prior state so we can restore it
     try:
-        drv.turn_on()
+        if not drv.ensure_on():
+            return False
         for _ in range(3):
-            drv.set_rgb(255, 255, 255)
+            if not drv.set_rgb(255, 255, 255):
+                return False
             time.sleep(0.25)
-            drv.set_rgb(0, 0, 0)
+            if not drv.set_rgb(0, 0, 0):
+                return False
             time.sleep(0.25)
         return True
     finally:
-        drv.disconnect()
+        # Leave the device as we found it: blank, and powered off again if it was
+        # off before the test (don't surprise the user with a strip left on).
+        try:
+            drv.set_rgb(0, 0, 0)
+            if was_on is False:
+                drv.turn_off()
+        finally:
+            drv.disconnect()
 
 
 @app.post("/api/devices/test", dependencies=[Depends(verify_token)])
 async def test_device(request: DeviceTestRequest) -> Dict[str, str]:
     """Flash a device's LEDs so the user can confirm they picked the right one."""
     cfg = ConfigManager.get()
-    protocol = (request.protocol or "magichome").lower()
+    protocol = (request.protocol or "magichome").strip().lower()
     # WLED's control is its HTTP API (port 80); MagicHome uses the configured TCP port.
     default_port = 80 if protocol == "wled" else cfg.device.port
     port = request.port or default_port
@@ -503,7 +514,8 @@ async def device_capabilities(ip: str, protocol: str = "magichome") -> Dict[str,
     cfg = ConfigManager.get()
     loop = asyncio.get_running_loop()
 
-    if protocol.lower() == "wled":
+    protocol = protocol.strip().lower()
+    if protocol == "wled":
         info = await loop.run_in_executor(None, _wled_probe, ip, cfg.device.connect_timeout)
         if info is None:
             raise HTTPException(status_code=502, detail=f"Could not reach WLED device at {ip}")
