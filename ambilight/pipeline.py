@@ -33,7 +33,7 @@ from typing import Optional
 
 import numpy as np
 
-from .capture import ScreenCaptureManager
+from .capture import ScreenCaptureManager, is_black_frame
 from .color import ColorAnalyzer
 from .config import AppConfig, ConfigManager
 from .discovery import DeviceDiscovery, DeviceInfo
@@ -46,6 +46,26 @@ from .effects_engine import EffectsManager, EffectScheduler
 from .gradient_engine import generate_gradient
 
 logger = logging.getLogger(__name__)
+
+# Consecutive screen-sync iterations of all-black-but-delivering capture before
+# we flag it as no-signal. At the default 30 FPS target this is ~2 s — long
+# enough that a real fade-to-black scene won't trip it, short enough that a
+# stuck/DRM/MSS-fullscreen black-out is surfaced promptly.
+_BLACK_NOSIGNAL_FRAMES: int = 60
+
+
+def _nosignal_verdict(consecutive_black: int, backend: Optional[str]) -> tuple[bool, str]:
+    """Classify a run of consecutive all-black-but-delivering frames.
+
+    Returns ``(capture_ok, capture_reason)``. Below the sustained threshold this
+    is ``(True, "ok")`` — a brief dark scene is not a fault. At/above it capture
+    is effectively dead: WGC/DXGI can see fullscreen games, so persistent black
+    there is almost always DRM-protected content (``drm_suspected``); on MSS it
+    is the fullscreen game itself rendering black (``black``).
+    """
+    if consecutive_black >= _BLACK_NOSIGNAL_FRAMES:
+        return False, ("black" if backend == "mss" else "drm_suspected")
+    return True, "ok"
 
 
 @dataclass
@@ -143,6 +163,10 @@ class AmbilightPipeline:
         self._start_time: float = time.monotonic()
         self._last_zone_colors: list = []
         self._last_debug_log: float = 0.0
+        # Sustained-black detection: count consecutive screen-sync iterations
+        # where capture delivers frames but they are all (near-)black, so the UI
+        # can report *why* the strip went dark instead of masquerading as healthy.
+        self._consecutive_black: int = 0
         self._power: bool = True               # strip powered on?
         self._mode: str = "screen_sync"        # reported mode ("off" when powered off)
 
@@ -290,9 +314,13 @@ class AmbilightPipeline:
                 # Capture health for this iteration. Effect modes don't capture,
                 # so they're trivially "ok"; screen-sync sets this from the grab.
                 capture_ok = True
+                capture_reason = "ok"   # ok | no_frames | black | drm_suspected
                 capture_backend = next(
                     (cap.active_backend for cap in self._captures.values()), None
                 )
+                # MSS on Windows renders fullscreen games / overlay video black —
+                # flag it so the UI can advise installing WGC (see capture.py).
+                degraded = capture_backend == "mss" and sys.platform == "win32"
 
                 # --- Effect Processing (applies to every device) ---
                 if self._effects.current_mode != "screen_sync":
@@ -312,10 +340,11 @@ class AmbilightPipeline:
 
                     if not any(v is not None for v in small_by_mon.values()):
                         # Every monitor returned nothing this round — capture is
-                        # producing no frames (fullscreen game on the MSS backend,
-                        # a bad monitor_index, DRM, etc.). Surface it as a degraded
-                        # snapshot so the UI shows "running but not syncing"
-                        # instead of a frozen strip masquerading as healthy.
+                        # producing no frames (a bad monitor_index, all backends
+                        # exhausted, etc.). Surface it as a degraded snapshot so
+                        # the UI shows "running but not syncing" instead of a
+                        # frozen strip masquerading as healthy.
+                        self._consecutive_black = 0
                         if self._metrics_queue is not None:
                             import queue
                             try:
@@ -327,11 +356,23 @@ class AmbilightPipeline:
                                     "devices": len(self._channels),
                                     "devices_connected": sum(1 for ch in self._channels if ch.led.is_connected),
                                     "capture_ok": False, "capture_backend": capture_backend,
+                                    "capture_reason": "no_frames", "degraded": degraded,
                                 })
                             except queue.Full:
                                 pass
                         time.sleep(0.01)
                         continue
+
+                    # Capture IS delivering frames — but an exclusive-fullscreen
+                    # game on the MSS backend (and DRM content on any backend)
+                    # yields a valid *all-black* frame, not None, so it slips past
+                    # the no-frames check above and the strip silently goes dark.
+                    # Track sustained black so we can report the cause.
+                    present = [v for v in small_by_mon.values() if v is not None]
+                    if present and all(is_black_frame(v) for v in present):
+                        self._consecutive_black += 1
+                    else:
+                        self._consecutive_black = 0
 
                     # --- Per-device analysis + output ---
                     for ch in self._channels:
@@ -357,6 +398,13 @@ class AmbilightPipeline:
                     sent = True
                     # Capture delivered at least one usable frame this round.
                     capture_ok = any(cap.is_healthy for cap in self._captures.values())
+                    # ...but if every delivered frame has been black for a
+                    # sustained run, capture is effectively dead even though the
+                    # backend reports healthy. Flag it with a cause.
+                    black_ok, black_reason = _nosignal_verdict(self._consecutive_black, capture_backend)
+                    if not black_ok:
+                        capture_ok = False
+                        capture_reason = black_reason
                     # Live preview reflects the first channel.
                     self._last_zone_colors = self._channels[0].last_zone_colors if self._channels else []
 
@@ -380,6 +428,8 @@ class AmbilightPipeline:
                     "devices_connected": connected,
                     "capture_ok": capture_ok,
                     "capture_backend": capture_backend,
+                    "capture_reason": capture_reason,
+                    "degraded": degraded,
                 }
 
                 if self._metrics is not None:
