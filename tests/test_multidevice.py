@@ -44,6 +44,37 @@ def test_specs_inherit_device_defaults():
     assert s["name"] == "192.168.1.50"       # name defaults to ip
 
 
+def test_wled_device_without_port_defaults_to_http_80():
+    # Regression: a UI/onboarding-added WLED entry persists no port, so it would
+    # inherit the legacy MagicHome default 5577 and the pipeline would probe the
+    # wrong HTTP port. It must resolve to WLED's HTTP API port 80.
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.50", "protocol": "wled", "led_count": 120}]
+    s = _device_specs(cfg)[0]
+    assert s["protocol"] == "wled"
+    assert s["port"] == 80
+
+
+def test_wled_device_honours_explicit_port():
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.50", "protocol": "wled", "port": 8080}]
+    assert _device_specs(cfg)[0]["port"] == 8080
+
+
+def test_magichome_device_keeps_default_port():
+    cfg = AppConfig()
+    cfg.devices = [{"ip": "192.168.1.10"}]   # protocol defaults to magichome
+    assert _device_specs(cfg)[0]["port"] == cfg.device.port  # 5577
+
+
+def test_single_wled_device_defaults_to_http_80():
+    cfg = AppConfig()
+    cfg.device.protocol = "wled"   # legacy single-device path, port still 5577
+    s = _device_specs(cfg)[0]
+    assert s["protocol"] == "wled"
+    assert s["port"] == 80
+
+
 def test_distinct_monitor_grouping():
     cfg = AppConfig()
     cfg.devices = [
