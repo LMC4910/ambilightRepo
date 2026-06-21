@@ -172,6 +172,15 @@ def test_wled_probe_rejects_non_wled_json():
         assert _wled_probe("192.168.1.51") is None
 
 
+def test_wled_probe_tolerates_malformed_led_count():
+    # A non-numeric count must not raise (would break the None-on-failure
+    # contract); it degrades to led_count 0.
+    body = json.dumps({"leds": {"count": "oops"}, "name": "X", "mac": ""}).encode()
+    with patch("urllib.request.urlopen", return_value=_FakeResp(body)):
+        info = _wled_probe("192.168.1.53")
+    assert info is not None and info.protocol == "wled" and info.led_count == 0
+
+
 def test_wled_probe_handles_unreachable():
     with patch("urllib.request.urlopen", side_effect=OSError("refused")):
         assert _wled_probe("192.168.1.52") is None

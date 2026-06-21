@@ -202,6 +202,10 @@ def _wled_probe(ip: str, timeout: float = 0.5) -> "Optional[DeviceInfo]":
     if not isinstance(info, dict) or "leds" not in info:
         return None
     leds = info.get("leds") or {}
+    try:
+        led_count = int(leds.get("count", 0) or 0)
+    except (TypeError, ValueError):
+        led_count = 0   # malformed count must not break the None-on-failure contract
     raw = str(info.get("mac", "")).strip()
     mac = ":".join(raw[i:i + 2] for i in range(0, 12, 2)).lower() if len(raw) == 12 else raw.lower()
     return DeviceInfo(
@@ -209,7 +213,7 @@ def _wled_probe(ip: str, timeout: float = 0.5) -> "Optional[DeviceInfo]":
         model=str(info.get("name") or "WLED"),
         firmware=str(info.get("ver", "")),
         supports_addressable=True, protocol="wled",
-        led_count=int(leds.get("count", 0) or 0),
+        led_count=led_count,
         last_seen=time.time(),
     )
 
