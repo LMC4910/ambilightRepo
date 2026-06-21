@@ -173,7 +173,114 @@ def full_scan(
                 except Exception:
                     pass
 
-    return list(by_ip.values())
+    results = list(by_ip.values())
+
+    # Merge WLED devices (mDNS when zeroconf is available, else HTTP subnet
+    # probe). Best-effort: a discovery error must never break the MagicHome scan.
+    try:
+        for w in discover_wled(configured_subnet, discovery_timeout):
+            if w.ip not in by_ip:
+                results.append(w)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("[Scan] WLED discovery error: %s", exc)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# WLED discovery (mDNS with HTTP-probe fallback)
+# ---------------------------------------------------------------------------
+
+def _wled_probe(ip: str, timeout: float = 0.5) -> "Optional[DeviceInfo]":
+    """Return a WLED :class:`DeviceInfo` if *ip* answers ``GET /json/info``."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{ip}/json/info", timeout=timeout) as resp:
+            info = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(info, dict) or "leds" not in info:
+        return None
+    leds = info.get("leds") or {}
+    raw = str(info.get("mac", "")).strip()
+    mac = ":".join(raw[i:i + 2] for i in range(0, 12, 2)).lower() if len(raw) == 12 else raw.lower()
+    return DeviceInfo(
+        ip=ip, port=80, mac=mac,
+        model=str(info.get("name") or "WLED"),
+        firmware=str(info.get("ver", "")),
+        supports_addressable=True, protocol="wled",
+        led_count=int(leds.get("count", 0) or 0),
+        last_seen=time.time(),
+    )
+
+
+def _wled_http_scan(subnets: "list[str]", timeout: float = 0.5, max_workers: int = 64) -> "list[DeviceInfo]":
+    """Probe every host on *subnets* with ``GET /json/info`` to find WLED nodes."""
+    candidates = [f"{s}{i}" for s in subnets for i in range(1, 255)]
+    found: dict[str, DeviceInfo] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_wled_probe, ip, timeout): ip for ip in candidates}
+        for fut in as_completed(futures):
+            try:
+                info = fut.result()
+            except Exception:
+                info = None
+            if info:
+                found[info.ip] = info
+    return list(found.values())
+
+
+def _wled_mdns(timeout: float = 2.0) -> "list[DeviceInfo]":
+    """Browse ``_wled._tcp.local.`` via zeroconf. Returns [] if zeroconf is absent."""
+    try:
+        from zeroconf import Zeroconf, ServiceBrowser  # optional dependency
+    except Exception:
+        return []
+
+    addrs: dict[str, str] = {}
+
+    class _Listener:
+        def add_service(self, zc, type_, name):  # noqa: ANN001
+            try:
+                info = zc.get_service_info(type_, name, timeout=int(timeout * 1000))
+                if info and info.parsed_addresses():
+                    addrs[info.parsed_addresses()[0]] = name
+            except Exception:
+                pass
+
+        def update_service(self, *a):  # noqa: ANN001, D401
+            pass
+
+        def remove_service(self, *a):  # noqa: ANN001
+            pass
+
+    zc = Zeroconf()
+    try:
+        ServiceBrowser(zc, "_wled._tcp.local.", _Listener())
+        time.sleep(timeout)
+    finally:
+        try:
+            zc.close()
+        except Exception:
+            pass
+
+    out: list[DeviceInfo] = []
+    for ip in addrs:
+        out.append(_wled_probe(ip) or DeviceInfo(
+            ip=ip, port=80, supports_addressable=True, protocol="wled",
+            model="WLED", last_seen=time.time(),
+        ))
+    return out
+
+
+def discover_wled(configured_subnet: str = "192.168.1.", timeout: float = 0.5) -> "list[DeviceInfo]":
+    """Discover WLED devices: mDNS first (when zeroconf is present), else an
+    HTTP subnet probe across the auto-detected + configured subnets."""
+    devices = _wled_mdns(timeout=2.0)
+    if devices:
+        return devices
+    subnets = list({configured_subnet} | set(_local_subnets()))
+    return _wled_http_scan(subnets, timeout=max(timeout, 0.4))
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +289,7 @@ def full_scan(
 
 @dataclass
 class DeviceInfo:
-    """Discovered MagicHome device."""
+    """A discovered LED device (MagicHome or WLED)."""
     ip: str
     port: int = _MAGIC_PORT
     mac: str = ""
@@ -191,6 +298,8 @@ class DeviceInfo:
     device_type: int = 0
     supports_addressable: bool = False
     supports_rgbw: bool = False
+    protocol: str = "magichome"   # magichome | wled
+    led_count: int = 0            # known LED count (WLED reports it; 0 = unknown)
     last_seen: float = 0.0
 
     def to_dict(self) -> dict:

@@ -27,8 +27,12 @@ from .pipeline_controller import PipelineController
 from .auth import generate_and_save_token, verify_token
 from . import auth
 from .profile_manager import profile_manager
-from .discovery import DeviceScanner, DeviceCache, DeviceInfo, CapabilityProbe, classify_device, full_scan
+from .discovery import (
+    DeviceScanner, DeviceCache, DeviceInfo, CapabilityProbe, classify_device,
+    full_scan, _wled_probe,
+)
 from .led_output import MagicHomeController
+from .devices import create_driver
 from .config_watcher import ConfigWatcher
 from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
@@ -453,47 +457,70 @@ async def scan_devices() -> Dict[str, List[Dict[str, Any]]]:
 class DeviceTestRequest(pydantic.BaseModel):
     ip: str
     port: Optional[int] = None
+    protocol: Optional[str] = None   # magichome (default) | wled
 
 
-def _flash_device(ip: str, port: int) -> bool:
-    """Blocking helper: flash a controller white three times, then restore off."""
-    ctrl = MagicHomeController(ip=ip, port=port)
-    if not ctrl.connect():
+def _flash_device(ip: str, port: int, protocol: str = "magichome") -> bool:
+    """Blocking helper: flash a controller white three times, then restore off.
+
+    Protocol-agnostic — builds the driver via the factory and uses only the
+    uniform LedDriver interface, so MagicHome and WLED both flash identically.
+    """
+    drv = create_driver({"protocol": protocol, "ip": ip, "port": port})
+    if not drv.connect():
         return False
     try:
-        ctrl.turn_on()
+        drv.turn_on()
         for _ in range(3):
-            ctrl.set_rgb(255, 255, 255)
+            drv.set_rgb(255, 255, 255)
             time.sleep(0.25)
-            ctrl.set_rgb(0, 0, 0)
+            drv.set_rgb(0, 0, 0)
             time.sleep(0.25)
         return True
     finally:
-        ctrl.disconnect()
+        drv.disconnect()
 
 
 @app.post("/api/devices/test", dependencies=[Depends(verify_token)])
 async def test_device(request: DeviceTestRequest) -> Dict[str, str]:
     """Flash a device's LEDs so the user can confirm they picked the right one."""
     cfg = ConfigManager.get()
-    port = request.port or cfg.device.port
-    ok = await asyncio.get_running_loop().run_in_executor(None, _flash_device, request.ip, port)
+    protocol = (request.protocol or "magichome").lower()
+    # WLED's control is its HTTP API (port 80); MagicHome uses the configured TCP port.
+    default_port = 80 if protocol == "wled" else cfg.device.port
+    port = request.port or default_port
+    ok = await asyncio.get_running_loop().run_in_executor(
+        None, _flash_device, request.ip, port, protocol,
+    )
     if not ok:
         raise HTTPException(status_code=502, detail=f"Could not reach device at {request.ip}:{port}")
     return {"message": f"Flashed device at {request.ip}"}
 
 
 @app.get("/api/devices/{ip}/capabilities", dependencies=[Depends(verify_token)])
-async def device_capabilities(ip: str) -> Dict[str, Any]:
+async def device_capabilities(ip: str, protocol: str = "magichome") -> Dict[str, Any]:
     """Live-probe a device and classify its capabilities (FR-DEV-04)."""
     cfg = ConfigManager.get()
+    loop = asyncio.get_running_loop()
+
+    if protocol.lower() == "wled":
+        info = await loop.run_in_executor(None, _wled_probe, ip, cfg.device.connect_timeout)
+        if info is None:
+            raise HTTPException(status_code=502, detail=f"Could not reach WLED device at {ip}")
+        return {
+            "ip": info.ip, "mac": info.mac, "protocol": "wled",
+            "kind": "addressable", "led_count": info.led_count,
+            "supports_addressable": True, "supports_rgbw": False,
+        }
+
     probe = CapabilityProbe(connect_timeout=cfg.device.connect_timeout)
-    info = await asyncio.get_running_loop().run_in_executor(None, probe.probe, ip, cfg.device.port)
+    info = await loop.run_in_executor(None, probe.probe, ip, cfg.device.port)
     if info is None:
         raise HTTPException(status_code=502, detail=f"Could not reach device at {ip}")
     return {
         "ip": info.ip,
         "mac": info.mac,
+        "protocol": "magichome",
         "device_type": info.device_type,
         "kind": classify_device(info),
         "supports_addressable": info.supports_addressable,
