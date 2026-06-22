@@ -37,6 +37,7 @@ from .config_watcher import ConfigWatcher
 from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
 from .integrations.mqtt_bridge import MqttBridge
+from .notifications import NotificationFlashService
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ monitor = None
 config_watcher = None
 auto_switcher = None
 mqtt_bridge = None
+notification_flash = None
 
 # Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
 latest_metrics: Dict[str, Any] = {}
@@ -69,7 +71,7 @@ _last_metrics_persist = 0.0
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global monitor, config_watcher, auto_switcher, mqtt_bridge
+    global monitor, config_watcher, auto_switcher, mqtt_bridge, notification_flash
 
     # 0. Security: Generate Token
     generate_and_save_token()
@@ -118,6 +120,20 @@ async def startup_event() -> None:
     await bus.subscribe("METRICS_UPDATE", mqtt_bridge.on_metrics)
     mqtt_bridge.start()
 
+    # 7. Notification Flash: blink the strip when an OS notification arrives so
+    #    the user notices it in fullscreen / DND / locked. Mirrors the
+    #    auto-switcher lifecycle (refresh rules on config change).
+    notification_flash = NotificationFlashService(
+        ConfigManager.get(), controller, asyncio.get_running_loop(),
+    )
+
+    async def _refresh_notifications(cfg) -> None:
+        if notification_flash is not None:
+            notification_flash.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_notifications)
+    notification_flash.start()
+
 
 async def _cache_metrics(metrics: dict) -> None:
     """Keep the latest snapshot + a rolling window; persist to disk ~1 Hz."""
@@ -147,6 +163,8 @@ async def shutdown_event() -> None:
     controller.stop()
     if mqtt_bridge:
         mqtt_bridge.stop()
+    if notification_flash:
+        notification_flash.stop()
     if monitor:
         monitor.stop()
     if config_watcher:
@@ -430,6 +448,36 @@ async def get_logs(level: str = "", limit: int = 400) -> Dict[str, Any]:
 async def foreground_app() -> Dict[str, Optional[str]]:
     app_name = await asyncio.get_running_loop().run_in_executor(None, get_foreground_app)
     return {"app": app_name}
+
+
+# ---------------------------------------------------------------------------
+# NOTIFICATION FLASH
+# ---------------------------------------------------------------------------
+
+@app.get("/api/notifications/permission", dependencies=[Depends(verify_token)])
+async def notifications_permission() -> Dict[str, Any]:
+    """Report whether notification access is granted, so the UI can deep-link to
+    the relevant OS settings page when it isn't."""
+    info = {"status": "unavailable", "available": False}
+    if notification_flash is not None:
+        info = await asyncio.get_running_loop().run_in_executor(
+            None, notification_flash.permission_status,
+        )
+    info["platform"] = platform.system().lower()
+    return info
+
+
+class NotificationTestRequest(pydantic.BaseModel):
+    color: Optional[List[int]] = None   # [r,g,b]; defaults to configured default
+
+
+@app.post("/api/notifications/test", dependencies=[Depends(verify_token)])
+async def notifications_test(request: NotificationTestRequest) -> Dict[str, str]:
+    """Fire a flash now (bypassing dedup/DND) so the user can preview it."""
+    if notification_flash is None:
+        raise HTTPException(status_code=503, detail="Notification service not ready")
+    notification_flash.test_flash(request.color)
+    return {"message": "Flash triggered"}
 
 
 # ---------------------------------------------------------------------------
