@@ -89,3 +89,48 @@ def test_atomic_save_round_trip(tmp_path):
     assert path.exists()
     reloaded = ConfigManager.load(path)
     assert reloaded.capture.fps_target == 42
+
+
+# --- MQTT config ----------------------------------------------------------
+
+def test_mqtt_defaults_off():
+    cfg = AppConfig()
+    assert cfg.mqtt.enabled is False
+    assert cfg.mqtt.port == 1883
+    assert cfg.mqtt.base_topic == "ambilight"
+    assert cfg.mqtt.ha_discovery is False
+
+
+def test_mqtt_validation_normalizes(tmp_path, caplog):
+    path = tmp_path / "configuration.yaml"
+    path.write_text(
+        "mqtt:\n  enabled: true\n  broker: ''\n  port: 70000\n  base_topic: '/Home/Ambi/'\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        cfg = ConfigManager.load(path)
+    assert cfg.mqtt.enabled is False           # blank broker disables
+    assert cfg.mqtt.port == 1883               # out-of-range clamped
+    assert cfg.mqtt.base_topic == "home/ambi"  # trimmed + lowercased, no slashes
+
+
+def test_mqtt_password_scrubbed_from_saved_yaml(tmp_path, monkeypatch):
+    import asyncio
+    import ambilight.api_server as api
+    from ambilight.integrations import secrets_store
+
+    path = tmp_path / "configuration.yaml"
+    ConfigManager.load(path)
+    stored = {}
+    monkeypatch.setattr(secrets_store, "set_mqtt_password", lambda pw: stored.__setitem__("pw", pw))
+
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(api.bus, "publish", _noop)
+
+    asyncio.run(api.update_config({"mqtt": {"enabled": True, "broker": "h", "password": "topsecret"}}))
+
+    assert stored.get("pw") == "topsecret"            # routed to the keyring
+    text = path.read_text(encoding="utf-8")
+    assert "topsecret" not in text                    # never written to YAML
+    assert ConfigManager.get().mqtt.broker == "h"     # non-secret fields persist

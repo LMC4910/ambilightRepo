@@ -271,6 +271,17 @@ async def get_config() -> Dict[str, Any]:
 
 @app.put("/api/config", dependencies=[Depends(verify_token)])
 async def update_config(override: Dict[str, Any]) -> Dict[str, str]:
+    # Move any incoming MQTT broker password to the OS keyring and blank it in
+    # the override so the secret is never persisted to configuration.yaml. An
+    # empty/absent password leaves the stored one untouched.
+    mqtt_override = override.get("mqtt")
+    if isinstance(mqtt_override, dict) and "password" in mqtt_override:
+        pw = mqtt_override.get("password") or ""
+        if pw:
+            from .integrations import secrets_store
+            secrets_store.set_mqtt_password(pw)
+        mqtt_override["password"] = ""
+
     ConfigManager.update(override)
     # A manual settings edit no longer matches a saved profile (unless it *is*
     # the auto_profile rules being toggled).

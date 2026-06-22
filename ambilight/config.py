@@ -138,6 +138,21 @@ class LoggingConfig:
 
 
 @dataclass
+class MqttConfig:
+    # Smart-home MQTT bridge + Home Assistant discovery (off by default).
+    enabled: bool = False
+    broker: str = ""              # broker host/IP; blank disables the bridge
+    port: int = 1883
+    username: str = ""
+    password: str = ""            # write-only: moved to the OS keyring on save,
+                                  # never persisted to configuration.yaml
+    tls: bool = False
+    base_topic: str = "ambilight"
+    ha_discovery: bool = False    # publish Home Assistant MQTT discovery configs
+    device_id: str = ""           # blank → hostname (stable HA device identifier)
+
+
+@dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
@@ -152,6 +167,7 @@ class AppConfig:
     auto_profile: AutoProfileConfig = field(default_factory=AutoProfileConfig)
     gpu: GpuConfig = field(default_factory=GpuConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    mqtt: MqttConfig = field(default_factory=MqttConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +384,21 @@ class ConfigManager:
         for i, dev in enumerate(config.devices):
             if isinstance(dev, dict) and "protocol" in dev:
                 dev["protocol"] = _norm_protocol(dev["protocol"], f"devices[{i}].protocol")
+
+        # 5. MQTT — normalise topic, clamp port, and disable on a blank broker so
+        #    an enabled-but-misconfigured bridge can't spin on a bad connection.
+        mqtt = config.mqtt
+        mqtt.base_topic = (mqtt.base_topic or "ambilight").strip().strip("/").lower() or "ambilight"
+        try:
+            mqtt.port = int(mqtt.port)
+        except (TypeError, ValueError):
+            mqtt.port = 1883
+        if not 1 <= mqtt.port <= 65535:
+            logger.warning("[Config] mqtt.port=%s out of range; using 1883.", mqtt.port)
+            mqtt.port = 1883
+        if mqtt.enabled and not str(mqtt.broker).strip():
+            logger.warning("[Config] mqtt.enabled but mqtt.broker is blank; disabling MQTT.")
+            mqtt.enabled = False
 
     @classmethod
     def get(cls) -> AppConfig:
