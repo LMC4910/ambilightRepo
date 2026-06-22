@@ -56,6 +56,14 @@ logger = logging.getLogger(__name__)
 # stuck/DRM/MSS-fullscreen black-out is surfaced promptly.
 _BLACK_NOSIGNAL_FRAMES: int = 60
 
+# Capture backends (WGC/DXGI especially) occasionally emit a single spurious
+# all-black frame even when the screen content is unchanged. Pushing that
+# straight to the strip makes the lights blink off for a frame on an otherwise
+# static screen. Hold the last colour for up to this many consecutive black
+# frames before honouring black, so a lone glitch frame is invisible while a
+# genuinely black screen still goes dark within ~this/fps seconds.
+_BLACK_DEBOUNCE_FRAMES: int = 3
+
 
 def _nosignal_verdict(consecutive_black: int, backend: Optional[str]) -> tuple[bool, str]:
     """Classify a run of consecutive all-black-but-delivering frames.
@@ -87,6 +95,7 @@ class _Channel:
     smoother: "SmoothingEngine"
     led_count: int
     last_zone_colors: list = dc_field(default_factory=list)
+    black_streak: int = 0   # consecutive black frames seen (transient-black debounce)
 
 
 def _device_specs(cfg) -> list[dict]:
@@ -430,6 +439,15 @@ class AmbilightPipeline:
                         small = small_by_mon.get(ch.monitor_index)
                         if small is None:
                             continue
+                        # Transient-black debounce: a lone black frame from the
+                        # capture backend (common on WGC/DXGI even when the screen
+                        # is static) would blink the strip off. Hold the last
+                        # colour until black persists past the debounce window, so
+                        # a glitch frame is ignored but a real black-out still
+                        # turns the strip dark. A flash overrides regardless.
+                        if flash_rgb is None and self._hold_transient_black(ch, small):
+                            r, g, b = self._last_output_rgb
+                            continue
                         zone_regions = ch.zones.extract_regions(small)
                         zone_colors = ch.analyzer.analyze_zones(zone_regions)
                         smoothed_zones = ch.smoother.smooth_zones(zone_colors)
@@ -589,6 +607,21 @@ class AmbilightPipeline:
                 self._command_queue.put_nowait(cmd)
             except queue.Full:
                 pass
+
+    def _hold_transient_black(self, ch: "_Channel", frame) -> bool:
+        """Update *ch*'s black streak and report whether this black frame should
+        be held (skipped) as a transient capture glitch.
+
+        Returns True only while a black run is within the debounce window, so a
+        lone spurious black frame is ignored (strip holds its colour) but a
+        sustained black-out (streak past the window) falls through to be sent.
+        Non-black frames reset the streak.
+        """
+        if is_black_frame(frame):
+            ch.black_streak += 1
+            return ch.black_streak <= _BLACK_DEBOUNCE_FRAMES
+        ch.black_streak = 0
+        return False
 
     # ------------------------------------------------------------------
     # Notification flash overlay
