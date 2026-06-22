@@ -102,8 +102,10 @@ windows-capture>=2.0.0 ; sys_platform == "win32"
 # dxcam — DXGI Desktop Duplication wrapper (Windows only)
 dxcam>=0.0.5 ; sys_platform == "win32"
 
-# winsdk — Windows Graphics Capture API Python bindings (Windows 10 1903+)
-# winsdk>=1.0.0b10
+# winsdk — Windows Runtime (WinRT) Python bindings (Windows 10 1903+). Powers the
+# Notification Flash feature via UserNotificationListener (and the WGC capture
+# backend). Windows-only; both features degrade gracefully if it's absent.
+winsdk>=1.0.0b10 ; sys_platform == "win32"
 
 # comtypes — COM interop required by WGC backend (Windows only)
 # comtypes>=1.4.1

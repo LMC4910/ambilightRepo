@@ -136,7 +136,10 @@ def build_service(gpu: bool = False) -> None:
     # smart-home integration stack (paho-mqtt + keyring) when present.
     optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
     collect_all: list[str] = []
-    for pkg in ("windows_capture", "soundcard", "paho", "keyring"):
+    # winsdk is collected in full: its WinRT namespaces (e.g.
+    # winsdk.windows.ui.notifications.management for Notification Flash) are
+    # imported dynamically, so a bare --hidden-import misses them.
+    for pkg in ("windows_capture", "soundcard", "paho", "keyring", "winsdk"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 
