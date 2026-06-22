@@ -132,10 +132,11 @@ def build_service(gpu: bool = False) -> None:
         except Exception:
             return False
 
-    # Always-bundled optional native deps (capture backends + audio + WGC).
-    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture"]
+    # Always-bundled optional deps: capture backends + audio + WGC, and the
+    # smart-home integration stack (paho-mqtt + keyring) when present.
+    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
     collect_all: list[str] = []
-    for pkg in ("windows_capture", "soundcard"):
+    for pkg in ("windows_capture", "soundcard", "paho", "keyring"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 

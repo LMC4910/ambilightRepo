@@ -6,6 +6,7 @@ import Toggle from '../components/Toggle'
 const SECTIONS = [
   ['capture', 'Capture'], ['device', 'Device'], ['zones', 'Zones'], ['color', 'Color'],
   ['smoothing', 'Smoothing'], ['gpu', 'GPU'], ['logging', 'Logging'],
+  ['mqtt', 'MQTT / Home Assistant'],
 ]
 const ENUMS = {
   'capture.method': ['wgc', 'dxgi', 'mss'],
@@ -18,6 +19,13 @@ const ENUMS = {
 const HINTS = {
   'capture.hdr.mode': 'auto = tone-map only HDR displays; on = always; off = never',
   'color.vibrance': '1.0 = off; higher makes game colors more vivid',
+  'mqtt.enabled': 'Connect to an MQTT broker (off by default)',
+  'mqtt.broker': 'Broker host/IP; leave blank to disable',
+  'mqtt.password': 'Stored in the OS keyring, never written to the config file',
+  'mqtt.tls': 'Use TLS/SSL for the broker connection',
+  'mqtt.base_topic': 'Topic prefix for state + commands',
+  'mqtt.ha_discovery': 'Auto-create Home Assistant entities via MQTT discovery',
+  'mqtt.device_id': 'Stable Home Assistant device id (blank = hostname)',
 }
 
 function Field({ section, name, value, onChange }) {
@@ -35,6 +43,11 @@ function Field({ section, name, value, onChange }) {
   } else if (typeof value === 'number') {
     control = <input className="custom-input rounded-lg px-2 py-1.5 text-sm w-28 text-right font-mono" type="number" step="any" value={value}
       onChange={(e) => onChange(name, e.target.value === '' ? '' : Number(e.target.value))} />
+  } else if (name === 'password') {
+    // Write-only: the backend never echoes it (stored in the keyring), so the
+    // value is always blank here; typing a new one sets it.
+    control = <input className="custom-input rounded-lg px-2 py-1.5 text-sm w-44" type="password" autoComplete="new-password"
+      placeholder="•••• (stored)" value={value ?? ''} onChange={(e) => onChange(name, e.target.value)} />
   } else {
     control = <input className="custom-input rounded-lg px-2 py-1.5 text-sm w-44" type="text" value={value ?? ''} onChange={(e) => onChange(name, e.target.value)} />
   }
