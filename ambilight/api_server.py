@@ -36,6 +36,7 @@ from .devices import create_driver
 from .config_watcher import ConfigWatcher
 from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
+from .integrations.mqtt_bridge import MqttBridge
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ controller = PipelineController()
 monitor = None
 config_watcher = None
 auto_switcher = None
+mqtt_bridge = None
 
 # Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
 latest_metrics: Dict[str, Any] = {}
@@ -67,7 +69,7 @@ _last_metrics_persist = 0.0
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global monitor, config_watcher, auto_switcher
+    global monitor, config_watcher, auto_switcher, mqtt_bridge
 
     # 0. Security: Generate Token
     generate_and_save_token()
@@ -103,6 +105,19 @@ async def startup_event() -> None:
     await bus.subscribe("CONFIG_UPDATE", _refresh_auto_profile)
     auto_switcher.start()
 
+    # 6. MQTT bridge + Home Assistant discovery (off by default; no-op without
+    #    paho-mqtt). Mirrors the auto-switcher lifecycle: refresh on config
+    #    change, publish state on every metrics update.
+    mqtt_bridge = MqttBridge(ConfigManager.get(), controller)
+
+    async def _refresh_mqtt(cfg) -> None:
+        if mqtt_bridge is not None:
+            mqtt_bridge.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_mqtt)
+    await bus.subscribe("METRICS_UPDATE", mqtt_bridge.on_metrics)
+    mqtt_bridge.start()
+
 
 async def _cache_metrics(metrics: dict) -> None:
     """Keep the latest snapshot + a rolling window; persist to disk ~1 Hz."""
@@ -130,6 +145,8 @@ async def _cache_metrics(metrics: dict) -> None:
 async def shutdown_event() -> None:
     logger.info("[API] Shutting down. Stopping pipeline.")
     controller.stop()
+    if mqtt_bridge:
+        mqtt_bridge.stop()
     if monitor:
         monitor.stop()
     if config_watcher:
