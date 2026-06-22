@@ -117,6 +117,10 @@ class MqttBridge:
             or old.username != new.username or old.tls != new.tls or old.base_topic != new.base_topic
             or old.ha_discovery != new.ha_discovery or old.device_id != new.device_id
         )
+        # If HA discovery was just turned off, remove the entities cleanly before
+        # we drop the connection (otherwise the retained configs linger in HA).
+        if old is not None and old.ha_discovery and not new.ha_discovery:
+            self._remove_discovery()
         if changed:
             self._reconnect()
 
@@ -314,3 +318,12 @@ class MqttBridge:
         except Exception:
             return
         ha_discovery.publish(self, self._client)
+
+    def _remove_discovery(self) -> None:
+        if not self._client:
+            return
+        try:
+            from . import ha_discovery
+            ha_discovery.remove(self, self._client)
+        except Exception as exc:  # pragma: no cover - network/teardown
+            logger.debug("[MQTT] discovery removal failed: %s", exc)

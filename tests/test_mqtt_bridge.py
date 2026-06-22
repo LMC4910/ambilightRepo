@@ -124,6 +124,22 @@ def test_on_metrics_publishes_state_and_throttles(monkeypatch):
     assert client.publish.call_count == 0
 
 
+def test_connect_publishes_ha_discovery_when_enabled(monkeypatch):
+    client = MagicMock()
+    fake = MagicMock()
+    fake.Client = MagicMock(return_value=client)
+    monkeypatch.setattr(mb, "_paho", lambda: fake)
+    cfg = _cfg(enabled=True, ha_discovery=True)
+    profiles = MagicMock()
+    profiles.list_profiles.return_value = ["gaming"]
+    bridge = MqttBridge(cfg, MagicMock(), profiles=profiles, event_bus=MagicMock(), get_password=lambda: "")
+    bridge.start()
+    bridge._on_connect(client, None, None, 0)
+    pubs = [c.args[0] for c in client.publish.call_args_list]
+    assert any(t.startswith("homeassistant/light/") for t in pubs)
+    assert any(t.startswith("homeassistant/select/") for t in pubs)
+
+
 def test_on_metrics_noop_when_not_connected(monkeypatch):
     bridge, _, _, _ = _bridge(monkeypatch, enabled=True, with_paho=True)
     # not connected yet
