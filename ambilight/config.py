@@ -153,6 +153,34 @@ class MqttConfig:
 
 
 @dataclass
+class NotificationConfig:
+    """Flash the LEDs when an OS notification arrives (Notification Flash).
+
+    Helps the user notice notifications they would otherwise miss in fullscreen,
+    during Do Not Disturb / Focus Assist, or while the screen is locked. The
+    flash colour defaults to the originating app's icon dominant colour, with
+    per-app overrides and keyword rules (the latter for Phone Link / forwarded
+    phone notifications, which Windows reports as coming from "Phone Link").
+    """
+    enabled: bool = False
+    default_color: list = field(default_factory=lambda: [255, 255, 255])  # [r,g,b] fallback
+    brightness: float = 1.0          # 0..1 scale applied to the flash colour
+    blink_count: int = 2             # number of on/off blinks
+    on_ms: int = 180                 # per-blink on duration
+    off_ms: int = 120                # per-blink gap
+    color_mode: str = "icon"         # "icon" (app logo colour) | "fixed" (always default_color)
+    suppress_during_dnd: bool = False  # default: STILL flash during DND / Focus Assist
+    flash_when_locked: bool = True   # default: STILL flash while the screen is locked / asleep
+    dedup_window_s: float = 5.0      # drop identical (app,title,body) within this window
+    min_flash_interval_s: float = 1.5  # throttle/coalesce notification bursts
+    # Per-app custom colours: {app_id_or_name: [r,g,b]}
+    app_overrides: dict = field(default_factory=dict)
+    # Keyword→colour rules (Phone Link / forwarded), ordered:
+    #   [{keyword: "whatsapp", color: [37,211,102]}, ...]
+    keyword_rules: list = field(default_factory=list)
+
+
+@dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
@@ -168,6 +196,7 @@ class AppConfig:
     gpu: GpuConfig = field(default_factory=GpuConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +428,59 @@ class ConfigManager:
         if mqtt.enabled and not str(mqtt.broker).strip():
             logger.warning("[Config] mqtt.enabled but mqtt.broker is blank; disabling MQTT.")
             mqtt.enabled = False
+
+        # 6. Notifications — clamp flash params and coerce colours to 3 ints 0..255
+        #    so a malformed value never crashes the listener or sends garbage to
+        #    the strip.
+        def _norm_color(value: Any, default: list, label: str) -> list:
+            try:
+                rgb = [int(c) for c in value]
+                if len(rgb) != 3:
+                    raise ValueError
+            except (TypeError, ValueError):
+                logger.warning("[Config] %s=%r is not an [r,g,b] colour; using %r.", label, value, default)
+                return list(default)
+            return [max(0, min(255, c)) for c in rgb]
+
+        n = config.notifications
+        n.default_color = _norm_color(n.default_color, [255, 255, 255], "notifications.default_color")
+        try:
+            n.brightness = max(0.0, min(1.0, float(n.brightness)))
+        except (TypeError, ValueError):
+            n.brightness = 1.0
+        try:
+            n.blink_count = max(1, int(n.blink_count))
+        except (TypeError, ValueError):
+            n.blink_count = 2
+        try:
+            n.on_ms = max(20, int(n.on_ms))
+        except (TypeError, ValueError):
+            n.on_ms = 180
+        try:
+            n.off_ms = max(0, int(n.off_ms))
+        except (TypeError, ValueError):
+            n.off_ms = 120
+        if str(n.color_mode).strip().lower() not in ("icon", "fixed"):
+            logger.warning("[Config] notifications.color_mode=%r unknown; using 'icon'.", n.color_mode)
+            n.color_mode = "icon"
+        # Normalise keyword rules' colours so the resolver always gets clean RGB.
+        clean_rules = []
+        for rule in (n.keyword_rules or []):
+            if not isinstance(rule, dict):
+                continue
+            kw = str(rule.get("keyword", "")).strip()
+            if not kw:
+                continue
+            clean_rules.append({
+                "keyword": kw,
+                "color": _norm_color(rule.get("color"), [255, 255, 255], "notifications.keyword_rules[].color"),
+            })
+        n.keyword_rules = clean_rules
+        # Per-app override colours.
+        n.app_overrides = {
+            str(k): _norm_color(v, [255, 255, 255], f"notifications.app_overrides[{k}]")
+            for k, v in (n.app_overrides or {}).items()
+        }
 
     @classmethod
     def get(cls) -> AppConfig:
