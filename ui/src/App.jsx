@@ -8,6 +8,7 @@ import Devices from './pages/Devices'
 import Settings from './pages/Settings'
 import Profiles from './pages/Profiles'
 import Effects from './pages/Effects'
+import Notifications from './pages/Notifications'
 import Logs from './pages/Logs'
 import Diagnostics from './pages/Diagnostics'
 import Onboarding from './pages/Onboarding'
@@ -15,7 +16,7 @@ import ZonePreview from './components/ZonePreview'
 import ZoneEditor from './components/ZoneEditor'
 import UpdateBanner from './components/UpdateBanner'
 
-const TABS = ['dashboard', 'devices', 'zones', 'profiles', 'effects', 'settings', 'logs', 'diagnostics']
+const TABS = ['dashboard', 'devices', 'zones', 'profiles', 'effects', 'notifications', 'settings', 'logs', 'diagnostics']
 
 // [label, mode, params]
 const MODES = [
@@ -294,6 +295,7 @@ function App() {
           {activeTab === 'zones' && <ZoneEditor />}
           {activeTab === 'profiles' && <Profiles />}
           {activeTab === 'effects' && <Effects />}
+          {activeTab === 'notifications' && <Notifications />}
           {activeTab === 'settings' && <Settings />}
           {activeTab === 'logs' && <Logs />}
           {activeTab === 'diagnostics' && <Diagnostics />}

@@ -513,6 +513,18 @@ function createWindow() {
   // --- Foreground app (auto-profile rules helper) ---
   ipcMain.handle('api:foreground:get', async () => fetchApi('/api/foreground'))
 
+  // --- Notification flash ---
+  ipcMain.handle('api:notifications:permission', async () => fetchApi('/api/notifications/permission'))
+  ipcMain.handle('api:notifications:test', async (e, color) => fetchApi('/api/notifications/test', {
+    method: 'POST',
+    body: JSON.stringify({ color: color || null })
+  }))
+
+  // Open an OS settings deep-link / external URL (used to grant notification access)
+  ipcMain.handle('app:openExternal', async (e, url) => {
+    try { await shell.openExternal(url); return true } catch (err) { console.error(err); return false }
+  })
+
   // --- Auto-start (start on login) ---
   ipcMain.handle('api:autostart:get', async () => fetchApi('/api/autostart'))
   ipcMain.handle('api:autostart:enable', async () => fetchApi('/api/autostart/enable', { method: 'POST' }))

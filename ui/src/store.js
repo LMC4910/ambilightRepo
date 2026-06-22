@@ -146,5 +146,24 @@ export const useStore = create((set, get) => ({
     } catch (e) {
       console.error(e);
     }
+  },
+
+  // --- Notification flash ---
+  notifPermission: async () => {
+    try {
+      return await window.api.notifications.permission();
+    } catch (e) {
+      return null;
+    }
+  },
+
+  testFlash: async (color) => {
+    try {
+      await window.api.notifications.test(color);
+      return true;
+    } catch (e) {
+      console.error(e);
+      return false;
+    }
   }
 }))

@@ -22,6 +22,13 @@ contextBridge.exposeInMainWorld('api', {
   foreground: {
     get: () => ipcRenderer.invoke('api:foreground:get')
   },
+  notifications: {
+    permission: () => ipcRenderer.invoke('api:notifications:permission'),
+    test: (color) => ipcRenderer.invoke('api:notifications:test', color)
+  },
+  system: {
+    openExternal: (url) => ipcRenderer.invoke('app:openExternal', url)
+  },
   window: {
     onVisibility: (callback) => {
       const listener = (_, visible) => callback(visible)
