@@ -112,5 +112,11 @@ winsdk>=1.0.0b10 ; sys_platform == "win32"
 # the DXGI backend fails to import and capture silently degrades to MSS.
 comtypes>=1.4.1 ; sys_platform == "win32"
 
+# opencv-python — required by the WGC backend on Windows: windows-capture imports
+# cv2 at module load, and dxcam uses it for colour conversion. A hard dependency
+# of windows-capture (listed here explicitly so the build always bundles it);
+# without it both WGC and DXGI fail to load and capture is stranded on MSS.
+opencv-python>=4.9.0 ; sys_platform == "win32"
+
 # pywin32 — Windows API bindings (Windows only)
 # pywin32>=306
