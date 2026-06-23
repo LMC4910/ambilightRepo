@@ -235,6 +235,10 @@ class DXGIBackend(CaptureBackend):
 
     name = "dxgi"
 
+    # Adapters to probe when the default (device 0) duplicates black. Covers
+    # the common 2-GPU Optimus laptop plus a little headroom for odd setups.
+    _MAX_DEVICES = 4
+
     def __init__(self) -> None:
         self._camera: Optional[object] = None
 
@@ -245,13 +249,78 @@ class DXGIBackend(CaptureBackend):
                 return False
 
             import dxcam  # type: ignore[import-untyped]
-            self._camera = dxcam.create(output_idx=monitor_index, output_color="BGR")
-            self._camera.start(target_fps=60, video_mode=True)
+            # Hybrid-graphics (NVIDIA Optimus / AMD switchable) laptops drive the
+            # panel from the integrated GPU while the discrete GPU enumerates as
+            # device 0. dxcam.create() defaults to device_idx=0, so DXGI
+            # duplication of the dGPU returns an all-black frame even though the
+            # desktop is composited by the iGPU. Probe the adapters and keep the
+            # first that delivers a non-black frame for this output; fall back to
+            # the default device if every adapter reads black (e.g. a genuinely
+            # dark screen at startup) so single-GPU behaviour is unchanged.
+            camera = self._open_on_best_device(dxcam, monitor_index, fps_target)
+            if camera is None:
+                return False
+            self._camera = camera
             logger.info("[DXGI] dxcam capture started for monitor %d.", monitor_index)
             return True
         except Exception as exc:
             logger.debug("[DXGI] Not available: %s", exc)
             return False
+
+    def _open_on_best_device(self, dxcam, output_idx: int, fps_target: int):
+        """Return a started dxcam camera bound to the adapter that actually drives
+        *output_idx*, or ``None`` if no adapter exposes it.
+
+        Single-GPU machines return on the first iteration (device 0 delivers a
+        non-black frame), so this adds no overhead there. The multi-device probe
+        only runs when device 0 duplicates black — the Optimus symptom.
+        """
+        fallback = None  # first frame-delivering (but black) camera, as last resort
+        for dev in range(self._MAX_DEVICES):
+            try:
+                cam = dxcam.create(device_idx=dev, output_idx=output_idx, output_color="BGR")
+            except Exception:
+                continue  # this (device, output) pair doesn't exist
+            if cam is None:
+                continue
+            try:
+                cam.start(target_fps=max(int(fps_target), 30), video_mode=True)
+            except Exception:
+                self._safe_stop(cam)
+                continue
+
+            frame = None
+            for _ in range(30):  # ~0.6s warm-up budget for the first frame
+                frame = cam.get_latest_frame()
+                if frame is not None:
+                    break
+                time.sleep(0.02)
+
+            if frame is not None and float(frame.mean()) > BLACK_LUMA_THRESHOLD:
+                if dev != 0:
+                    logger.info(
+                        "[DXGI] Capturing from GPU adapter %d — device 0 duplication "
+                        "was black (hybrid/Optimus graphics).", dev,
+                    )
+                if fallback is not None:
+                    self._safe_stop(fallback)
+                return cam
+
+            # Black or no frame: keep the first usable camera as a last resort,
+            # release any extras so we don't leak duplication sessions.
+            if fallback is None and frame is not None:
+                fallback = cam
+            else:
+                self._safe_stop(cam)
+
+        return fallback
+
+    @staticmethod
+    def _safe_stop(camera) -> None:
+        try:
+            camera.stop()
+        except Exception:
+            pass
 
     def grab(self) -> Optional[np.ndarray]:
         if self._camera is None:
