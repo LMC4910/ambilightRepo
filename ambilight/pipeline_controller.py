@@ -231,6 +231,23 @@ class PipelineController:
             "params": params
         })
 
+    def flash(self, color, pattern: Optional[dict] = None) -> None:
+        """Enqueue a transient notification flash for the pipeline process.
+
+        Only the final RGB + blink pattern crosses the process boundary; the
+        pipeline owns the device socket and runs the blink as an overlay that
+        restores the prior frame (even while paused for lock/suspend).
+        """
+        try:
+            rgb = [int(c) for c in color][:3]
+        except (TypeError, ValueError):
+            return
+        self._command_queue.put({
+            "action": "flash",
+            "color": rgb,
+            "pattern": pattern or {},
+        })
+
     async def _poll_metrics(self) -> None:
         """Poll the metrics queue and emit them as 'METRICS_UPDATE' events."""
         loop = asyncio.get_running_loop()

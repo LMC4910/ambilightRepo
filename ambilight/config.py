@@ -138,6 +138,49 @@ class LoggingConfig:
 
 
 @dataclass
+class MqttConfig:
+    # Smart-home MQTT bridge + Home Assistant discovery (off by default).
+    enabled: bool = False
+    broker: str = ""              # broker host/IP; blank disables the bridge
+    port: int = 1883
+    username: str = ""
+    password: str = ""            # write-only: moved to the OS keyring on save,
+                                  # never persisted to configuration.yaml
+    tls: bool = False
+    base_topic: str = "ambilight"
+    ha_discovery: bool = False    # publish Home Assistant MQTT discovery configs
+    device_id: str = ""           # blank → hostname (stable HA device identifier)
+
+
+@dataclass
+class NotificationConfig:
+    """Flash the LEDs when an OS notification arrives (Notification Flash).
+
+    Helps the user notice notifications they would otherwise miss in fullscreen,
+    during Do Not Disturb / Focus Assist, or while the screen is locked. The
+    flash colour defaults to the originating app's icon dominant colour, with
+    per-app overrides and keyword rules (the latter for Phone Link / forwarded
+    phone notifications, which Windows reports as coming from "Phone Link").
+    """
+    enabled: bool = False
+    default_color: list = field(default_factory=lambda: [255, 255, 255])  # [r,g,b] fallback
+    brightness: float = 1.0          # 0..1 scale applied to the flash colour
+    blink_count: int = 2             # number of on/off blinks
+    on_ms: int = 180                 # per-blink on duration
+    off_ms: int = 120                # per-blink gap
+    color_mode: str = "icon"         # "icon" (app logo colour) | "fixed" (always default_color)
+    suppress_during_dnd: bool = False  # default: STILL flash during DND / Focus Assist
+    flash_when_locked: bool = True   # default: STILL flash while the screen is locked / asleep
+    dedup_window_s: float = 5.0      # drop identical (app,title,body) within this window
+    min_flash_interval_s: float = 1.5  # throttle/coalesce notification bursts
+    # Per-app custom colours: {app_id_or_name: [r,g,b]}
+    app_overrides: dict = field(default_factory=dict)
+    # Keyword→colour rules (Phone Link / forwarded), ordered:
+    #   [{keyword: "whatsapp", color: [37,211,102]}, ...]
+    keyword_rules: list = field(default_factory=list)
+
+
+@dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
@@ -152,6 +195,8 @@ class AppConfig:
     auto_profile: AutoProfileConfig = field(default_factory=AutoProfileConfig)
     gpu: GpuConfig = field(default_factory=GpuConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    mqtt: MqttConfig = field(default_factory=MqttConfig)
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +414,97 @@ class ConfigManager:
             if isinstance(dev, dict) and "protocol" in dev:
                 dev["protocol"] = _norm_protocol(dev["protocol"], f"devices[{i}].protocol")
 
+        # 5. MQTT — normalise topic, clamp port, and disable on a blank broker so
+        #    an enabled-but-misconfigured bridge can't spin on a bad connection.
+        mqtt = config.mqtt
+        # Enforce the write-only password contract even for configs that didn't
+        # come through the API (manual YAML edits / legacy files): migrate any
+        # plaintext password into the OS keyring and scrub it so save() can't
+        # round-trip it back to configuration.yaml.
+        if str(mqtt.password or ""):
+            try:
+                from .integrations import secrets_store
+                secrets_store.set_mqtt_password(str(mqtt.password))
+            except Exception as exc:  # pragma: no cover - keyring/backend specific
+                logger.warning("[Config] could not migrate mqtt.password to keyring: %s", exc)
+            mqtt.password = ""
+        mqtt.broker = str(mqtt.broker or "").strip()
+        mqtt.base_topic = (mqtt.base_topic or "ambilight").strip().strip("/").lower() or "ambilight"
+        try:
+            mqtt.port = int(mqtt.port)
+        except (TypeError, ValueError):
+            mqtt.port = 1883
+        if not 1 <= mqtt.port <= 65535:
+            logger.warning("[Config] mqtt.port=%s out of range; using 1883.", mqtt.port)
+            mqtt.port = 1883
+        if mqtt.enabled and not mqtt.broker:
+            logger.warning("[Config] mqtt.enabled but mqtt.broker is blank; disabling MQTT.")
+            mqtt.enabled = False
+
+        # 6. Notifications — clamp flash params and coerce colours to 3 ints 0..255
+        #    so a malformed value never crashes the listener or sends garbage to
+        #    the strip.
+        def _norm_color(value: Any, default: list, label: str) -> list:
+            try:
+                rgb = [int(c) for c in value]
+                if len(rgb) != 3:
+                    raise ValueError
+            except (TypeError, ValueError):
+                logger.warning("[Config] %s=%r is not an [r,g,b] colour; using %r.", label, value, default)
+                return list(default)
+            return [max(0, min(255, c)) for c in rgb]
+
+        n = config.notifications
+        n.default_color = _norm_color(n.default_color, [255, 255, 255], "notifications.default_color")
+        try:
+            n.brightness = max(0.0, min(1.0, float(n.brightness)))
+        except (TypeError, ValueError):
+            n.brightness = 1.0
+        try:
+            n.blink_count = max(1, int(n.blink_count))
+        except (TypeError, ValueError):
+            n.blink_count = 2
+        try:
+            n.on_ms = max(20, int(n.on_ms))
+        except (TypeError, ValueError):
+            n.on_ms = 180
+        try:
+            n.off_ms = max(0, int(n.off_ms))
+        except (TypeError, ValueError):
+            n.off_ms = 120
+        # Canonicalise to lowercase so runtime checks (which compare against
+        # "fixed") match regardless of how the value was entered (e.g. "FIXED").
+        n.color_mode = str(n.color_mode or "icon").strip().lower()
+        if n.color_mode not in ("icon", "fixed"):
+            logger.warning("[Config] notifications.color_mode=%r unknown; using 'icon'.", n.color_mode)
+            n.color_mode = "icon"
+        # Normalise keyword rules' colours so the resolver always gets clean RGB.
+        # Guard the container type: a malformed truthy value (e.g. keyword_rules: 1)
+        # must not raise during load.
+        raw_rules = n.keyword_rules if isinstance(n.keyword_rules, list) else []
+        if not isinstance(n.keyword_rules, list) and n.keyword_rules:
+            logger.warning("[Config] notifications.keyword_rules is not a list; ignoring.")
+        clean_rules = []
+        for rule in raw_rules:
+            if not isinstance(rule, dict):
+                continue
+            kw = str(rule.get("keyword", "")).strip()
+            if not kw:
+                continue
+            clean_rules.append({
+                "keyword": kw,
+                "color": _norm_color(rule.get("color"), [255, 255, 255], "notifications.keyword_rules[].color"),
+            })
+        n.keyword_rules = clean_rules
+        # Per-app override colours (guard the container type as above).
+        raw_overrides = n.app_overrides if isinstance(n.app_overrides, dict) else {}
+        if not isinstance(n.app_overrides, dict) and n.app_overrides:
+            logger.warning("[Config] notifications.app_overrides is not a mapping; ignoring.")
+        n.app_overrides = {
+            str(k): _norm_color(v, [255, 255, 255], f"notifications.app_overrides[{k}]")
+            for k, v in raw_overrides.items()
+        }
+
     @classmethod
     def get(cls) -> AppConfig:
         """
@@ -424,6 +560,11 @@ class ConfigManager:
         cls._instance = _dict_to_dataclass(AppConfig, merged)
         if not isinstance(cls._instance, AppConfig):
             cls._instance = AppConfig()
+
+        # Apply the same clamping/normalization as load() so runtime/API edits
+        # can't bypass it (MQTT port/broker/topic, notification colours, the
+        # write-only password scrub, etc.).
+        cls._normalize_and_validate(cls._instance)
 
         cls.save(path)
 

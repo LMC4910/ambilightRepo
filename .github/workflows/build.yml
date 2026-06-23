@@ -60,6 +60,14 @@ jobs:
       - name: Run Python Tests
         run: pytest tests/ -v --tb=short
 
+      # Exercise the optional smart-home integration path (MQTT + keyring) with
+      # the deps actually installed, so the enabled code path is covered too —
+      # the guarded imports mean the default run above tests only the absent path.
+      - name: Run Python Tests (optional integrations)
+        run: |
+          pip install paho-mqtt keyring
+          pytest tests/test_mqtt_bridge.py tests/test_ha_discovery.py tests/test_secrets_store.py -v --tb=short
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:

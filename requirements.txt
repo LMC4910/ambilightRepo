@@ -58,6 +58,16 @@ windows-capture>=2.0.0 ; sys_platform == "win32"
 #    pip install zeroconf
 # zeroconf>=0.131.0
 
+# ---- Optional — smart-home integration --------------------------------------
+#  MQTT bridge + Home Assistant auto-discovery (Phase C). Off by default; the
+#  bridge is a no-op without paho-mqtt. keyring stores the broker password in the
+#  OS credential store (Windows Credential Manager / macOS Keychain / libsecret);
+#  without it the password falls back to a session-only value. Install both to
+#  use MQTT, and add them to the PyInstaller build env for frozen installers.
+#    pip install paho-mqtt keyring
+# paho-mqtt>=1.6.1
+# keyring>=24.0.0
+
 # ---- Development / tests ----------------------------------------------------
 #   pip install pytest    # run the suite with:  pytest
 #   (CI installs pytest + flake8 separately; see .github/workflows/build.yml)
@@ -92,8 +102,10 @@ windows-capture>=2.0.0 ; sys_platform == "win32"
 # dxcam — DXGI Desktop Duplication wrapper (Windows only)
 dxcam>=0.0.5 ; sys_platform == "win32"
 
-# winsdk — Windows Graphics Capture API Python bindings (Windows 10 1903+)
-# winsdk>=1.0.0b10
+# winsdk — Windows Runtime (WinRT) Python bindings (Windows 10 1903+). Powers the
+# Notification Flash feature via UserNotificationListener (and the WGC capture
+# backend). Windows-only; both features degrade gracefully if it's absent.
+winsdk>=1.0.0b10 ; sys_platform == "win32"
 
 # comtypes — COM interop required by WGC backend (Windows only)
 # comtypes>=1.4.1

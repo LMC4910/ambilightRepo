@@ -513,6 +513,28 @@ function createWindow() {
   // --- Foreground app (auto-profile rules helper) ---
   ipcMain.handle('api:foreground:get', async () => fetchApi('/api/foreground'))
 
+  // --- Notification flash ---
+  ipcMain.handle('api:notifications:permission', async () => fetchApi('/api/notifications/permission'))
+  ipcMain.handle('api:notifications:test', async (e, color) => fetchApi('/api/notifications/test', {
+    method: 'POST',
+    body: JSON.stringify({ color: color || null })
+  }))
+
+  // Open an OS settings deep-link (used to grant notification access). Restricted
+  // to a small allowlist of known settings schemes so a compromised/modified
+  // renderer can't launch arbitrary protocol handlers via this IPC surface.
+  const ALLOWED_EXTERNAL_PREFIXES = [
+    'ms-settings:',                 // Windows Settings deep-links
+    'x-apple.systempreferences:',   // macOS System Settings panes
+  ]
+  ipcMain.handle('app:openExternal', async (e, url) => {
+    if (typeof url !== 'string' || !ALLOWED_EXTERNAL_PREFIXES.some((p) => url.startsWith(p))) {
+      console.warn('[openExternal] blocked disallowed URL:', url)
+      return false
+    }
+    try { await shell.openExternal(url); return true } catch (err) { console.error(err); return false }
+  })
+
   // --- Auto-start (start on login) ---
   ipcMain.handle('api:autostart:get', async () => fetchApi('/api/autostart'))
   ipcMain.handle('api:autostart:enable', async () => fetchApi('/api/autostart/enable', { method: 'POST' }))

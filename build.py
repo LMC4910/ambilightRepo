@@ -132,10 +132,14 @@ def build_service(gpu: bool = False) -> None:
         except Exception:
             return False
 
-    # Always-bundled optional native deps (capture backends + audio + WGC).
-    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture"]
+    # Always-bundled optional deps: capture backends + audio + WGC, and the
+    # smart-home integration stack (paho-mqtt + keyring) when present.
+    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
     collect_all: list[str] = []
-    for pkg in ("windows_capture", "soundcard"):
+    # winsdk is collected in full: its WinRT namespaces (e.g.
+    # winsdk.windows.ui.notifications.management for Notification Flash) are
+    # imported dynamically, so a bare --hidden-import misses them.
+    for pkg in ("windows_capture", "soundcard", "paho", "keyring", "winsdk"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 

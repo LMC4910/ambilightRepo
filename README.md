@@ -538,6 +538,8 @@ logging:
 >
 > **Device protocols:** each device has a `protocol` — `magichome` (default) or `wled`. WLED strips stream per-pixel over realtime UDP and use the JSON API for power; see [docs/wled.md](docs/wled.md).
 >
+> **MQTT / Home Assistant:** an optional `mqtt` block bridges Ambilight to an MQTT broker and auto-creates Home Assistant entities (light + profile select + sensors). Off by default; the broker password is kept in the OS keyring. See [docs/home-assistant.md](docs/home-assistant.md).
+>
 > **Installed builds** read and write `~/.ambilight/configuration.yaml` (seeded from the bundled default on first run); the repo `configuration.yaml` is the default template.
 
 ---

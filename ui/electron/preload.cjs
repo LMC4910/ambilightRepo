@@ -22,6 +22,15 @@ contextBridge.exposeInMainWorld('api', {
   foreground: {
     get: () => ipcRenderer.invoke('api:foreground:get')
   },
+  notifications: {
+    permission: () => ipcRenderer.invoke('api:notifications:permission'),
+    test: (color) => ipcRenderer.invoke('api:notifications:test', color)
+  },
+  system: {
+    // Only known OS settings deep-links are honoured; the main process enforces
+    // an allowlist (see app:openExternal) and ignores anything else.
+    openExternal: (url) => ipcRenderer.invoke('app:openExternal', url)
+  },
   window: {
     onVisibility: (callback) => {
       const listener = (_, visible) => callback(visible)

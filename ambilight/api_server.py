@@ -36,6 +36,8 @@ from .devices import create_driver
 from .config_watcher import ConfigWatcher
 from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
+from .integrations.mqtt_bridge import MqttBridge
+from .notifications import NotificationFlashService
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ controller = PipelineController()
 monitor = None
 config_watcher = None
 auto_switcher = None
+mqtt_bridge = None
+notification_flash = None
 
 # Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
 latest_metrics: Dict[str, Any] = {}
@@ -67,7 +71,7 @@ _last_metrics_persist = 0.0
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global monitor, config_watcher, auto_switcher
+    global monitor, config_watcher, auto_switcher, mqtt_bridge, notification_flash
 
     # 0. Security: Generate Token
     generate_and_save_token()
@@ -103,6 +107,33 @@ async def startup_event() -> None:
     await bus.subscribe("CONFIG_UPDATE", _refresh_auto_profile)
     auto_switcher.start()
 
+    # 6. MQTT bridge + Home Assistant discovery (off by default; no-op without
+    #    paho-mqtt). Mirrors the auto-switcher lifecycle: refresh on config
+    #    change, publish state on every metrics update.
+    mqtt_bridge = MqttBridge(ConfigManager.get(), controller)
+
+    async def _refresh_mqtt(cfg) -> None:
+        if mqtt_bridge is not None:
+            mqtt_bridge.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_mqtt)
+    await bus.subscribe("METRICS_UPDATE", mqtt_bridge.on_metrics)
+    mqtt_bridge.start()
+
+    # 7. Notification Flash: blink the strip when an OS notification arrives so
+    #    the user notices it in fullscreen / DND / locked. Mirrors the
+    #    auto-switcher lifecycle (refresh rules on config change).
+    notification_flash = NotificationFlashService(
+        ConfigManager.get(), controller, asyncio.get_running_loop(),
+    )
+
+    async def _refresh_notifications(cfg) -> None:
+        if notification_flash is not None:
+            notification_flash.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_notifications)
+    notification_flash.start()
+
 
 async def _cache_metrics(metrics: dict) -> None:
     """Keep the latest snapshot + a rolling window; persist to disk ~1 Hz."""
@@ -130,6 +161,10 @@ async def _cache_metrics(metrics: dict) -> None:
 async def shutdown_event() -> None:
     logger.info("[API] Shutting down. Stopping pipeline.")
     controller.stop()
+    if mqtt_bridge:
+        mqtt_bridge.stop()
+    if notification_flash:
+        notification_flash.stop()
     if monitor:
         monitor.stop()
     if config_watcher:
@@ -271,6 +306,17 @@ async def get_config() -> Dict[str, Any]:
 
 @app.put("/api/config", dependencies=[Depends(verify_token)])
 async def update_config(override: Dict[str, Any]) -> Dict[str, str]:
+    # Move any incoming MQTT broker password to the OS keyring and blank it in
+    # the override so the secret is never persisted to configuration.yaml. An
+    # empty/absent password leaves the stored one untouched.
+    mqtt_override = override.get("mqtt")
+    if isinstance(mqtt_override, dict) and "password" in mqtt_override:
+        pw = mqtt_override.get("password") or ""
+        if pw:
+            from .integrations import secrets_store
+            secrets_store.set_mqtt_password(pw)
+        mqtt_override["password"] = ""
+
     ConfigManager.update(override)
     # A manual settings edit no longer matches a saved profile (unless it *is*
     # the auto_profile rules being toggled).
@@ -402,6 +448,43 @@ async def get_logs(level: str = "", limit: int = 400) -> Dict[str, Any]:
 async def foreground_app() -> Dict[str, Optional[str]]:
     app_name = await asyncio.get_running_loop().run_in_executor(None, get_foreground_app)
     return {"app": app_name}
+
+
+# ---------------------------------------------------------------------------
+# NOTIFICATION FLASH
+# ---------------------------------------------------------------------------
+
+@app.get("/api/notifications/permission", dependencies=[Depends(verify_token)])
+async def notifications_permission() -> Dict[str, Any]:
+    """Report whether notification access is granted, so the UI can deep-link to
+    the relevant OS settings page when it isn't."""
+    info = {"status": "unavailable", "available": False}
+    if notification_flash is not None:
+        info = await asyncio.get_running_loop().run_in_executor(
+            None, notification_flash.permission_status,
+        )
+    info["platform"] = platform.system().lower()
+    return info
+
+
+class NotificationTestRequest(pydantic.BaseModel):
+    color: Optional[List[int]] = None   # [r,g,b]; defaults to configured default
+
+
+@app.post("/api/notifications/test", dependencies=[Depends(verify_token)])
+async def notifications_test(request: NotificationTestRequest) -> Dict[str, str]:
+    """Fire a flash now (bypassing dedup/DND) so the user can preview it."""
+    if notification_flash is None:
+        raise HTTPException(status_code=503, detail="Notification service not ready")
+    color = request.color
+    # Reject a malformed colour up front rather than reporting success for a
+    # flash the pipeline would silently drop.
+    if color is not None and (
+        len(color) != 3 or not all(isinstance(c, int) and 0 <= c <= 255 for c in color)
+    ):
+        raise HTTPException(status_code=400, detail="color must be [r, g, b] with values 0-255")
+    notification_flash.test_flash(color)
+    return {"message": "Flash triggered"}
 
 
 # ---------------------------------------------------------------------------

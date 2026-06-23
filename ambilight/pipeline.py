@@ -28,6 +28,7 @@ import logging
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field as dc_field
 from typing import Optional
 
@@ -54,6 +55,14 @@ logger = logging.getLogger(__name__)
 # enough that a real fade-to-black scene won't trip it, short enough that a
 # stuck/DRM/MSS-fullscreen black-out is surfaced promptly.
 _BLACK_NOSIGNAL_FRAMES: int = 60
+
+# Capture backends (WGC/DXGI especially) occasionally emit a single spurious
+# all-black frame even when the screen content is unchanged. Pushing that
+# straight to the strip makes the lights blink off for a frame on an otherwise
+# static screen. Hold the last colour for up to this many consecutive black
+# frames before honouring black, so a lone glitch frame is invisible while a
+# genuinely black screen still goes dark within ~this/fps seconds.
+_BLACK_DEBOUNCE_FRAMES: int = 3
 
 
 def _nosignal_verdict(consecutive_black: int, backend: Optional[str]) -> tuple[bool, str]:
@@ -86,6 +95,8 @@ class _Channel:
     smoother: "SmoothingEngine"
     led_count: int
     last_zone_colors: list = dc_field(default_factory=list)
+    black_streak: int = 0   # consecutive black frames seen (transient-black debounce)
+    last_output_rgb: tuple = (0, 0, 0)   # this channel's last real colour (flash restore)
 
 
 def _device_specs(cfg) -> list[dict]:
@@ -195,6 +206,11 @@ class AmbilightPipeline:
         self._consecutive_black: int = 0
         self._power: bool = True               # strip powered on?
         self._mode: str = "screen_sync"        # reported mode ("off" when powered off)
+        # Notification-flash overlay: transient blinks that briefly override the
+        # strip then restore the prior frame. Bounded deque coalesces bursts.
+        self._flash_queue: deque = deque(maxlen=3)
+        self._flash_active: Optional[dict] = None
+        self._last_output_rgb: tuple = (0, 0, 0)   # last real colour, for restore
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -277,43 +293,35 @@ class AmbilightPipeline:
                     break
                     
                 if self._pause_event and self._pause_event.is_set():
-                    time.sleep(0.1)
+                    # Paused for screen lock / system suspend. The underlying loop
+                    # isn't repainting, but notification flashes must still fire
+                    # (this is exactly when the user misses notifications). Pull
+                    # only flash commands; defer the rest until resume.
+                    nfl = bool(self._cfg.notifications.flash_when_locked)
+                    self._drain_flash_commands(enqueue=nfl)
+                    flashing = self._service_idle_flash(time.monotonic()) if nfl else False
+                    time.sleep(0.02 if flashing else 0.1)
                     continue
 
                 if self._command_queue is not None:
                     import queue
-                    try:
-                        cmd = self._command_queue.get_nowait()
-                        if cmd.get("action") == "reload":
-                            self._cfg = cmd["config"]
-                            self._apply_config_hot()
-                        elif cmd.get("action") == "set_mode":
-                            mode = cmd.get("mode")
-                            params = cmd.get("params", {})
-                            if mode == "off":
-                                # Power the strip off completely and stop any effect.
-                                self._effects.set_mode("screen_sync")
-                                for ch in self._channels:
-                                    ch.led.turn_off()
-                                self._power = False
-                                self._mode = "off"
-                                logger.info("[Pipeline] Powered off.")
-                            else:
-                                # Check each strip's power and turn it on if off,
-                                # before applying the mode (FR-POWER).
-                                for ch in self._channels:
-                                    ch.led.ensure_on()
-                                self._power = True
-                                self._effects.set_mode(mode, params)
-                                self._mode = mode
-                                logger.info("[Pipeline] Mode switched to %s", mode)
-                    except queue.Empty:
-                        pass
+                    while True:
+                        try:
+                            cmd = self._command_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        self._handle_command(cmd)
 
                 # --- Powered off: idle without driving the strip ---
                 if not self._power:
                     self._set_capture_active(False)   # free the capture device
                     self._last_zone_colors = []
+                    # Still flash for notifications when configured (wakes the
+                    # strip for the blink, then powers it back off).
+                    flashing = (
+                        self._service_idle_flash(time.monotonic())
+                        if self._cfg.notifications.flash_when_locked else False
+                    )
                     if self._metrics_queue is not None:
                         import queue
                         try:
@@ -327,7 +335,7 @@ class AmbilightPipeline:
                             })
                         except queue.Full:
                             pass
-                    time.sleep(0.1)
+                    time.sleep(0.02 if flashing else 0.1)
                     continue
 
                 # --- Effect schedule (checked at most every 5 s) ---
@@ -360,13 +368,23 @@ class AmbilightPipeline:
                 # flag it so the UI can advise installing WGC (see capture.py).
                 degraded = capture_backend == "mss" and sys.platform == "win32"
 
+                # Notification flash overlay: on an "on" segment it overrides the
+                # strip with the flash colour; on "off"/inactive the real content
+                # shows. The underlying loop still computes colours for metrics.
+                flash_dir = self._flash_step(t0, paused=False)
+                flash_rgb = flash_dir[1] if flash_dir[0] == "on" else None
+
                 # --- Effect Processing (applies to every device) ---
                 if self._effects.current_mode != "screen_sync":
                     color = self._effects.update()
                     if color:
                         r, g, b = color
+                    if color is not None or flash_rgb is not None:
+                        out = flash_rgb if flash_rgb is not None else (r, g, b)
                         for ch in self._channels:
-                            ch.led.set_rgb(r, g, b)
+                            ch.led.set_rgb(*out)
+                            if color is not None:
+                                ch.last_output_rgb = (int(r), int(g), int(b))
                     sent = True
                     time.sleep(1.0 / max(self._cfg.capture.fps_target, 1))
                 else:
@@ -424,6 +442,15 @@ class AmbilightPipeline:
                         small = small_by_mon.get(ch.monitor_index)
                         if small is None:
                             continue
+                        # Transient-black debounce: a lone black frame from the
+                        # capture backend (common on WGC/DXGI even when the screen
+                        # is static) would blink the strip off. Hold the last
+                        # colour until black persists past the debounce window, so
+                        # a glitch frame is ignored but a real black-out still
+                        # turns the strip dark. A flash overrides regardless.
+                        if flash_rgb is None and self._hold_transient_black(ch, small):
+                            r, g, b = self._last_output_rgb
+                            continue
                         zone_regions = ch.zones.extract_regions(small)
                         zone_colors = ch.analyzer.analyze_zones(zone_regions)
                         smoothed_zones = ch.smoother.smooth_zones(zone_colors)
@@ -432,7 +459,16 @@ class AmbilightPipeline:
                         ]
                         combined = ch.analyzer.combine_zone_colors(smoothed_zones)
                         r, g, b = ch.smoother.smooth_combined(combined)
-                        if ch.led.is_addressable and self._cfg.gradient.enabled:
+                        # Remember this channel's real colour so a flash that
+                        # finishes while locked restores the right per-strip frame.
+                        ch.last_output_rgb = (int(r), int(g), int(b))
+                        if flash_rgb is not None:
+                            fr, fg, fb = flash_rgb
+                            if ch.led.is_addressable:
+                                ch.led.set_pixels([(fr, fg, fb)] * ch.led_count)
+                            else:
+                                ch.led.set_rgb(fr, fg, fb)
+                        elif ch.led.is_addressable and self._cfg.gradient.enabled:
                             pixels = generate_gradient(
                                 self._cfg.gradient.mode, ch.last_zone_colors,
                                 ch.led_count, self._cfg.gradient.gamma,
@@ -452,6 +488,10 @@ class AmbilightPipeline:
                         capture_reason = black_reason
                     # Live preview reflects the first channel.
                     self._last_zone_colors = self._channels[0].last_zone_colors if self._channels else []
+
+                # Remember the last real colour so a flash that fires while the
+                # strip is later locked/paused can restore the frozen frame.
+                self._last_output_rgb = (int(r), int(g), int(b))
 
                 # --- Metrics ---
                 latency_ms = (time.monotonic() - t0) * 1000.0
@@ -513,6 +553,214 @@ class AmbilightPipeline:
         """Signal the run loop to exit on its next iteration."""
         logger.info("[Pipeline] Stop requested.")
         self._running = False
+
+    # ------------------------------------------------------------------
+    # Command handling
+    # ------------------------------------------------------------------
+
+    def _handle_command(self, cmd: dict) -> None:
+        """Apply a single command pulled from the controller's command queue."""
+        action = cmd.get("action")
+        if action == "reload":
+            self._cfg = cmd["config"]
+            self._apply_config_hot()
+        elif action == "flash":
+            self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {})
+        elif action == "set_mode":
+            mode = cmd.get("mode")
+            params = cmd.get("params", {})
+            if mode == "off":
+                # Power the strip off completely and stop any effect.
+                self._effects.set_mode("screen_sync")
+                for ch in self._channels:
+                    ch.led.turn_off()
+                self._power = False
+                self._mode = "off"
+                logger.info("[Pipeline] Powered off.")
+            else:
+                # Check each strip's power and turn it on if off,
+                # before applying the mode (FR-POWER).
+                for ch in self._channels:
+                    ch.led.ensure_on()
+                self._power = True
+                self._effects.set_mode(mode, params)
+                self._mode = mode
+                logger.info("[Pipeline] Mode switched to %s", mode)
+
+    def _drain_flash_commands(self, enqueue: bool = True) -> None:
+        """While paused, pull pending commands acting only on ``flash`` ones;
+        non-flash commands are re-queued so they survive until resume.
+
+        When *enqueue* is False the flash is dropped (used when
+        ``flash_when_locked`` is disabled) so stale flashes don't fire on unlock.
+        """
+        if self._command_queue is None:
+            return
+        import queue
+        deferred = []
+        while True:
+            try:
+                cmd = self._command_queue.get_nowait()
+            except queue.Empty:
+                break
+            if cmd.get("action") == "flash":
+                if enqueue:
+                    self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {})
+            else:
+                deferred.append(cmd)
+        for cmd in deferred:
+            try:
+                self._command_queue.put_nowait(cmd)
+            except queue.Full:
+                pass
+
+    def _hold_transient_black(self, ch: "_Channel", frame) -> bool:
+        """Update *ch*'s black streak and report whether this black frame should
+        be held (skipped) as a transient capture glitch.
+
+        Returns True only while a black run is within the debounce window, so a
+        lone spurious black frame is ignored (strip holds its colour) but a
+        sustained black-out (streak past the window) falls through to be sent.
+        Non-black frames reset the streak.
+        """
+        if is_black_frame(frame):
+            ch.black_streak += 1
+            return ch.black_streak <= _BLACK_DEBOUNCE_FRAMES
+        ch.black_streak = 0
+        return False
+
+    # ------------------------------------------------------------------
+    # Notification flash overlay
+    # ------------------------------------------------------------------
+
+    def _enqueue_flash(self, color, pattern: dict) -> None:
+        """Build a blink schedule from *color* + *pattern* and queue it.
+
+        *pattern* may carry ``blink_count``, ``on_ms``, ``off_ms`` and
+        ``brightness``; missing values fall back to sensible defaults.
+        """
+        if not color:
+            return
+        try:
+            rgb = [max(0, min(255, int(c))) for c in color][:3]
+            if len(rgb) != 3:
+                return
+        except (TypeError, ValueError):
+            return
+        try:
+            bright = max(0.0, min(1.0, float(pattern.get("brightness", 1.0))))
+        except (TypeError, ValueError):
+            bright = 1.0
+        r, g, b = (int(c * bright) for c in rgb)
+        try:
+            blink_count = max(1, int(pattern.get("blink_count", 2)))
+            on_ms = max(20, int(pattern.get("on_ms", 180)))
+            off_ms = max(0, int(pattern.get("off_ms", 120)))
+        except (TypeError, ValueError):
+            blink_count, on_ms, off_ms = 2, 180, 120
+
+        segments = []
+        for i in range(blink_count):
+            segments.append({"on": True, "rgb": (r, g, b), "dur": on_ms / 1000.0})
+            if i < blink_count - 1 and off_ms > 0:
+                segments.append({"on": False, "rgb": (0, 0, 0), "dur": off_ms / 1000.0})
+        self._flash_queue.append({"segments": segments})
+
+    def _flash_step(self, now: float, paused: bool):
+        """Advance the flash state machine. Returns a directive tuple:
+        ``("inactive",)``, ``("on", (r,g,b))`` or ``("off",)``.
+
+        Side effects only at transitions: ``ensure_on`` on start, and on finish
+        either power the strip back off (if it was nominally off) or restore the
+        last frame (if it was a paused/locked flash). Painting of segments is
+        left to the caller so the active loop and the idle loop can share this.
+        """
+        if self._flash_active is None:
+            if not self._flash_queue:
+                return ("inactive",)
+            fa = self._flash_queue.popleft()
+            fa["i"] = 0
+            fa["seg_end"] = now + fa["segments"][0]["dur"]
+            for ch in self._channels:
+                try:
+                    ch.led.ensure_on()
+                except Exception:  # pragma: no cover - device hiccup
+                    pass
+            self._flash_active = fa
+
+        fa = self._flash_active
+        while now >= fa["seg_end"]:
+            fa["i"] += 1
+            if fa["i"] >= len(fa["segments"]):
+                self._finish_flash(paused)
+                return ("inactive",)
+            fa["seg_end"] = now + fa["segments"][fa["i"]]["dur"]
+
+        seg = fa["segments"][fa["i"]]
+        return ("on", seg["rgb"]) if seg["on"] else ("off",)
+
+    def _finish_flash(self, paused: bool) -> None:
+        """Terminal restore for a completed flash.
+
+        The restore decision is taken from the *current* power/pause state, not
+        the state captured when the flash started — so a flash that began while
+        active but completes after the app was paused (screen lock mid-flash)
+        still restores instead of leaving the flash colour stuck on.
+        """
+        self._flash_active = None
+        try:
+            if not self._power:
+                for ch in self._channels:
+                    ch.led.set_rgb(0, 0, 0)
+                    ch.led.turn_off()
+            elif paused:
+                self._restore_output()
+            # Active + powered: the normal loop repaints next tick, nothing to do.
+        except Exception:  # pragma: no cover - device hiccup
+            pass
+
+    def _restore_output(self) -> None:
+        """Repaint each channel's own last real colour (used after a paused/locked
+        flash, where the normal loop isn't repainting). Per-channel so multi-device
+        setups don't all collapse to a single colour."""
+        for ch in self._channels:
+            r, g, b = getattr(ch, "last_output_rgb", (0, 0, 0))
+            try:
+                if ch.led.is_addressable:
+                    ch.led.set_pixels([(r, g, b)] * ch.led_count)
+                else:
+                    ch.led.set_rgb(r, g, b)
+            except Exception:  # pragma: no cover - device hiccup
+                pass
+
+    def _service_idle_flash(self, now: float) -> bool:
+        """Drive the flash overlay while the strip isn't being repainted (paused
+        for lock/suspend, or powered off). Paints on/off segments directly and
+        returns True while a flash is in progress (so the caller tightens its
+        sleep cadence for a crisp blink)."""
+        directive = self._flash_step(now, paused=True)
+        if directive[0] == "on":
+            fr, fg, fb = directive[1]
+            for ch in self._channels:
+                try:
+                    if ch.led.is_addressable:
+                        ch.led.set_pixels([(fr, fg, fb)] * ch.led_count)
+                    else:
+                        ch.led.set_rgb(fr, fg, fb)
+                except Exception:  # pragma: no cover - device hiccup
+                    pass
+            return True
+        if directive[0] == "off":
+            for ch in self._channels:
+                try:
+                    if ch.led.is_addressable:
+                        ch.led.set_pixels([(0, 0, 0)] * ch.led_count)
+                    else:
+                        ch.led.set_rgb(0, 0, 0)
+                except Exception:  # pragma: no cover - device hiccup
+                    pass
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers
