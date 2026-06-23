@@ -146,7 +146,8 @@ def test_mss_grab_reopens_dead_session():
     b._sct = object()          # pretend a session exists
     b._monitor = {"left": 0}
     b.close()
-    assert b._sct is None and b._monitor is None  # both cleared → lazy reopen arms
+    assert b._sct is None       # session released
+    assert b._monitor is None   # monitor cleared too → lazy reopen arms
 
 
 def test_mss_grab_failure_logs_once_not_per_frame(caplog):
@@ -181,13 +182,15 @@ def test_manager_recovers_active_backend_after_transient_stall():
     b = _ControllableBackend("mss")
     mgr._candidates = [b]
     mgr.start()
-    assert mgr._active is b and mgr.is_healthy
+    assert mgr._active is b
+    assert mgr.is_healthy
 
     # Transient stall (screen locked): grab returns None for a sustained run.
     b.deliver = False
     for _ in range(mgr._FAIL_THRESHOLD + 2):
         assert mgr.grab() is None
-    assert b.closed >= 1 and b.opened >= 2   # manager re-probed the backend
+    assert b.closed >= 1     # manager closed the stalled session
+    assert b.opened >= 2     # ...and re-probed the backend
 
     # Screen comes back: the backend delivers again and capture self-resumes
     # without the user touching anything.
@@ -198,7 +201,8 @@ def test_manager_recovers_active_backend_after_transient_stall():
         if frame is not None:
             break
     assert frame is not None
-    assert mgr.is_healthy and mgr.active_backend == "mss"
+    assert mgr.is_healthy
+    assert mgr.active_backend == "mss"
 
 
 def test_manager_exhaustion_logs_once_and_never_emits_question_mark(caplog):
@@ -241,7 +245,8 @@ def test_manager_fails_over_to_second_backend_midrun():
     for _ in range(mgr._FAIL_THRESHOLD + 2):
         frame = mgr.grab()
     assert mgr._active is secondary
-    assert frame is not None and mgr.active_backend == "mss"
+    assert frame is not None
+    assert mgr.active_backend == "mss"
 
 
 def test_manager_recovery_skips_backend_that_opens_but_delivers_nothing():
@@ -261,7 +266,8 @@ def test_manager_recovery_skips_backend_that_opens_but_delivers_nothing():
         frame = mgr.grab()
     # Recovery falls past the open-but-empty primary to the delivering secondary.
     assert mgr._active is secondary
-    assert frame is not None and mgr.active_backend == "mss"
+    assert frame is not None
+    assert mgr.active_backend == "mss"
 
 
 def test_manager_recovery_respects_cooldown(monkeypatch):

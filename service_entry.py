@@ -45,6 +45,10 @@ def _run_selfcheck() -> int:
         ("windows_capture", "WGC", is_win),
         ("dxcam", "DXGI", is_win),
         ("comtypes", "comtypes (dxcam dep)", is_win),
+        # cv2 absence breaks BOTH WGC (windows_capture imports it) and DXGI
+        # (dxcam colour conversion), so report it like a backend for parity with
+        # the build-time requirement.
+        ("cv2", "OpenCV (WGC/DXGI dep)", is_win),
     ]
 
     print("[selfcheck] Capture backend import availability:")

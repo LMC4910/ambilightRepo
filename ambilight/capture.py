@@ -395,20 +395,29 @@ class MSSBackend(CaptureBackend):
         import mss  # type: ignore[import-untyped]
         # Close any prior session first so a re-open never abandons a live DC.
         self.close()
-        self._sct = mss.mss()
-        monitors = self._sct.monitors  # type: ignore[union-attr]
-        # monitors[0] is the virtual all-screens monitor; real monitors start at 1
-        real_monitors = monitors[1:]
-        if not real_monitors:
-            # Nothing to capture (headless/virtual session) — don't leak the
-            # just-created session across repeated retry attempts.
-            self.close()
-            return False
-        # Clamp into range; a negative index would otherwise select from the end
-        # of the list via Python's negative indexing.
-        idx = min(max(self._monitor_index, 0), len(real_monitors) - 1)
-        self._monitor = real_monitors[idx]
-        return True
+        # Keep the new session *local* until it's fully validated, and assign it to
+        # self._sct only on success. That way a failure anywhere below — including
+        # monitor enumeration raising — never leaves a leaked session on the
+        # instance for open()/grab() to swallow (the finally releases it).
+        sct = mss.mss()
+        keep = False
+        try:
+            monitors = sct.monitors  # type: ignore[union-attr]
+            # monitors[0] is the virtual all-screens monitor; real monitors start at 1
+            real_monitors = monitors[1:]
+            if not real_monitors:
+                return False  # nothing to capture (headless/virtual session)
+            # Clamp into range; a negative index would otherwise select from the
+            # end of the list via Python's negative indexing.
+            idx = min(max(self._monitor_index, 0), len(real_monitors) - 1)
+            self._sct = sct
+            self._monitor = real_monitors[idx]
+            keep = True
+            return True
+        finally:
+            if not keep:
+                with suppress(Exception):
+                    sct.close()
 
     def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
         self._monitor_index = monitor_index
@@ -550,7 +559,7 @@ class ScreenCaptureManager:
         logger.info("[Capture] Active backend: %s", backend.name.upper())
         self._warn_if_degraded(backend)
 
-    def _open_best(self, require_frame: bool = False) -> Optional[CaptureBackend]:
+    def _open_best(self, *, require_frame: bool = False) -> Optional[CaptureBackend]:
         """Open the first available backend in priority order and make it active.
 
         Pure mechanism: sets ``_active`` and returns the backend (or *None* if
