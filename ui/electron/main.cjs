@@ -520,8 +520,18 @@ function createWindow() {
     body: JSON.stringify({ color: color || null })
   }))
 
-  // Open an OS settings deep-link / external URL (used to grant notification access)
+  // Open an OS settings deep-link (used to grant notification access). Restricted
+  // to a small allowlist of known settings schemes so a compromised/modified
+  // renderer can't launch arbitrary protocol handlers via this IPC surface.
+  const ALLOWED_EXTERNAL_PREFIXES = [
+    'ms-settings:',                 // Windows Settings deep-links
+    'x-apple.systempreferences:',   // macOS System Settings panes
+  ]
   ipcMain.handle('app:openExternal', async (e, url) => {
+    if (typeof url !== 'string' || !ALLOWED_EXTERNAL_PREFIXES.some((p) => url.startsWith(p))) {
+      console.warn('[openExternal] blocked disallowed URL:', url)
+      return false
+    }
     try { await shell.openExternal(url); return true } catch (err) { console.error(err); return false }
   })
 

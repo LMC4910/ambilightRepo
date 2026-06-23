@@ -19,6 +19,11 @@ const N_DEFAULTS = {
   keyword_rules: [],
 }
 
+// Monotonic id source for stable React keys on editable rows (index keys cause
+// input/focus to jump to the wrong row when items are removed).
+let _rowId = 0
+const nextId = () => (_rowId += 1)
+
 const clamp = (n) => Math.max(0, Math.min(255, Math.round(Number(n) || 0)))
 const rgbToHex = (rgb) => '#' + (rgb || [255, 255, 255]).map((c) => clamp(c).toString(16).padStart(2, '0')).join('')
 const hexToRgb = (hex) => {
@@ -43,8 +48,8 @@ const toDraft = (n) => {
     flash_when_locked: src.flash_when_locked !== false,
     dedup_window_s: Number(src.dedup_window_s ?? 5),
     min_flash_interval_s: Number(src.min_flash_interval_s ?? 1.5),
-    overrides: Object.entries(src.app_overrides || {}).map(([app, color]) => ({ app, color })),
-    keyword_rules: (src.keyword_rules || []).map((r) => ({ keyword: r.keyword || '', color: r.color || [255, 255, 255] })),
+    overrides: Object.entries(src.app_overrides || {}).map(([app, color]) => ({ _id: nextId(), app, color })),
+    keyword_rules: (src.keyword_rules || []).map((r) => ({ _id: nextId(), keyword: r.keyword || '', color: r.color || [255, 255, 255] })),
   }
 }
 
@@ -74,12 +79,13 @@ function ColorSwatch({ value, onChange }) {
 }
 
 function PermissionBanner() {
-  const { notifPermission } = useStore()
   const [info, setInfo] = useState(null)
 
   useEffect(() => {
     let alive = true
-    const tick = () => notifPermission().then((r) => { if (alive) setInfo(r) }).catch(() => {})
+    // Access the store method via getState() so it doesn't need to be an effect
+    // dependency (Zustand methods are stable; this keeps exhaustive-deps quiet).
+    const tick = () => useStore.getState().notifPermission().then((r) => { if (alive) setInfo(r) }).catch(() => {})
     tick()
     const id = setInterval(tick, 4000)
     return () => { alive = false; clearInterval(id) }
@@ -134,10 +140,11 @@ function NumField({ label, value, onChange, step = 1, min = 0, suffix }) {
 }
 
 export default function Notifications() {
-  const { settings, fetchSettings, updateSettings, saving, testFlash } = useStore()
+  const { settings, updateSettings, saving, testFlash } = useStore()
   const [draft, setDraft] = useState(null)
 
-  useEffect(() => { if (!settings) fetchSettings() }, [])
+  // getState() avoids listing the (stable) store method as an effect dependency.
+  useEffect(() => { if (!settings) useStore.getState().fetchSettings() }, [])
   useEffect(() => { if (settings) setDraft(toDraft(settings.notifications)) }, [settings])
 
   if (!draft) return null
@@ -145,14 +152,14 @@ export default function Notifications() {
   const payload = buildPayload(draft)
   const dirty = JSON.stringify(payload) !== JSON.stringify(buildPayload(toDraft(settings?.notifications)))
 
-  // override rows
-  const setOverride = (i, key, val) => set({ overrides: draft.overrides.map((o, idx) => (idx === i ? { ...o, [key]: val } : o)) })
-  const addOverride = () => set({ overrides: [...draft.overrides, { app: '', color: [255, 255, 255] }] })
-  const removeOverride = (i) => set({ overrides: draft.overrides.filter((_, idx) => idx !== i) })
+  // override rows (keyed by stable _id)
+  const setOverride = (id, key, val) => set({ overrides: draft.overrides.map((o) => (o._id === id ? { ...o, [key]: val } : o)) })
+  const addOverride = () => set({ overrides: [...draft.overrides, { _id: nextId(), app: '', color: [255, 255, 255] }] })
+  const removeOverride = (id) => set({ overrides: draft.overrides.filter((o) => o._id !== id) })
   // keyword rules
-  const setRule = (i, key, val) => set({ keyword_rules: draft.keyword_rules.map((r, idx) => (idx === i ? { ...r, [key]: val } : r)) })
-  const addRule = () => set({ keyword_rules: [...draft.keyword_rules, { keyword: '', color: [255, 105, 180] }] })
-  const removeRule = (i) => set({ keyword_rules: draft.keyword_rules.filter((_, idx) => idx !== i) })
+  const setRule = (id, key, val) => set({ keyword_rules: draft.keyword_rules.map((r) => (r._id === id ? { ...r, [key]: val } : r)) })
+  const addRule = () => set({ keyword_rules: [...draft.keyword_rules, { _id: nextId(), keyword: '', color: [255, 105, 180] }] })
+  const removeRule = (id) => set({ keyword_rules: draft.keyword_rules.filter((r) => r._id !== id) })
 
   return (
     <section className="glass-panel rounded-3xl p-8 flex flex-col gap-5 animate-fade-up">
@@ -219,12 +226,12 @@ export default function Notifications() {
         <h4 className="text-sm font-semibold text-white">Per-app colours</h4>
         <p className="text-xs text-slate-500">Pin a colour for a specific app (matched by its name or id).</p>
         {draft.overrides.length === 0 && <div className="text-xs text-slate-500">No overrides — the icon colour is used.</div>}
-        {draft.overrides.map((o, i) => (
-          <div key={i} className="flex gap-2 items-center">
+        {draft.overrides.map((o) => (
+          <div key={o._id} className="flex gap-2 items-center">
             <input className="custom-input rounded-lg px-2 py-1.5 text-sm flex-1" placeholder="app name or id (e.g. Discord)"
-              value={o.app} onChange={(e) => setOverride(i, 'app', e.target.value)} />
-            <ColorSwatch value={o.color} onChange={(c) => setOverride(i, 'color', c)} />
-            <button onClick={() => removeOverride(i)} className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+              value={o.app} onChange={(e) => setOverride(o._id, 'app', e.target.value)} />
+            <ColorSwatch value={o.color} onChange={(c) => setOverride(o._id, 'color', c)} />
+            <button onClick={() => removeOverride(o._id)} aria-label="Remove app override" title="Remove app override" className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
           </div>
         ))}
         <button onClick={addOverride} className="self-start px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Add app</button>
@@ -238,12 +245,12 @@ export default function Notifications() {
           (e.g. <span className="font-mono">instagram</span>) to give it a colour. Matched against the app name, title and body.
         </p>
         {draft.keyword_rules.length === 0 && <div className="text-xs text-slate-500">No keyword rules yet.</div>}
-        {draft.keyword_rules.map((r, i) => (
-          <div key={i} className="flex gap-2 items-center">
+        {draft.keyword_rules.map((r) => (
+          <div key={r._id} className="flex gap-2 items-center">
             <input className="custom-input rounded-lg px-2 py-1.5 text-sm flex-1" placeholder="text contains… (e.g. instagram)"
-              value={r.keyword} onChange={(e) => setRule(i, 'keyword', e.target.value)} />
-            <ColorSwatch value={r.color} onChange={(c) => setRule(i, 'color', c)} />
-            <button onClick={() => removeRule(i)} className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+              value={r.keyword} onChange={(e) => setRule(r._id, 'keyword', e.target.value)} />
+            <ColorSwatch value={r.color} onChange={(c) => setRule(r._id, 'color', c)} />
+            <button onClick={() => removeRule(r._id)} aria-label="Remove keyword rule" title="Remove keyword rule" className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
           </div>
         ))}
         <button onClick={addRule} className="self-start px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Add rule</button>

@@ -96,6 +96,7 @@ class _Channel:
     led_count: int
     last_zone_colors: list = dc_field(default_factory=list)
     black_streak: int = 0   # consecutive black frames seen (transient-black debounce)
+    last_output_rgb: tuple = (0, 0, 0)   # this channel's last real colour (flash restore)
 
 
 def _device_specs(cfg) -> list[dict]:
@@ -382,6 +383,8 @@ class AmbilightPipeline:
                         out = flash_rgb if flash_rgb is not None else (r, g, b)
                         for ch in self._channels:
                             ch.led.set_rgb(*out)
+                            if color is not None:
+                                ch.last_output_rgb = (int(r), int(g), int(b))
                     sent = True
                     time.sleep(1.0 / max(self._cfg.capture.fps_target, 1))
                 else:
@@ -456,6 +459,9 @@ class AmbilightPipeline:
                         ]
                         combined = ch.analyzer.combine_zone_colors(smoothed_zones)
                         r, g, b = ch.smoother.smooth_combined(combined)
+                        # Remember this channel's real colour so a flash that
+                        # finishes while locked restores the right per-strip frame.
+                        ch.last_output_rgb = (int(r), int(g), int(b))
                         if flash_rgb is not None:
                             fr, fg, fb = flash_rgb
                             if ch.led.is_addressable:
@@ -675,8 +681,6 @@ class AmbilightPipeline:
             fa = self._flash_queue.popleft()
             fa["i"] = 0
             fa["seg_end"] = now + fa["segments"][0]["dur"]
-            fa["restore_off"] = (not self._power)
-            fa["paused"] = paused
             for ch in self._channels:
                 try:
                     ch.led.ensure_on()
@@ -688,31 +692,39 @@ class AmbilightPipeline:
         while now >= fa["seg_end"]:
             fa["i"] += 1
             if fa["i"] >= len(fa["segments"]):
-                self._finish_flash(fa)
+                self._finish_flash(paused)
                 return ("inactive",)
             fa["seg_end"] = now + fa["segments"][fa["i"]]["dur"]
 
         seg = fa["segments"][fa["i"]]
         return ("on", seg["rgb"]) if seg["on"] else ("off",)
 
-    def _finish_flash(self, fa: dict) -> None:
-        """Terminal restore for a completed flash."""
+    def _finish_flash(self, paused: bool) -> None:
+        """Terminal restore for a completed flash.
+
+        The restore decision is taken from the *current* power/pause state, not
+        the state captured when the flash started — so a flash that began while
+        active but completes after the app was paused (screen lock mid-flash)
+        still restores instead of leaving the flash colour stuck on.
+        """
         self._flash_active = None
         try:
-            if fa.get("restore_off"):
+            if not self._power:
                 for ch in self._channels:
                     ch.led.set_rgb(0, 0, 0)
                     ch.led.turn_off()
-            elif fa.get("paused"):
+            elif paused:
                 self._restore_output()
+            # Active + powered: the normal loop repaints next tick, nothing to do.
         except Exception:  # pragma: no cover - device hiccup
             pass
 
     def _restore_output(self) -> None:
-        """Repaint the last real colour (used after a paused/locked flash, where
-        the normal loop isn't repainting)."""
-        r, g, b = self._last_output_rgb
+        """Repaint each channel's own last real colour (used after a paused/locked
+        flash, where the normal loop isn't repainting). Per-channel so multi-device
+        setups don't all collapse to a single colour."""
         for ch in self._channels:
+            r, g, b = getattr(ch, "last_output_rgb", (0, 0, 0))
             try:
                 if ch.led.is_addressable:
                     ch.led.set_pixels([(r, g, b)] * ch.led_count)
