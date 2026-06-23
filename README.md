@@ -34,6 +34,10 @@ The MVP (P0), the v1.1 feature set (P1), and most of the v1.2 (P2) scope are **i
 | **Audio-reactive mode** (system-audio loopback) + **scene presets** (sunrise/sunset/ocean/ambient) | ✅ Done |
 | **Functional WGC capture** (catches hardware-overlay video DXGI misses; hardware DRM still excluded by Windows) | ✅ Done |
 | **Visual zone-layout editor** (per-edge counts + thickness, live preview, hot-reload) | ✅ Done |
+| **Multi-protocol device support** — MagicHome + **WLED** (realtime UDP + JSON API) behind a driver abstraction | ✅ Done |
+| **Automatic HDR detection + tone-mapping** + game-colour vibrancy + capture-health surfacing | ✅ Done |
+| **MQTT bridge + Home Assistant** auto-discovery (light + profile select + sensors) | ✅ Done (off by default) |
+| **Notification Flash** — flash the LEDs on OS notifications (icon colour, per-app rules, works locked) | ✅ Done (off by default) |
 | **Web dashboard** | 🚧 Not yet |
 
 **Distribution prerequisites you must supply:** real code-signing certificates (Windows `.pfx`, Apple Developer ID) and a GitHub repo + `GH_TOKEN` before signed builds and end-to-end auto-update work. Without them, installers build **unsigned** (Windows SmartScreen warning; macOS auto-update inactive).
@@ -51,17 +55,21 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 |-----------|--------|---------|
 | **Service entry** | ✅ | `python -m ambilight.service` (long-lived); legacy `python main.py` kept for source/headless use |
 | **REST API + WebSocket** | ✅ | `127.0.0.1:7826`, Bearer-token auth; WS metrics on `/ws` (~10 Hz) |
-| **Screen capture** | ✅ | WGC → DXGI/DXCam → MSS auto-failover, 24–30 FPS, <50 ms latency |
-| **Colour analysis** | ✅ | 5 modes: average, edges, dominant, kmeans, saturation_weighted; per-zone |
+| **Screen capture** | ✅ | WGC → DXGI/DXCam → MSS auto-failover, 24–30 FPS, <50 ms latency; **black/no-signal + HDR detection** with health surfaced on `/health` + dashboard |
+| **HDR tone-mapping** | ✅ | Per-monitor HDR detection (`auto`/`on`/`off`); washed HDR frames tone-mapped to SDR before analysis |
+| **Colour analysis** | ✅ | 5 modes: average, edges, dominant, kmeans, saturation_weighted; per-zone; post-analysis **vibrance** |
+| **Device protocols** | ✅ | `LedDriver` abstraction — **MagicHome** (TCP) + **WLED** (realtime UDP + JSON API); per-device `protocol` |
 | **Gradient engine** | ✅ | linear / radial / ambient / screen_matched + gamma; addressable `set_pixels` path |
 | **Effects engine** | ✅ | screen_sync, static, breathing, rainbow, candle, **sunrise/sunset/ocean/ambient** scenes, **audio-reactive** (loopback) + **scheduler** (time windows) + **plugin loader** (`~/.ambilight/plugins`) |
 | **Multi-device + multi-monitor** | ✅ | One capture per monitor shared across per-device channels |
-| **Device discovery / reconnect** | ✅ | MAC-based discovery, capability probe, exponential reconnect backoff |
+| **Device discovery / reconnect** | ✅ | MagicHome MAC-based discovery + WLED mDNS/HTTP discovery, capability probe, exponential reconnect backoff |
 | **Config** | ✅ | YAML + env overrides + **hot-reload** (file watcher); persisted to `~/.ambilight/configuration.yaml` |
 | **Profiles** | ✅ | save/load/apply/delete/import/export + built-ins (Gaming, Movie, Night) |
 | **Auto profile switching** | ✅ | Foreground-app → profile rules (FR-PROF-07), with a default fallback; applied live |
 | **Crash + display recovery** | ✅ | pipeline-worker watchdog (≤10 s); pause/resume on sleep/wake/lock; rebuild on monitor change |
 | **Auth / logging** | ✅ | per-session Bearer token (0600); rotating logs, split console/file levels, captured service stdio |
+| **MQTT + Home Assistant** | ✅ | Optional bridge (paho-mqtt) publishes state + accepts commands; HA MQTT discovery (light + profile select + sensors); creds in OS keyring; off by default |
+| **Notification Flash** | ✅ | Flash LEDs on OS notifications (icon-colour or fixed), per-app + keyword rules, dedup + rate limit, works during DND / while locked; off by default |
 
 #### Desktop app (Electron / React)
 | Component | Status | Details |
@@ -69,8 +77,9 @@ See [Feature Implementation Status](#-feature-implementation-status) for the per
 | **Service supervision** | ✅ | Spawns, health-checks, and crash-restarts the bundled service; adopts an already-running one |
 | **System tray + minimise-to-tray** | ✅ | LEDs keep running with the window closed; tray start/stop/restart + update check |
 | **First-run onboarding wizard** | ✅ | Monitor → device → test → profile → auto-start |
-| **Dashboard / Diagnostics / Logs** | ✅ | Live FPS/latency/uptime, zone preview, SVG charts, log viewer (with level filter) |
-| **Devices / Profiles / Settings** | ✅ | Multi-device setup with monitor assignment, profile import/export, full settings editor |
+| **Dashboard / Diagnostics / Logs** | ✅ | Live FPS/latency/uptime, zone preview, SVG charts, log viewer (with level filter); **capture-health banner** (syncing / MSS-fallback / black / DRM) + HDR badge |
+| **Devices / Profiles / Settings** | ✅ | **Protocol-aware** multi-device setup (MagicHome + WLED) with monitor assignment, profile import/export, full settings editor (incl. MQTT / Home Assistant) |
+| **Notifications** | ✅ | Notification Flash settings — colour mode, per-app overrides, keyword rules, permission + test-flash |
 | **Zone-layout editor** | ✅ | Visual per-edge LED counts + strip thickness, live-tinted preview, hot-reloads the running pipeline |
 | **Auto-start toggle + updates** | ✅ | "Start on login"; electron-updater banner + "Check for updates" |
 | **Auto-update** | ✅ wired | electron-updater via GitHub Releases (dormant until a release feed + repo exist) |
@@ -389,12 +398,12 @@ The capture manager tries backends in priority order (WGC → DXGI → MSS) and 
 
 | Component | Requirement |
 |-----------|-------------|
-| LED Controller | MagicHome / LEDENET compatible Wi-Fi RGB controller (TCP port 5577) |
+| LED Controller | MagicHome / LEDENET Wi-Fi RGB controller (TCP 5577), **or a WLED controller** (realtime UDP 21324 + HTTP JSON API) |
 | Network | Controller and computer on the same LAN subnet |
 | GPU (optional) | CUDA-capable GPU (NVIDIA) for hardware-accelerated resize and color analysis — CuPy, OpenCV CUDA, or PyTorch CUDA; CPU fallback is automatic |
 | Python | 3.12 recommended (3.10+ supported) |
 
-> **MagicHome / LEDENET compatibility**: Any controller that speaks the MagicHome TCP protocol on port 5577 is supported. Use `python main.py --discover` to scan your subnet and confirm your device is detected.
+> **Supported controllers**: any controller speaking the **MagicHome** TCP protocol on port 5577, or a **WLED** device (set `protocol: wled`; per-pixel over realtime UDP, power via the JSON API). Use `python main.py --discover` (MagicHome) or **Devices → Scan** in the app to find devices. See [docs/wled.md](docs/wled.md).
 
 ---
 

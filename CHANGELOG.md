@@ -5,6 +5,64 @@ All notable changes to **Ambilight Desktop** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-23
+
+Feature release: a second LED protocol (WLED), automatic HDR handling and better
+full-screen-game colour, a smart-home MQTT / Home Assistant bridge, and
+Notification Flash. All additions are off by default or fully back-compatible;
+existing MagicHome setups behave exactly as before.
+
+### Added
+- **WLED support.** A new `LedDriver` abstraction (`ambilight/devices/`) lets the
+  pipeline drive multiple protocols; MagicHome is now one driver and **WLED** is
+  the second. WLED streams per-pixel over realtime UDP (DRGB, chunked DNRGB for
+  long strips) and uses the JSON API for power, with discovery via mDNS
+  (`_wled._tcp`, when `zeroconf` is installed) or an HTTP subnet probe, plus
+  manual IP entry. Each device gains a `protocol` field; the Devices page and
+  onboarding are protocol-aware (selector, badges, protocol-aware test). See
+  [docs/wled.md](docs/wled.md).
+- **Automatic HDR detection + tone-mapping.** HDR displays are detected per
+  monitor (Windows advanced-colour state); washed HDR frames are tone-mapped back
+  to SDR before colour analysis. Mode is `auto` / `on` / `off` under
+  `capture.hdr`.
+- **Better full-screen-game colour.** A post-analysis **vibrance** control, and
+  the built-in **Gaming** profile now uses the flagship `saturation_weighted`
+  mode with vibrance and HDR-auto.
+- **Capture-health surfacing.** The pipeline now detects a capture that delivers
+  only black frames (a full-screen game on the MSS backend, or DRM-protected
+  content) instead of reporting healthy while the strip is dark. The dashboard
+  shows a clear banner ("Syncing • WGC", an MSS-fallback warning, or
+  black / DRM / no-frames with the fix) and an HDR badge; `/health` and
+  `/api/status` expose `capture_reason`, `capture_degraded`, and `hdr_active`.
+- **MQTT bridge + Home Assistant discovery.** With a broker configured, Ambilight
+  publishes live state and accepts commands over MQTT and auto-creates a Home
+  Assistant device — a light (power / RGB / mode), a profile select, and
+  FPS / syncing / devices sensors. Off by default; the broker password is stored
+  in the OS keyring, never in `configuration.yaml`. Optional deps `paho-mqtt` +
+  `keyring`. See [docs/home-assistant.md](docs/home-assistant.md).
+- **Notification Flash.** Optionally flashes the LEDs when an OS notification
+  arrives — using the originating app's icon colour or a fixed colour — so you
+  notice alerts in full-screen, during Do Not Disturb / Focus Assist, or while
+  the screen is locked. Per-app colour overrides and keyword rules (e.g. Phone
+  Link / forwarded phone notifications), de-duplication, and a rate limit. New
+  Notifications settings page with permission + test-flash.
+
+### Changed
+- **Force-quitting the desktop app no longer orphans the service.** The service
+  watches the shell's PID and shuts itself down (turning the strip off) if the
+  shell is force-killed (Task Manager / taskbar "End task") without running the
+  graceful exit; graceful quit now tree-kills the bundled service so worker
+  processes aren't left behind. (Closing the window still minimises to tray.)
+- **Transient black frames are debounced** so brief dark scenes / scene cuts no
+  longer blink the strip while still surfacing a sustained black-out.
+
+### Security
+- Broker credentials are stored in the OS keyring (Windows Credential Manager /
+  macOS Keychain / Linux Secret Service) and scrubbed from the saved config; the
+  MQTT/Home Assistant integration ships disabled by default.
+
+[1.1.0]: https://github.com/LMC4910/ambilightRepo/releases/tag/v1.1.0
+
 ## [1.0.2] - 2026-06-21
 
 Maintenance release fixing device discovery, service initialization crashes, and installer UX.
