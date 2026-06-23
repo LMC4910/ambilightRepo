@@ -97,9 +97,10 @@ function MetricCard({ title, value, unit, icon: Icon, delay }) {
 
 // At-a-glance "what's actually capturing" — no more guessing from the logs.
 // WGC/DXGI are the good backends (emerald); MSS is the degraded fallback (amber:
-// fullscreen games / overlay video render black on it); anything else means
-// capture isn't running (slate "Idle"). Backend comes straight from the live
-// metrics stream (pipeline → capture_backend).
+// fullscreen games / overlay video render black on it); not syncing or no backend
+// yet reads neutral ("Idle"/"—"); an unrecognised backend is shown neutral too
+// rather than implying it's healthy. Backend comes straight from the live metrics
+// stream (pipeline → capture_backend).
 function CaptureSourceCard({ metrics, delay }) {
   const raw = (metrics.capture_backend || '').toLowerCase()
   const syncing = metrics.mode === 'screen_sync'
@@ -116,7 +117,8 @@ function CaptureSourceCard({ metrics, delay }) {
   } else if (raw === 'dxgi') {
     label = 'DXGI'; valueClass = 'text-emerald-400'; sub = 'GPU capture'
   } else {
-    label = raw.toUpperCase(); valueClass = 'text-emerald-400'; sub = ''
+    // Unknown backend: neutral, not green — don't imply a confirmed-healthy state.
+    label = raw.toUpperCase(); valueClass = 'text-slate-400'; sub = 'unknown backend'
   }
 
   return (
