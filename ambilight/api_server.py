@@ -476,7 +476,14 @@ async def notifications_test(request: NotificationTestRequest) -> Dict[str, str]
     """Fire a flash now (bypassing dedup/DND) so the user can preview it."""
     if notification_flash is None:
         raise HTTPException(status_code=503, detail="Notification service not ready")
-    notification_flash.test_flash(request.color)
+    color = request.color
+    # Reject a malformed colour up front rather than reporting success for a
+    # flash the pipeline would silently drop.
+    if color is not None and (
+        len(color) != 3 or not all(isinstance(c, int) and 0 <= c <= 255 for c in color)
+    ):
+        raise HTTPException(status_code=400, detail="color must be [r, g, b] with values 0-255")
+    notification_flash.test_flash(color)
     return {"message": "Flash triggered"}
 
 

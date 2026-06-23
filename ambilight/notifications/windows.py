@@ -121,7 +121,9 @@ class WindowsNotificationListener(NotificationListener):
             if event is not None:
                 self._emit(event)
         # Drop ids that are no longer present so the set can't grow unbounded.
-        self._seen &= current_ids if current_ids else self._seen
+        # Intersect unconditionally: when the active list is empty we must clear
+        # stale ids too, otherwise a reused WinRT id could be suppressed later.
+        self._seen &= current_ids
 
     def _to_event(self, n) -> Optional[NotificationEvent]:
         import time

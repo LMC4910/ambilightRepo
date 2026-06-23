@@ -155,10 +155,21 @@ class NotificationFlashService:
         if self.color_mode != "fixed":
             cached = self._color_cache.get(ev.app_id)
             if cached is None:
-                extracted = icon_dominant_color(ev.icon_bytes)
-                cached = list(extracted) if extracted else _NO_ICON
-                self._color_cache[ev.app_id] = cached
-                self._save_cache()
+                extracted = icon_dominant_color(ev.icon_bytes) if ev.icon_bytes else None
+                if extracted:
+                    cached = list(extracted)
+                    self._color_cache[ev.app_id] = cached
+                    self._save_cache()
+                elif ev.icon_bytes:
+                    # Icon was present but unusable → cache the sentinel so we
+                    # don't re-extract every time. When there were no icon bytes
+                    # at all, skip caching so a later notification that *does*
+                    # carry an icon can still populate the colour.
+                    cached = _NO_ICON
+                    self._color_cache[ev.app_id] = cached
+                    self._save_cache()
+                else:
+                    cached = _NO_ICON
             if cached != _NO_ICON:
                 return _as_rgb(cached, self.default_color)
 
@@ -193,7 +204,14 @@ class NotificationFlashService:
         try:
             if os.path.exists(_CACHE_PATH):
                 with open(_CACHE_PATH, "r", encoding="utf-8") as fh:
-                    self._color_cache = json.load(fh) or {}
+                    data = json.load(fh)
+                # A corrupt/non-dict file (e.g. a JSON list) would later break
+                # self._color_cache.get(...) and silently drop flashes; reset it.
+                if isinstance(data, dict):
+                    self._color_cache = data
+                else:
+                    logger.warning("[Notify] colour cache is not a mapping; ignoring.")
+                    self._color_cache = {}
         except Exception as exc:
             logger.debug("[Notify] colour cache load failed: %s", exc)
             self._color_cache = {}

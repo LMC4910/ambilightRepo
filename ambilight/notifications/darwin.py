@@ -37,15 +37,19 @@ def _candidate_db_paths() -> list[str]:
                      "group.com.apple.usernotifications", "db", "db"),
     ]
     # Modern macOS keeps the DB under the per-user DARWIN_USER_DIR.
+    # Invoke getconf by absolute path so we don't resolve an attacker-controlled
+    # PATH entry; /usr/bin/getconf is part of the base macOS install.
+    getconf = "/usr/bin/getconf"
     try:
         import subprocess
-        base = subprocess.run(
-            ["getconf", "DARWIN_USER_DIR"], capture_output=True, text=True, timeout=2,
-        ).stdout.strip()
-        if base:
-            paths.append(os.path.join(base, "com.apple.notificationcenter", "db2", "db"))
-    except Exception:
-        pass
+        if os.path.exists(getconf):
+            base = subprocess.run(
+                [getconf, "DARWIN_USER_DIR"], capture_output=True, text=True, timeout=2,
+            ).stdout.strip()
+            if base:
+                paths.append(os.path.join(base, "com.apple.notificationcenter", "db2", "db"))
+    except Exception as exc:
+        logger.debug("[Notify] getconf DARWIN_USER_DIR failed: %s", exc)
     return paths
 
 
@@ -174,10 +178,22 @@ def _icon_for_bundle(bundle_id: str) -> Optional[bytes]:
             icon_name = info.get("CFBundleIconFile")
         if not icon_name:
             return None
-        if not icon_name.endswith(".icns"):
-            icon_name += ".icns"
-        icns = os.path.join(app_path, "Contents", "Resources", icon_name)
-        if not os.path.exists(icns):
+        # CFBundleIconFile is attacker-influenced app metadata; reduce it to a
+        # bare filename so a crafted value like "../../../../etc/passwd" can't
+        # escape the app's Resources directory.
+        icon_name = os.path.basename(str(icon_name))
+        if not icon_name or not icon_name.endswith(".icns"):
+            icon_name = (icon_name or "") + ".icns"
+        resources = os.path.realpath(os.path.join(app_path, "Contents", "Resources"))
+        icns = os.path.realpath(os.path.join(resources, icon_name))
+        # Confirm the resolved path is still inside Resources after symlink
+        # resolution, and cap the read so a huge/odd file can't exhaust memory.
+        if os.path.commonpath([resources, icns]) != resources:
+            return None
+        if not os.path.isfile(icns):
+            return None
+        if os.path.getsize(icns) > 8 * 1024 * 1024:   # 8 MB cap — .icns are far smaller
+            logger.debug("[Notify] icon %s too large; skipping.", icns)
             return None
         with open(icns, "rb") as fh:
             return fh.read()

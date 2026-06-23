@@ -75,7 +75,11 @@ class NotificationListener(ABC):
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-            self._thread = None
+            # Only drop the reference once the thread has actually exited; keeping
+            # it while still alive lets start() detect the live thread and refuse
+            # to spawn a duplicate listener (which would double-deliver events).
+            if not self._thread.is_alive():
+                self._thread = None
 
     # --- helpers for subclasses ------------------------------------------
     def _emit(self, event: NotificationEvent) -> None:
