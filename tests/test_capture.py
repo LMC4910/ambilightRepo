@@ -242,3 +242,57 @@ def test_manager_fails_over_to_second_backend_midrun():
         frame = mgr.grab()
     assert mgr._active is secondary
     assert frame is not None and mgr.active_backend == "mss"
+
+
+def test_manager_recovery_skips_backend_that_opens_but_delivers_nothing():
+    """A higher-priority backend that re-opens but yields no frames (e.g. a locked
+    screen) must not keep winning the re-probe and starving a working fallback —
+    recovery requires a delivered frame, not just a successful open()."""
+    mgr = _fast(ScreenCaptureManager(preferred_method="wgc", monitor_index=0))
+    primary = _ControllableBackend("wgc")
+    primary.deliver = False        # opens fine forever, but never yields a frame
+    secondary = _ControllableBackend("mss")
+    mgr._candidates = [primary, secondary]
+    mgr.start()
+    assert mgr._active is primary  # start() doesn't require a frame, lands on wgc
+
+    frame = None
+    for _ in range(mgr._FAIL_THRESHOLD + 2):
+        frame = mgr.grab()
+    # Recovery falls past the open-but-empty primary to the delivering secondary.
+    assert mgr._active is secondary
+    assert frame is not None and mgr.active_backend == "mss"
+
+
+def test_manager_recovery_respects_cooldown(monkeypatch):
+    """With a real (nonzero) cooldown and a frozen clock, recovery must back off:
+    no further open()/close() churn until the cooldown actually elapses. Guards
+    the `now >= _next_retry_at` gate that the _fast() tests bypass."""
+    clock = {"now": 100.0}
+    monkeypatch.setattr("ambilight.capture.time.monotonic", lambda: clock["now"])
+
+    mgr = ScreenCaptureManager(preferred_method="mss", monitor_index=0)
+    mgr._frame_interval = 0.0      # no rate-limit sleep; keep the real cooldown
+    mgr._COOLDOWN_S = 5.0
+    b = _ControllableBackend("mss")
+    mgr._candidates = [b]
+    mgr.start()
+
+    # Stall, then drive past the threshold to trigger the first recovery attempt.
+    b.deliver = False
+    for _ in range(mgr._FAIL_THRESHOLD):
+        assert mgr.grab() is None
+    opened_after_first = b.opened
+    closed_after_first = b.closed
+    assert opened_after_first >= 2  # start + one recovery probe
+
+    # Clock frozen inside the cooldown window: no further re-probe churn.
+    for _ in range(20):
+        assert mgr.grab() is None
+    assert b.opened == opened_after_first
+    assert b.closed == closed_after_first
+
+    # Advance past the cooldown → exactly one more recovery probe fires.
+    clock["now"] += mgr._COOLDOWN_S
+    assert mgr.grab() is None
+    assert b.opened > opened_after_first

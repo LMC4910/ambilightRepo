@@ -27,6 +27,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from typing import Optional
 
 import numpy as np
@@ -392,13 +393,20 @@ class MSSBackend(CaptureBackend):
         Returns *True* once ``_sct``/``_monitor`` are usable.
         """
         import mss  # type: ignore[import-untyped]
+        # Close any prior session first so a re-open never abandons a live DC.
+        self.close()
         self._sct = mss.mss()
         monitors = self._sct.monitors  # type: ignore[union-attr]
         # monitors[0] is the virtual all-screens monitor; real monitors start at 1
         real_monitors = monitors[1:]
         if not real_monitors:
+            # Nothing to capture (headless/virtual session) — don't leak the
+            # just-created session across repeated retry attempts.
+            self.close()
             return False
-        idx = min(self._monitor_index, len(real_monitors) - 1)
+        # Clamp into range; a negative index would otherwise select from the end
+        # of the list via Python's negative indexing.
+        idx = min(max(self._monitor_index, 0), len(real_monitors) - 1)
         self._monitor = real_monitors[idx]
         return True
 
@@ -422,8 +430,9 @@ class MSSBackend(CaptureBackend):
                     return None
             except Exception as exc:
                 logger.debug("[MSS] Re-open failed: %s", exc)
-                self._sct = None
-                self._monitor = None
+                # close() (not bare nulling) so a partially-created session is
+                # released rather than leaked, keeping teardown in one place.
+                self.close()
                 return None
         try:
             import numpy as _np
@@ -541,13 +550,18 @@ class ScreenCaptureManager:
         logger.info("[Capture] Active backend: %s", backend.name.upper())
         self._warn_if_degraded(backend)
 
-    def _open_best(self) -> Optional[CaptureBackend]:
+    def _open_best(self, require_frame: bool = False) -> Optional[CaptureBackend]:
         """Open the first available backend in priority order and make it active.
 
         Pure mechanism: sets ``_active`` and returns the backend (or *None* if
         none open). Deliberately does **no** logging or latch bookkeeping so the
         recovery path can decide what's worth announcing — re-opening a still-dead
         sole backend mid-outage must stay quiet to keep a 24/7 log clean.
+
+        When ``require_frame`` is set, a backend must also deliver a frame to be
+        accepted; one that opens but yields nothing (e.g. a locked screen) is
+        closed and skipped. Recovery uses this so a dead high-priority backend
+        can't keep winning the re-probe and starving a working fallback.
         """
         for backend in self._candidates:
             try:
@@ -555,11 +569,25 @@ class ScreenCaptureManager:
             except Exception as exc:  # defensive — a backend should never raise here
                 logger.debug("[Capture] %s.open() raised: %s", backend.name, exc)
                 opened = False
-            if opened:
-                self._active = backend
-                return backend
+            if not opened:
+                continue
+            if require_frame and not self._delivers_frame(backend):
+                with suppress(Exception):
+                    backend.close()
+                continue
+            self._active = backend
+            return backend
         self._active = None
         return None
+
+    @staticmethod
+    def _delivers_frame(backend: CaptureBackend) -> bool:
+        """True if *backend* yields a frame right now. Used to confirm a recovered
+        backend is actually working, not merely open."""
+        try:
+            return backend.grab() is not None
+        except Exception:
+            return False
 
     def _warn_if_degraded(self, backend: CaptureBackend) -> None:
         """Loudly flag a fallback to MSS on Windows.
@@ -651,13 +679,13 @@ class ScreenCaptureManager:
         previous = self._active
         previous_name = previous.name if previous is not None else None
         if previous is not None:
-            try:
+            with suppress(Exception):
                 previous.close()
-            except Exception:
-                pass
             self._active = None
 
-        backend = self._open_best()
+        # Require a delivered frame: a backend that re-opens but yields nothing
+        # (still-locked screen) must not be reselected over a working fallback.
+        backend = self._open_best(require_frame=True)
         if backend is not None:
             # Announce a real change (a different backend) or a recovery (we'd
             # already logged an outage). Stay silent when the same sole backend
