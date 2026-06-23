@@ -36,9 +36,21 @@ SERVICE_NAME = "ambilight-service"
 SYSTEM = platform.system()  # Windows | Darwin | Linux
 
 
+def _which(name: str) -> str:
+    """Resolve *name* to a runnable path, honouring Windows shims.
+
+    Python's subprocess on Windows only auto-resolves bare names to ``.exe``, so
+    a Node tool installed as ``pnpm.cmd``/``.bat`` (with no ``.exe``) is invisible
+    to ``subprocess.run([name])`` and raises FileNotFoundError. ``shutil.which``
+    consults PATHEXT and finds the shim; passing its full path runs it correctly.
+    Falls back to *name* unchanged so POSIX behaviour is identical.
+    """
+    return shutil.which(name) or name
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
     print(f"\n{'=' * 60}\n  Running: {' '.join(cmd)}\n  CWD:     {cwd or ROOT}\n{'=' * 60}\n")
-    result = subprocess.run(cmd, cwd=str(cwd or ROOT))
+    result = subprocess.run([_which(cmd[0]), *cmd[1:]], cwd=str(cwd or ROOT))
     if result.returncode != 0:
         print(f"\n[FATAL] Command failed with exit code {result.returncode}")
         sys.exit(result.returncode)
@@ -46,8 +58,8 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 
 def _check_tool(name: str, version_flag: str = "--version") -> None:
     try:
-        subprocess.run([name, version_flag], capture_output=True, check=True)
-    except FileNotFoundError:
+        subprocess.run([_which(name), version_flag], capture_output=True, check=True)
+    except (FileNotFoundError, OSError):
         print(f"[FATAL] Required tool not found on PATH: {name}")
         sys.exit(1)
 
@@ -132,14 +144,35 @@ def build_service(gpu: bool = False) -> None:
         except Exception:
             return False
 
+    # The capture backends are REQUIRED on Windows. Shipping without them
+    # silently degrades every install to MSS — fullscreen games / overlay video
+    # render black, and a transient MSS failure (screen lock, display sleep) has
+    # nothing to fail over to, which is exactly the "All backends exhausted" loop
+    # users hit. Fail the build loudly rather than producing an MSS-only installer
+    # (these are pinned in requirements.txt under the Windows markers).
+    if SYSTEM == "Windows":
+        required_caps = ["mss", "windows_capture", "dxcam", "comtypes"]
+        missing = [p for p in required_caps if not _available(p)]
+        if missing:
+            print(
+                f"[FATAL] Required capture backend(s) missing from the build "
+                f"environment: {', '.join(missing)}.\n"
+                f"        Install them so the installer ships every backend:\n"
+                f"          pip install windows-capture dxcam comtypes mss"
+            )
+            sys.exit(1)
+
     # Always-bundled optional deps: capture backends + audio + WGC, and the
     # smart-home integration stack (paho-mqtt + keyring) when present.
     optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
     collect_all: list[str] = []
     # winsdk is collected in full: its WinRT namespaces (e.g.
     # winsdk.windows.ui.notifications.management for Notification Flash) are
-    # imported dynamically, so a bare --hidden-import misses them.
-    for pkg in ("windows_capture", "soundcard", "paho", "keyring", "winsdk"):
+    # imported dynamically, so a bare --hidden-import misses them. dxcam + comtypes
+    # are collected in full too: dxcam imports dxcam.core.* submodules dynamically
+    # and drives the display via comtypes-generated COM wrappers, which a bare
+    # --hidden-import leaves out — so the frozen DXGI backend fails to import.
+    for pkg in ("windows_capture", "dxcam", "comtypes", "soundcard", "paho", "keyring", "winsdk"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 
@@ -191,6 +224,28 @@ def build_service(gpu: bool = False) -> None:
         str(ROOT / "service_entry.py"),
     ])
     print(f"\n[OK] Service built: {SERVICE_DIST / SERVICE_NAME}")
+
+    # Post-build smoke test: run the freshly frozen binary with --selfcheck to
+    # confirm every required capture backend actually imports from inside the
+    # onedir. This catches a silently dropped WGC/DXGI before an installer is ever
+    # produced (a bad bundle exits non-zero). open() failures on a headless build
+    # box are informational and do not fail the build — only missing modules do.
+    exe = SERVICE_DIST / SERVICE_NAME / (
+        f"{SERVICE_NAME}.exe" if SYSTEM == "Windows" else SERVICE_NAME
+    )
+    print(f"\n[smoke] Verifying bundled capture backends: {exe.name} --selfcheck …")
+    smoke = subprocess.run([str(exe), "--selfcheck"], capture_output=True, text=True)
+    if smoke.stdout:
+        print(smoke.stdout)
+    if smoke.stderr:
+        print(smoke.stderr)
+    if smoke.returncode != 0:
+        print(
+            "[FATAL] Capture backend smoke test failed — the bundle is missing a "
+            "required backend (see output above). Not shipping an MSS-only build."
+        )
+        sys.exit(1)
+    print("[OK] Capture backend smoke test passed.")
 
 
 def build_ui() -> None:

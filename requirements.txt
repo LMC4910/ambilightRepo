@@ -107,8 +107,10 @@ dxcam>=0.0.5 ; sys_platform == "win32"
 # backend). Windows-only; both features degrade gracefully if it's absent.
 winsdk>=1.0.0b10 ; sys_platform == "win32"
 
-# comtypes — COM interop required by WGC backend (Windows only)
-# comtypes>=1.4.1
+# comtypes — COM interop required by the dxcam DXGI backend (Windows only).
+# dxcam drives the display through comtypes-generated COM wrappers; without it
+# the DXGI backend fails to import and capture silently degrades to MSS.
+comtypes>=1.4.1 ; sys_platform == "win32"
 
 # pywin32 — Windows API bindings (Windows only)
 # pywin32>=306
