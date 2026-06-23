@@ -417,6 +417,18 @@ class ConfigManager:
         # 5. MQTT — normalise topic, clamp port, and disable on a blank broker so
         #    an enabled-but-misconfigured bridge can't spin on a bad connection.
         mqtt = config.mqtt
+        # Enforce the write-only password contract even for configs that didn't
+        # come through the API (manual YAML edits / legacy files): migrate any
+        # plaintext password into the OS keyring and scrub it so save() can't
+        # round-trip it back to configuration.yaml.
+        if str(mqtt.password or ""):
+            try:
+                from .integrations import secrets_store
+                secrets_store.set_mqtt_password(str(mqtt.password))
+            except Exception as exc:  # pragma: no cover - keyring/backend specific
+                logger.warning("[Config] could not migrate mqtt.password to keyring: %s", exc)
+            mqtt.password = ""
+        mqtt.broker = str(mqtt.broker or "").strip()
         mqtt.base_topic = (mqtt.base_topic or "ambilight").strip().strip("/").lower() or "ambilight"
         try:
             mqtt.port = int(mqtt.port)
@@ -425,7 +437,7 @@ class ConfigManager:
         if not 1 <= mqtt.port <= 65535:
             logger.warning("[Config] mqtt.port=%s out of range; using 1883.", mqtt.port)
             mqtt.port = 1883
-        if mqtt.enabled and not str(mqtt.broker).strip():
+        if mqtt.enabled and not mqtt.broker:
             logger.warning("[Config] mqtt.enabled but mqtt.broker is blank; disabling MQTT.")
             mqtt.enabled = False
 
@@ -460,12 +472,20 @@ class ConfigManager:
             n.off_ms = max(0, int(n.off_ms))
         except (TypeError, ValueError):
             n.off_ms = 120
-        if str(n.color_mode).strip().lower() not in ("icon", "fixed"):
+        # Canonicalise to lowercase so runtime checks (which compare against
+        # "fixed") match regardless of how the value was entered (e.g. "FIXED").
+        n.color_mode = str(n.color_mode or "icon").strip().lower()
+        if n.color_mode not in ("icon", "fixed"):
             logger.warning("[Config] notifications.color_mode=%r unknown; using 'icon'.", n.color_mode)
             n.color_mode = "icon"
         # Normalise keyword rules' colours so the resolver always gets clean RGB.
+        # Guard the container type: a malformed truthy value (e.g. keyword_rules: 1)
+        # must not raise during load.
+        raw_rules = n.keyword_rules if isinstance(n.keyword_rules, list) else []
+        if not isinstance(n.keyword_rules, list) and n.keyword_rules:
+            logger.warning("[Config] notifications.keyword_rules is not a list; ignoring.")
         clean_rules = []
-        for rule in (n.keyword_rules or []):
+        for rule in raw_rules:
             if not isinstance(rule, dict):
                 continue
             kw = str(rule.get("keyword", "")).strip()
@@ -476,10 +496,13 @@ class ConfigManager:
                 "color": _norm_color(rule.get("color"), [255, 255, 255], "notifications.keyword_rules[].color"),
             })
         n.keyword_rules = clean_rules
-        # Per-app override colours.
+        # Per-app override colours (guard the container type as above).
+        raw_overrides = n.app_overrides if isinstance(n.app_overrides, dict) else {}
+        if not isinstance(n.app_overrides, dict) and n.app_overrides:
+            logger.warning("[Config] notifications.app_overrides is not a mapping; ignoring.")
         n.app_overrides = {
             str(k): _norm_color(v, [255, 255, 255], f"notifications.app_overrides[{k}]")
-            for k, v in (n.app_overrides or {}).items()
+            for k, v in raw_overrides.items()
         }
 
     @classmethod
@@ -537,6 +560,11 @@ class ConfigManager:
         cls._instance = _dict_to_dataclass(AppConfig, merged)
         if not isinstance(cls._instance, AppConfig):
             cls._instance = AppConfig()
+
+        # Apply the same clamping/normalization as load() so runtime/API edits
+        # can't bypass it (MQTT port/broker/topic, notification colours, the
+        # write-only password scrub, etc.).
+        cls._normalize_and_validate(cls._instance)
 
         cls.save(path)
 

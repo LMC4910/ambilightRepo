@@ -69,6 +69,8 @@ def clear_mqtt_password() -> None:
     if kr is not None:
         try:
             kr.delete_password(_SERVICE, _MQTT_KEY)
-        except Exception:  # pragma: no cover - may not exist / backend-specific
-            pass
+        except Exception as exc:  # pragma: no cover - may not exist / backend-specific
+            # Surface the failure: the OS entry may persist and later reappear, so
+            # silently swallowing it would hide stale-secret retention.
+            logger.warning("[Secrets] keyring delete failed (%s); entry may persist.", exc)
     _fallback.pop(_MQTT_KEY, None)

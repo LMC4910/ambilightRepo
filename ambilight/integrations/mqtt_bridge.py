@@ -68,6 +68,9 @@ class MqttBridge:
         self._last_payload: Optional[str] = None
         self._mqtt = _paho()
         self._cfg = None          # current MqttConfig snapshot
+        # Track the credential we last connected with so a keyring-only password
+        # rotation (which never appears in cfg.mqtt) still triggers a reconnect.
+        self._password_fingerprint = ""
         self.update_config(cfg)
 
     # ------------------------------------------------------------------
@@ -108,19 +111,29 @@ class MqttBridge:
         changed. Safe to call before/after start()."""
         new = cfg.mqtt
         old = self._cfg
-        self._cfg = new
-        # Before start() there's no loop yet — just store the config.
+        # Current credential (only relevant when authenticating with a username).
+        current_pw = (self._get_password() or "") if new.username else ""
+        # Before start() there's no loop yet — just store the config + fingerprint.
         if self._loop is None:
+            self._cfg = new
+            self._password_fingerprint = current_pw
             return
-        changed = old is None or (
+        pw_changed = current_pw != self._password_fingerprint
+        changed = old is None or pw_changed or (
             old.enabled != new.enabled or old.broker != new.broker or old.port != new.port
             or old.username != new.username or old.tls != new.tls or old.base_topic != new.base_topic
             or old.ha_discovery != new.ha_discovery or old.device_id != new.device_id
         )
-        # If HA discovery was just turned off, remove the entities cleanly before
-        # we drop the connection (otherwise the retained configs linger in HA).
-        if old is not None and old.ha_discovery and not new.ha_discovery:
-            self._remove_discovery()
+        # Remove stale HA discovery configs *before* switching the snapshot, while
+        # self._cfg still resolves to the old base_topic/device_id. This covers
+        # both discovery being turned off AND its topic identity changing while it
+        # stays on (otherwise old retained configs leave duplicate HA entities).
+        if old is not None and self._client and old.ha_discovery:
+            topics_changed = old.base_topic != new.base_topic or old.device_id != new.device_id
+            if (not new.ha_discovery) or topics_changed:
+                self._remove_discovery()
+        self._cfg = new
+        self._password_fingerprint = current_pw
         if changed:
             self._reconnect()
 
@@ -288,10 +301,16 @@ class MqttBridge:
         power = bool(metrics.get("power", True))
         color = metrics.get("color", [0, 0, 0]) or [0, 0, 0]
         mode = metrics.get("mode", "screen_sync")
+        # Harden against a malformed metrics payload (short/non-numeric colour):
+        # a raise here would propagate before on_metrics' publish try/except.
+        try:
+            r, g, b = int(color[0]), int(color[1]), int(color[2])
+        except (TypeError, ValueError, IndexError):
+            r, g, b = 0, 0, 0
         state: dict[str, Any] = {"state": "ON" if power else "OFF"}
         if power:
             state["color_mode"] = "rgb"
-            state["color"] = {"r": int(color[0]), "g": int(color[1]), "b": int(color[2])}
+            state["color"] = {"r": r, "g": g, "b": b}
             state["effect"] = mode
         return json.dumps(state, sort_keys=True)
 

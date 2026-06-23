@@ -9,7 +9,7 @@ The integration is **off by default**.
 Install the optional integration dependencies into the service's Python
 environment:
 
-```
+```bash
 pip install paho-mqtt keyring
 ```
 
