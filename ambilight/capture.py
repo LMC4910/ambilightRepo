@@ -27,6 +27,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from typing import Optional
 
 import numpy as np
@@ -199,7 +200,12 @@ class WGCBackend(CaptureBackend):
             return True
 
         except Exception as exc:
-            logger.debug("[WGC] Not available: %s", exc)
+            # info (not debug) so the *reason* WGC didn't load reaches the log —
+            # a missing dependency (ImportError) vs. a runtime D3D/WinRT error are
+            # diagnosed very differently, and otherwise we only see the downstream
+            # "fell back to MSS" symptom. Only reached on Windows (non-Windows
+            # returns False above before importing).
+            logger.info("[WGC] Backend unavailable: %s: %s", type(exc).__name__, exc)
             return False
 
     def grab(self) -> Optional[np.ndarray]:
@@ -259,12 +265,19 @@ class DXGIBackend(CaptureBackend):
             # dark screen at startup) so single-GPU behaviour is unchanged.
             camera = self._open_on_best_device(dxcam, monitor_index, fps_target)
             if camera is None:
+                logger.info(
+                    "[DXGI] dxcam imported but no adapter could duplicate monitor "
+                    "%d; falling back.", monitor_index,
+                )
                 return False
             self._camera = camera
             logger.info("[DXGI] dxcam capture started for monitor %d.", monitor_index)
             return True
         except Exception as exc:
-            logger.debug("[DXGI] Not available: %s", exc)
+            # info (not debug) so a missing/under-bundled dxcam or comtypes shows
+            # up in the log instead of silently degrading to MSS. Only reached on
+            # Windows (non-Windows returns False above before importing).
+            logger.info("[DXGI] Backend unavailable: %s: %s", type(exc).__name__, exc)
             return False
 
     def _open_on_best_device(self, dxcam, output_idx: int, fps_target: int):
@@ -363,18 +376,54 @@ class MSSBackend(CaptureBackend):
     def __init__(self) -> None:
         self._sct: Optional[object] = None
         self._monitor: Optional[dict] = None
+        self._monitor_index: int = 0
+        # Latch so a sustained failure (screen lock / display sleep makes BitBlt
+        # raise on *every* grab) logs once instead of at the capture frame rate.
+        self._fail_logged: bool = False
 
-    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
+    def _ensure_session(self) -> bool:
+        """(Re)create the ``mss`` session + resolve the target monitor.
+
+        Shared by :meth:`open` and the self-heal path in :meth:`grab`. mss caches
+        a GDI device context on the screen; when that DC is invalidated mid-run
+        (workstation lock, display sleep, screensaver, session/desktop switch, or
+        a display-mode change) every ``BitBlt`` afterward raises with
+        ``ERROR_OPERATION_ABORTED`` ("…aborted because of either a thread exit or
+        an application request"). Rebuilding the session gets a fresh, valid DC.
+        Returns *True* once ``_sct``/``_monitor`` are usable.
+        """
+        import mss  # type: ignore[import-untyped]
+        # Close any prior session first so a re-open never abandons a live DC.
+        self.close()
+        # Keep the new session *local* until it's fully validated, and assign it to
+        # self._sct only on success. That way a failure anywhere below — including
+        # monitor enumeration raising — never leaves a leaked session on the
+        # instance for open()/grab() to swallow (the finally releases it).
+        sct = mss.mss()
+        keep = False
         try:
-            import mss  # type: ignore[import-untyped]
-            self._sct = mss.mss()
-            monitors = self._sct.monitors  # type: ignore[union-attr]
+            monitors = sct.monitors  # type: ignore[union-attr]
             # monitors[0] is the virtual all-screens monitor; real monitors start at 1
             real_monitors = monitors[1:]
             if not real_monitors:
-                return False
-            idx = min(monitor_index, len(real_monitors) - 1)
+                return False  # nothing to capture (headless/virtual session)
+            # Clamp into range; a negative index would otherwise select from the
+            # end of the list via Python's negative indexing.
+            idx = min(max(self._monitor_index, 0), len(real_monitors) - 1)
+            self._sct = sct
             self._monitor = real_monitors[idx]
+            keep = True
+            return True
+        finally:
+            if not keep:
+                with suppress(Exception):
+                    sct.close()
+
+    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
+        self._monitor_index = monitor_index
+        try:
+            if not self._ensure_session():
+                return False
             logger.info("[MSS] Capture initialised for monitor %d.", monitor_index)
             return True
         except Exception as exc:
@@ -382,8 +431,18 @@ class MSSBackend(CaptureBackend):
             return False
 
     def grab(self) -> Optional[np.ndarray]:
+        # Lazily (re)build the session — covers both the first grab and recovery
+        # after a previous grab tore down a dead DC (see _ensure_session).
         if self._sct is None or self._monitor is None:
-            return None
+            try:
+                if not self._ensure_session():
+                    return None
+            except Exception as exc:
+                logger.debug("[MSS] Re-open failed: %s", exc)
+                # close() (not bare nulling) so a partially-created session is
+                # released rather than leaked, keeping teardown in one place.
+                self.close()
+                return None
         try:
             import numpy as _np
             shot = self._sct.grab(self._monitor)  # type: ignore[union-attr]
@@ -391,9 +450,18 @@ class MSSBackend(CaptureBackend):
             frame = _np.frombuffer(shot.bgra, dtype=_np.uint8).reshape(
                 shot.height, shot.width, 4
             )
+            self._fail_logged = False  # delivered again — re-arm the warning
             return frame[:, :, :3]  # drop alpha, keep BGR
         except Exception as exc:
-            logger.warning("[MSS] Frame grab failed: %s", exc)
+            # Log once per outage, not every frame (see _fail_logged) — otherwise a
+            # locked screen floods the log at the capture frame rate.
+            if not self._fail_logged:
+                logger.warning("[MSS] Frame grab failed: %s", exc)
+                self._fail_logged = True
+            # Tear down the (now invalid) DC so the next grab rebuilds it instead
+            # of failing forever on a stale handle. A transient lock/sleep then
+            # self-heals on resume rather than exhausting the backend.
+            self.close()
             return None
 
     def close(self) -> None:
@@ -403,6 +471,9 @@ class MSSBackend(CaptureBackend):
         except Exception:
             pass
         self._sct = None
+        # Null the monitor too so a subsequent grab re-runs _ensure_session
+        # rather than reading a stale handle against a freed DC.
+        self._monitor = None
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +501,12 @@ class ScreenCaptureManager:
     """
 
     _FAIL_THRESHOLD = 10
+    # Once every backend is exhausted (or the sole backend keeps failing), only
+    # re-probe this often instead of every frame. Bounds the failover churn — and
+    # its logging — to one attempt per window. Long enough that a transient
+    # lock/sleep/display-change is given time to clear; short enough that capture
+    # resumes within a few seconds of the screen coming back.
+    _COOLDOWN_S = 5.0
 
     def __init__(
         self,
@@ -445,8 +522,16 @@ class ScreenCaptureManager:
         self._target_size = (analysis_width, analysis_height)
         self._last_grab_time: float = 0.0
         self._consecutive_failures: int = 0
+        # Cooldown gate (see grab) + a one-shot latch so a sustained outage is
+        # reported once, not once per retry. Cleared only when a frame is actually
+        # delivered again (see grab) — re-opening a still-dead backend doesn't.
+        self._next_retry_at: float = 0.0
+        self._degraded_logged: bool = False
 
-        # Build ordered candidate list
+        # Ordered backend list, highest priority first. This is the immutable
+        # master set: recovery re-probes *all* of these (a backend that failed
+        # mid-run — e.g. MSS after a screen lock — can become usable again), so
+        # nothing is ever removed from it.
         all_backends: dict[str, CaptureBackend] = {
             "wgc": WGCBackend(),
             "dxgi": DXGIBackend(),
@@ -462,18 +547,56 @@ class ScreenCaptureManager:
 
     def start(self) -> None:
         """Open the highest-priority available backend."""
+        self._active = None
+        backend = self._open_best()
+        if backend is None:
+            raise RuntimeError(
+                "No screen capture backend could be initialised.  "
+                "Ensure mss is installed: pip install mss"
+            )
+        self._consecutive_failures = 0
+        self._degraded_logged = False
+        logger.info("[Capture] Active backend: %s", backend.name.upper())
+        self._warn_if_degraded(backend)
+
+    def _open_best(self, *, require_frame: bool = False) -> Optional[CaptureBackend]:
+        """Open the first available backend in priority order and make it active.
+
+        Pure mechanism: sets ``_active`` and returns the backend (or *None* if
+        none open). Deliberately does **no** logging or latch bookkeeping so the
+        recovery path can decide what's worth announcing — re-opening a still-dead
+        sole backend mid-outage must stay quiet to keep a 24/7 log clean.
+
+        When ``require_frame`` is set, a backend must also deliver a frame to be
+        accepted; one that opens but yields nothing (e.g. a locked screen) is
+        closed and skipped. Recovery uses this so a dead high-priority backend
+        can't keep winning the re-probe and starving a working fallback.
+        """
         for backend in self._candidates:
-            if backend.open(self._monitor_index, self._target_size, self._fps_target):
-                self._active = backend
-                logger.info(
-                    "[Capture] Active backend: %s", backend.name.upper()
-                )
-                self._warn_if_degraded(backend)
-                return
-        raise RuntimeError(
-            "No screen capture backend could be initialised.  "
-            "Ensure mss is installed: pip install mss"
-        )
+            try:
+                opened = backend.open(self._monitor_index, self._target_size, self._fps_target)
+            except Exception as exc:  # defensive — a backend should never raise here
+                logger.debug("[Capture] %s.open() raised: %s", backend.name, exc)
+                opened = False
+            if not opened:
+                continue
+            if require_frame and not self._delivers_frame(backend):
+                with suppress(Exception):
+                    backend.close()
+                continue
+            self._active = backend
+            return backend
+        self._active = None
+        return None
+
+    @staticmethod
+    def _delivers_frame(backend: CaptureBackend) -> bool:
+        """True if *backend* yields a frame right now. Used to confirm a recovered
+        backend is actually working, not merely open."""
+        try:
+            return backend.grab() is not None
+        except Exception:
+            return False
 
     def _warn_if_degraded(self, backend: CaptureBackend) -> None:
         """Loudly flag a fallback to MSS on Windows.
@@ -522,46 +645,73 @@ class ScreenCaptureManager:
 
         frame = self._active.grab() if self._active else None
 
-        if frame is None:
-            self._consecutive_failures += 1
-            if self._consecutive_failures >= self._FAIL_THRESHOLD:
-                logger.warning(
-                    "[Capture] Backend '%s' failed %d times; switching.",
-                    self._active.name if self._active else "?",
-                    self._consecutive_failures,
-                )
-                self._switch_backend()
-            return None
+        if frame is not None:
+            # A delivered frame is the only thing that clears the degraded latch,
+            # so a backend that re-opens but still returns nothing won't reset it
+            # and re-announce on the next cooldown.
+            self._consecutive_failures = 0
+            self._degraded_logged = False
+            return frame
 
-        self._consecutive_failures = 0
-        return frame
+        # No frame this round (active backend stalled, or already exhausted).
+        self._consecutive_failures += 1
+        now = time.monotonic()
+        # Recover at most once per cooldown — whether the active backend just
+        # stalled or we're already exhausted and re-probing. This is what keeps a
+        # transient capture failure from turning into an unbounded retry/log storm
+        # (previously every frame re-tripped the switch, spamming "Backend '?'
+        # failed / All backends exhausted" ~2×/s). The active backend's own
+        # transient recovery (e.g. MSS rebuilding a dead DC) usually resolves
+        # things before the threshold is even reached.
+        if self._consecutive_failures >= self._FAIL_THRESHOLD and now >= self._next_retry_at:
+            self._next_retry_at = now + self._COOLDOWN_S
+            self._attempt_recovery()
+        return None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _switch_backend(self) -> None:
-        """Close the current backend and promote the next candidate."""
-        if self._active is not None:
-            self._active.close()
-            try:
-                self._candidates.remove(self._active)
-            except ValueError:
-                pass
+    def _attempt_recovery(self) -> None:
+        """Re-probe the backends after the active one has stalled.
+
+        Called at most once per :attr:`_COOLDOWN_S` from :meth:`grab`. Closes the
+        stalled backend and re-opens the best available, re-probing *all*
+        candidates because a mid-run failure is often transient (a screen lock or
+        display-sleep invalidates MSS's device context; it works again once the
+        screen is back). Logging is latched: a switch to a *different* backend, or
+        recovery after an outage, is announced; a sole dead backend silently
+        re-opening each cooldown is not, and a full outage is logged once.
+        ``is_healthy`` stays False throughout because the failure counter is only
+        cleared by an actually-delivered frame (see :meth:`grab`).
+        """
+        previous = self._active
+        previous_name = previous.name if previous is not None else None
+        if previous is not None:
+            with suppress(Exception):
+                previous.close()
             self._active = None
 
-        self._consecutive_failures = 0
-
-        for backend in self._candidates:
-            if backend.open(self._monitor_index, self._target_size, self._fps_target):
-                self._active = backend
-                logger.info(
-                    "[Capture] Switched to backend: %s", backend.name.upper()
-                )
+        # Require a delivered frame: a backend that re-opens but yields nothing
+        # (still-locked screen) must not be reselected over a working fallback.
+        backend = self._open_best(require_frame=True)
+        if backend is not None:
+            # Announce a real change (a different backend) or a recovery (we'd
+            # already logged an outage). Stay silent when the same sole backend
+            # merely re-opened mid-outage — that would flood a 24/7 log.
+            if backend.name != previous_name or self._degraded_logged:
+                logger.info("[Capture] Active backend: %s", backend.name.upper())
                 self._warn_if_degraded(backend)
-                return
+                self._degraded_logged = False
+            return
 
-        logger.error("[Capture] All backends exhausted — no capture source available.")
+        # Nothing opened — fully exhausted. Log once per outage.
+        if not self._degraded_logged:
+            logger.error(
+                "[Capture] All backends exhausted — no capture source available. "
+                "Retrying every %.0fs.", self._COOLDOWN_S,
+            )
+            self._degraded_logged = True
 
     # ------------------------------------------------------------------
     # Status

@@ -36,9 +36,21 @@ SERVICE_NAME = "ambilight-service"
 SYSTEM = platform.system()  # Windows | Darwin | Linux
 
 
+def _which(name: str) -> str:
+    """Resolve *name* to a runnable path, honouring Windows shims.
+
+    Python's subprocess on Windows only auto-resolves bare names to ``.exe``, so
+    a Node tool installed as ``pnpm.cmd``/``.bat`` (with no ``.exe``) is invisible
+    to ``subprocess.run([name])`` and raises FileNotFoundError. ``shutil.which``
+    consults PATHEXT and finds the shim; passing its full path runs it correctly.
+    Falls back to *name* unchanged so POSIX behaviour is identical.
+    """
+    return shutil.which(name) or name
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
     print(f"\n{'=' * 60}\n  Running: {' '.join(cmd)}\n  CWD:     {cwd or ROOT}\n{'=' * 60}\n")
-    result = subprocess.run(cmd, cwd=str(cwd or ROOT))
+    result = subprocess.run([_which(cmd[0]), *cmd[1:]], cwd=str(cwd or ROOT))
     if result.returncode != 0:
         print(f"\n[FATAL] Command failed with exit code {result.returncode}")
         sys.exit(result.returncode)
@@ -46,8 +58,8 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 
 def _check_tool(name: str, version_flag: str = "--version") -> None:
     try:
-        subprocess.run([name, version_flag], capture_output=True, check=True)
-    except FileNotFoundError:
+        subprocess.run([_which(name), version_flag], capture_output=True, check=True)
+    except (FileNotFoundError, OSError):
         print(f"[FATAL] Required tool not found on PATH: {name}")
         sys.exit(1)
 
@@ -132,28 +144,62 @@ def build_service(gpu: bool = False) -> None:
         except Exception:
             return False
 
+    # The capture backends are REQUIRED on Windows. Shipping without them
+    # silently degrades every install to MSS — fullscreen games / overlay video
+    # render black, and a transient MSS failure (screen lock, display sleep) has
+    # nothing to fail over to, which is exactly the "All backends exhausted" loop
+    # users hit. Fail the build loudly rather than producing an MSS-only installer
+    # (these are pinned in requirements.txt under the Windows markers).
+    # cv2 (opencv-python) is included: windows_capture imports it at module load
+    # and dxcam uses it for colour conversion — without it BOTH WGC and DXGI fail
+    # and every install is stranded on MSS. It is a hard dependency of
+    # windows-capture, so installing the requirements already pulls it in.
+    if SYSTEM == "Windows":
+        required_caps = ["mss", "windows_capture", "dxcam", "comtypes", "cv2"]
+        missing = [p for p in required_caps if not _available(p)]
+        if missing:
+            print(
+                f"[FATAL] Required capture dependency(ies) missing from the build "
+                f"environment: {', '.join(missing)}.\n"
+                f"        Install them so the installer ships every backend:\n"
+                f"          pip install windows-capture dxcam comtypes mss opencv-python"
+            )
+            sys.exit(1)
+
     # Always-bundled optional deps: capture backends + audio + WGC, and the
     # smart-home integration stack (paho-mqtt + keyring) when present.
     optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
     collect_all: list[str] = []
     # winsdk is collected in full: its WinRT namespaces (e.g.
     # winsdk.windows.ui.notifications.management for Notification Flash) are
-    # imported dynamically, so a bare --hidden-import misses them.
-    for pkg in ("windows_capture", "soundcard", "paho", "keyring", "winsdk"):
+    # imported dynamically, so a bare --hidden-import misses them. dxcam + comtypes
+    # are collected in full too: dxcam imports dxcam.core.* submodules dynamically
+    # and drives the display via comtypes-generated COM wrappers, which a bare
+    # --hidden-import leaves out — so the frozen DXGI backend fails to import.
+    for pkg in ("windows_capture", "dxcam", "comtypes", "soundcard", "paho", "keyring", "winsdk"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 
-    # Lean build: drop the heavy GPU stack (CuPy ~118 MB + CUDA ~86 MB) and
-    # OpenCV (~99 MB; resize falls back to Pillow). Also drop obvious dead weight.
-    # GPU build (--gpu) re-includes CuPy + OpenCV for users who want it.
+    # Lean build: drop the heavy GPU stack (CuPy ~118 MB + CUDA ~86 MB) and obvious
+    # dead weight. OpenCV (cv2) is NOT dropped on Windows — the WGC backend's
+    # windows_capture imports cv2 at module load and dxcam uses it for colour
+    # conversion, so excluding it silently broke WGC+DXGI and stranded installs on
+    # MSS (cv2 also gives _cpu_resize a faster path than Pillow). Off Windows there
+    # is no native capture backend (MSS is pure-Python), so cv2 stays excluded to
+    # keep the bundle lean. GPU build (--gpu) re-includes CuPy for CUDA users.
     excludes = ["tkinter", "_tkinter", "lib2to3", "pydoc_data", "matplotlib", "PyQt5", "PySide2"]
-    if gpu:
-        optional += ["cupy", "cv2", "torch"]
-        for pkg in ("cupy", "cv2"):
-            if _available(pkg):
-                collect_all += ["--collect-all", pkg]
+    bundle_cv2 = (SYSTEM == "Windows" or gpu) and _available("cv2")
+    if bundle_cv2:
+        collect_all += ["--collect-all", "cv2"]
+        optional.append("cv2")
     else:
-        excludes += ["cupy", "cupyx", "cupy_backends", "torch", "cv2", "nvidia"]
+        excludes.append("cv2")
+    if gpu:
+        optional += ["cupy", "torch"]
+        if _available("cupy"):
+            collect_all += ["--collect-all", "cupy"]
+    else:
+        excludes += ["cupy", "cupyx", "cupy_backends", "torch", "nvidia"]
 
     for opt in optional:
         if _available(opt):
@@ -191,6 +237,57 @@ def build_service(gpu: bool = False) -> None:
         str(ROOT / "service_entry.py"),
     ])
     print(f"\n[OK] Service built: {SERVICE_DIST / SERVICE_NAME}")
+
+    # Post-build bundling check: confirm every required capture backend was
+    # actually collected into the onedir, before an installer is ever produced.
+    # This is a *filesystem* check, not an import/open — WGC (WinRT) and DXGI need
+    # an interactive desktop + GPU to load, which a headless CI runner doesn't
+    # have, so running the frozen exe there gives false failures. The bundling
+    # guarantee we care about is simply that the modules shipped; whether they can
+    # capture is a runtime concern verified by `ambilight-service --selfcheck` on a
+    # real machine.
+    missing = _missing_bundled_backends(SERVICE_DIST / SERVICE_NAME)
+    if missing:
+        print(
+            f"[FATAL] Capture backend(s) missing from the bundle: {', '.join(missing)}.\n"
+            f"        The installer would ship MSS-only. Check the --collect-all / "
+            f"--hidden-import flags above for these packages."
+        )
+        sys.exit(1)
+    print("[OK] All required capture backends are bundled.")
+
+
+def _missing_bundled_backends(bundle_root: Path) -> list[str]:
+    """Return the binary capture-backend packages that did NOT make it into the
+    onedir.
+
+    Filesystem-only (no import) so it works on a headless build box. We check the
+    Windows fast-capture backends specifically because they're the ones that
+    silently went missing before (optional, native, ``--collect-all``'d) and that
+    leave users on MSS. They ship as extracted ``_internal/<pkg>/`` directories
+    (native ``.pyd`` / data), so a missing directory means a dropped backend.
+
+    Pure-Python ``mss`` is deliberately not checked here: as a plain
+    ``--hidden-import`` it's compiled into the PYZ archive rather than extracted to
+    disk, so it's invisible to a filesystem scan. Its presence is already
+    guaranteed by the hardcoded ``--hidden-import=mss`` plus the build-env check
+    above, and the test suite imports it."""
+    if SYSTEM != "Windows":
+        return []  # no native fast-capture backends off Windows; MSS is in the PYZ
+    # cv2 is included because windows_capture/dxcam need it — a dropped cv2 is what
+    # silently broke WGC+DXGI before, so guard it like a backend.
+    required = ["windows_capture", "dxcam", "comtypes", "cv2"]
+
+    missing: list[str] = []
+    for imp in required:
+        hits = list(bundle_root.rglob(imp)) + list(bundle_root.rglob(f"{imp}.*"))
+        bundled = any(
+            h.is_dir() or h.suffix in {".pyd", ".so", ".dll", ".py", ".pyc"}
+            for h in hits
+        )
+        if not bundled:
+            missing.append(imp)
+    return missing
 
 
 def build_ui() -> None:

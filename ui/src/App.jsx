@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from './store'
 import {
-  Activity, Cpu, MonitorPlay, Zap, ServerCrash, Play, Square, RotateCw, Clock, Power,
+  Activity, Cpu, MonitorPlay, Monitor, Zap, ServerCrash, Play, Square, RotateCw, Clock, Power,
   AlertTriangle, ShieldAlert, CheckCircle2, Sparkles,
 } from 'lucide-react'
 import Devices from './pages/Devices'
@@ -90,6 +90,46 @@ function MetricCard({ title, value, unit, icon: Icon, delay }) {
       <div className="flex items-baseline space-x-1">
         <span className="text-2xl font-bold text-blue-400">{value}</span>
         <span className="text-xs font-semibold text-slate-500">{unit}</span>
+      </div>
+    </div>
+  )
+}
+
+// At-a-glance "what's actually capturing" — no more guessing from the logs.
+// WGC/DXGI are the good backends (emerald); MSS is the degraded fallback (amber:
+// fullscreen games / overlay video render black on it); not syncing or no backend
+// yet reads neutral ("Idle"/"—"); an unrecognised backend is shown neutral too
+// rather than implying it's healthy. Backend comes straight from the live metrics
+// stream (pipeline → capture_backend).
+function CaptureSourceCard({ metrics, delay }) {
+  const raw = (metrics.capture_backend || '').toLowerCase()
+  const syncing = metrics.mode === 'screen_sync'
+
+  let label, valueClass, sub
+  if (!syncing) {
+    label = 'Idle'; valueClass = 'text-slate-400'; sub = 'not syncing'
+  } else if (!raw) {
+    label = '—'; valueClass = 'text-slate-400'; sub = 'starting…'
+  } else if (raw === 'mss') {
+    label = 'MSS'; valueClass = 'text-amber-400'; sub = 'fallback • may be black'
+  } else if (raw === 'wgc') {
+    label = 'WGC'; valueClass = 'text-emerald-400'; sub = 'full capture'
+  } else if (raw === 'dxgi') {
+    label = 'DXGI'; valueClass = 'text-emerald-400'; sub = 'GPU capture'
+  } else {
+    // Unknown backend: neutral, not green — don't imply a confirmed-healthy state.
+    label = raw.toUpperCase(); valueClass = 'text-slate-400'; sub = 'unknown backend'
+  }
+
+  return (
+    <div className="glass-panel p-5 rounded-2xl flex flex-col justify-between min-h-[120px] transition-transform hover:scale-[1.02] metric-card-animate animate-fade-up" style={{ animationDelay: delay }}>
+      <div className="flex justify-between items-start">
+        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Capture Source</span>
+        <Monitor className="w-4 h-4 text-slate-500" />
+      </div>
+      <div className="flex flex-col">
+        <span className={`text-2xl font-bold leading-tight ${valueClass}`}>{label}</span>
+        {sub && <span className="text-[10px] font-semibold text-slate-500 mt-0.5">{sub}</span>}
       </div>
     </div>
   )
@@ -237,8 +277,9 @@ function App() {
                     <p>Waiting for the background service…</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
+                  <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
                     <MetricCard title="Capture Rate" value={metrics.fps.toFixed(1)} unit="FPS" icon={MonitorPlay} delay="0s" />
+                    <CaptureSourceCard metrics={metrics} delay="0.05s" />
                     <MetricCard title="Latency" value={metrics.latency_ms.toFixed(1)} unit="ms" icon={Activity} delay="0.1s" />
                     <MetricCard title="Processing" value={(metrics.process_time_ms || 0).toFixed(1)} unit="ms" icon={Cpu} delay="0.2s" />
                     <MetricCard title="LED TX" value={(metrics.led_transmit_ms || 0).toFixed(1)} unit="ms" icon={Zap} delay="0.3s" />
