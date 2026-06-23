@@ -30,7 +30,16 @@ def _event(app_id="discord", app_name="Discord", title="t", body="b", icon=None,
     )
 
 
+def _hermetic_cache(monkeypatch):
+    """Patch cache I/O on the class *before* instantiation so __init__ never
+    reads ~/.ambilight and saves never touch host state (keeps tests
+    deterministic regardless of the developer's machine)."""
+    monkeypatch.setattr(NotificationFlashService, "_load_cache", lambda self: None)
+    monkeypatch.setattr(NotificationFlashService, "_save_cache", lambda self: None)
+
+
 def _service(monkeypatch, **overrides):
+    _hermetic_cache(monkeypatch)
     cfg = AppConfig()
     n = cfg.notifications
     n.enabled = True
@@ -44,8 +53,6 @@ def _service(monkeypatch, **overrides):
         cfg, ctrl, loop=None,
         listener_factory=lambda on, loop: None, clock=clock,
     )
-    # Don't touch the real ~/.ambilight cache during tests.
-    monkeypatch.setattr(svc, "_save_cache", lambda: None)
     return svc, ctrl, clock
 
 
@@ -92,6 +99,26 @@ def test_no_icon_falls_back_to_default(monkeypatch):
     assert svc.resolve_color(_event(app_id="noicon", icon=b"x")) == (7, 7, 7)
 
 
+def test_missing_icon_bytes_not_cached(monkeypatch):
+    # No icon payload at all → fall back, but DON'T persist the no-icon sentinel,
+    # so a later notification that carries an icon can still populate the colour.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    assert svc.resolve_color(_event(app_id="later", icon=None)) == (7, 7, 7)
+    assert "later" not in svc._color_cache
+
+
+def test_corrupt_cache_resets_to_empty(monkeypatch, tmp_path):
+    # A non-dict cache file must be ignored (not crash _on_notification later).
+    cache = tmp_path / "notification_colors.json"
+    cache.write_text("[1, 2, 3]")   # a list, not a dict
+    monkeypatch.setattr("ambilight.notifications.service._CACHE_PATH", str(cache))
+    cfg = AppConfig()
+    cfg.notifications.enabled = True
+    svc = NotificationFlashService(cfg, FakeController(), loop=None,
+                                   listener_factory=lambda on, loop: None, clock=Clock())
+    assert svc._color_cache == {}
+
+
 def test_fixed_mode_always_default(monkeypatch):
     svc, _, _ = _service(monkeypatch, color_mode="fixed", default_color=[5, 6, 7])
     # Even with an icon present, fixed mode ignores it.
@@ -129,6 +156,7 @@ def test_throttle_drops_burst(monkeypatch):
 
 
 def test_suppress_during_dnd(monkeypatch):
+    _hermetic_cache(monkeypatch)
     cfg = AppConfig()
     cfg.notifications.enabled = True
     cfg.notifications.suppress_during_dnd = True
@@ -138,7 +166,6 @@ def test_suppress_during_dnd(monkeypatch):
         cfg, ctrl, loop=None, listener_factory=lambda on, loop: None,
         clock=Clock(), dnd_probe=lambda: True,
     )
-    monkeypatch.setattr(svc, "_save_cache", lambda: None)
     svc._on_notification(_event())
     assert ctrl.flashes == []
 

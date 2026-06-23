@@ -41,6 +41,7 @@ class FakeChannel:
     def __init__(self, led, led_count=30):
         self.led = led
         self.led_count = led_count
+        self.last_output_rgb = (0, 0, 0)
 
 
 def _pipeline(addressable=False):
@@ -91,7 +92,7 @@ def test_brightness_scales_color():
 def test_idle_flash_paints_and_restores_frozen_frame():
     p, led = _pipeline()
     p._power = True
-    p._last_output_rgb = (5, 6, 7)
+    p._channels[0].last_output_rgb = (5, 6, 7)   # per-channel frozen frame
     _flash(p, color=(40, 41, 42), blink_count=1, on_ms=100, off_ms=0)
     # on-segment paints the flash colour
     assert p._service_idle_flash(0.0) is True
@@ -99,6 +100,35 @@ def test_idle_flash_paints_and_restores_frozen_frame():
     # after it ends, the frozen frame is restored (paused path)
     assert p._service_idle_flash(0.20) is False
     assert led.rgb_calls[-1] == (5, 6, 7)
+
+
+def test_flash_started_active_restores_when_paused_mid_flash():
+    # Regression: a flash that begins while active must still restore the frozen
+    # frame if the app pauses (screen lock) before it finishes.
+    p, led = _pipeline()
+    p._power = True
+    p._channels[0].last_output_rgb = (5, 6, 7)
+    _flash(p, color=(40, 41, 42), blink_count=1, on_ms=100, off_ms=0)
+    # Starts in the active path...
+    assert p._flash_step(0.0, paused=False) == ("on", (40, 41, 42))
+    # ...app pauses; the idle/paused path drives it to completion → restore.
+    assert p._service_idle_flash(0.20) is False
+    assert led.rgb_calls[-1] == (5, 6, 7)
+
+
+def test_per_channel_restore_uses_each_channels_color():
+    # Multi-device: each strip restores its own prior colour, not a shared one.
+    p, led_a = _pipeline()
+    led_b = FakeLed()
+    p._channels.append(FakeChannel(led_b))
+    p._power = True
+    p._channels[0].last_output_rgb = (1, 2, 3)
+    p._channels[1].last_output_rgb = (9, 8, 7)
+    _flash(p, color=(40, 41, 42), blink_count=1, on_ms=100, off_ms=0)
+    p._service_idle_flash(0.0)             # on
+    p._service_idle_flash(0.20)            # finish → per-channel restore
+    assert led_a.rgb_calls[-1] == (1, 2, 3)
+    assert led_b.rgb_calls[-1] == (9, 8, 7)
 
 
 def test_idle_flash_off_segment_paints_black():
