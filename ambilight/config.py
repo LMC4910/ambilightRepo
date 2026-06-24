@@ -525,16 +525,21 @@ class ConfigManager:
         return cls._instance
 
     @classmethod
-    def save(cls, path: str | Path | None = None) -> None:
+    def save(cls, path: str | Path | None = None) -> bool:
         """Atomically save the current configuration.
 
         Defaults to the path the config was loaded from (``_loaded_path``) so
         UI/API edits persist back to the same file — critical for installed
         builds where the load path is the writable ``~/.ambilight/configuration.yaml``
         rather than a (read-only) bundled default.
+
+        Returns *True* once the write reached disk, *False* otherwise — callers
+        that mutate in-memory state to mark something "persisted" (e.g. the
+        monitor_id backfill) must gate on this so a swallowed write failure
+        doesn't suppress later retries.
         """
         if cls._instance is None:
-            return
+            return False
 
         if path is None:
             path = cls._loaded_path
@@ -542,7 +547,7 @@ class ConfigManager:
         import dataclasses
         import tempfile
         import os
-        
+
         try:
             # Write to a temporary file in the same directory, then replace atomically
             temp_fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".tmp", text=True)
@@ -550,8 +555,10 @@ class ConfigManager:
                 yaml.safe_dump(dataclasses.asdict(cls._instance), fh, default_flow_style=False, sort_keys=False)
             os.replace(temp_path, path)
             logger.debug("Configuration saved atomically to %s", path)
+            return True
         except Exception as exc:
             logger.error("Failed to save configuration: %s", exc)
+            return False
 
     @classmethod
     def update(cls, override: dict[str, Any], path: str | Path | None = None) -> None:

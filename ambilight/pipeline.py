@@ -154,7 +154,9 @@ def _device_specs(cfg) -> list[dict]:
         specs.append({
             "ip": dev.ip, "mac": dev.mac, "port": _resolve_port(proto, dev.port),
             "monitor_index": cfg.capture.monitor_index,
-            "monitor_id": cfg.capture.monitor_id,
+            # Prefer a device-level stable id (matches the multi-device path),
+            # falling back to the global capture id when the device sets none.
+            "monitor_id": getattr(dev, "monitor_id", "") or cfg.capture.monitor_id,
             "led_count": getattr(dev, "led_count", 30),
             "name": getattr(dev, "name", "") or dev.ip,
             "protocol": proto,
@@ -191,6 +193,8 @@ class AmbilightPipeline:
         self._gpu: Optional[GpuAccelerator] = None
         # Multi-device I/O: one capture per distinct monitor, one channel per device.
         self._captures: dict[int, ScreenCaptureManager] = {}
+        # raw (config) monitor index -> live index the backend opened, for HDR lookups.
+        self._resolved_index: dict[int, int] = {}
         self._channels: list[_Channel] = []
         self._topology: Optional[tuple] = None
         self._effects: EffectsManager = EffectsManager()
@@ -396,7 +400,9 @@ class AmbilightPipeline:
                         frame = cap.grab()
                         small = self._gpu.resize(frame, w, h) if frame is not None else None  # type: ignore[union-attr]
                         # Tone-map washed HDR frames back to SDR before analysis.
-                        if small is not None and self._should_tonemap(mi):
+                        # HDR state is keyed by the live display index, so map the
+                        # capture's config key to the index the backend opened.
+                        if small is not None and self._should_tonemap(self._resolved_index.get(mi, mi)):
                             hcfg = self._cfg.capture.hdr
                             small = tonemap_bgr(
                                 small, hcfg.exposure, hcfg.contrast, hcfg.saturation_recovery,
@@ -521,7 +527,10 @@ class AmbilightPipeline:
                     # lets the UI badge "HDR" and confirm tone-mapping is active.
                     "hdr_active": bool(
                         self._hdr is not None
-                        and any(self._hdr.is_hdr(mi) for mi in self._captures)
+                        and any(
+                            self._hdr.is_hdr(self._resolved_index.get(mi, mi))
+                            for mi in self._captures
+                        )
                     ),
                 }
 
@@ -950,39 +959,57 @@ class AmbilightPipeline:
                 id_by_index[mi] = sp["monitor_id"]
 
         caps: dict[int, ScreenCaptureManager] = {}
+        # raw (config) monitor index -> live index the backend actually opened.
+        # HDR state is keyed by the live EnumDisplayMonitors index, so tone-map
+        # and the hdr_active badge must look up by the resolved index, not the
+        # config one (they differ after a reorder / hybrid-GPU remap).
+        resolved_index: dict[int, int] = {}
         # Key each capture by the *requested* monitor index so the channel lookup
         # in the grab loop (small_by_mon.get(ch.monitor_index)) still resolves;
         # the backend opens the *resolved target* so it grabs the right display.
-        for raw_mi in sorted({sp["monitor_index"] for sp in specs}):
-            stored = {"id": id_by_index.get(raw_mi, ""), "index": raw_mi}
-            target = resolve_monitor(stored, mons) if (mons and resolve_monitor) else None
-            if target is None:
-                # No identity/index match — clamp to a real display (legacy
-                # behaviour) so a stale index doesn't freeze the LEDs.
-                mi = raw_mi
-                if monitor_count > 0 and mi > monitor_count - 1:
-                    logger.warning(
-                        "[Pipeline] monitor_index %d is out of range (%d display(s) "
-                        "detected); falling back to monitor 0.", raw_mi, monitor_count,
+        try:
+            for raw_mi in sorted({sp["monitor_index"] for sp in specs}):
+                stored = {"id": id_by_index.get(raw_mi, ""), "index": raw_mi}
+                target = resolve_monitor(stored, mons) if (mons and resolve_monitor) else None
+                if target is None:
+                    # No identity/index match — clamp to a real display (legacy
+                    # behaviour) so a stale index doesn't freeze the LEDs.
+                    mi = raw_mi
+                    if monitor_count > 0 and mi > monitor_count - 1:
+                        logger.warning(
+                            "[Pipeline] monitor_index %d is out of range (%d display(s) "
+                            "detected); falling back to monitor 0.", raw_mi, monitor_count,
+                        )
+                        mi = 0
+                    target = mons[mi] if (mons and mi < monitor_count) else {"index": mi}
+                elif target.get("index") != raw_mi:
+                    logger.info(
+                        "[Pipeline] monitor %r resolved to index %d (config index was %d) "
+                        "via stable identity.", stored["id"] or "(by index)", target["index"], raw_mi,
                     )
-                    mi = 0
-                target = mons[mi] if (mons and mi < monitor_count) else {"index": mi}
-            elif target.get("index") != raw_mi:
-                logger.info(
-                    "[Pipeline] monitor %r resolved to index %d (config index was %d) "
-                    "via stable identity.", stored["id"] or "(by index)", target["index"], raw_mi,
+                # Pin capture.monitor_id on first run so the selection survives a
+                # later display reorder (best-effort; only the global capture target).
+                if raw_mi == cfg.capture.monitor_index and target.get("id"):
+                    self._backfill_capture_id(target["id"])
+                cap = ScreenCaptureManager(
+                    preferred_method=cfg.capture.method, target=target, fps_target=cfg.capture.fps_target,
+                    analysis_width=cfg.capture.analysis_width, analysis_height=cfg.capture.analysis_height,
                 )
-            # Pin capture.monitor_id on first run so the selection survives a
-            # later display reorder (best-effort; only the global capture target).
-            if raw_mi == cfg.capture.monitor_index and target.get("id"):
-                self._backfill_capture_id(target["id"])
-            cap = ScreenCaptureManager(
-                preferred_method=cfg.capture.method, target=target, fps_target=cfg.capture.fps_target,
-                analysis_width=cfg.capture.analysis_width, analysis_height=cfg.capture.analysis_height,
-            )
-            cap.start()
-            caps[raw_mi] = cap
+                cap.start()  # raises if no backend can be opened
+                caps[raw_mi] = cap
+                resolved_index[raw_mi] = int(target.get("index", raw_mi))
+        except Exception:
+            # A later cap.start() failed: stop the managers already started so
+            # their OS duplication/CPU resources don't leak (self._captures is
+            # still empty, so the normal release path can't reach them).
+            for started in caps.values():
+                try:
+                    started.stop()
+                except Exception:
+                    pass
+            raise
         self._captures = caps
+        self._resolved_index = resolved_index
         logger.info("[Pipeline] Capture acquired (%d monitor(s)).", len(caps))
 
     def _backfill_capture_id(self, resolved_id: str) -> None:
@@ -996,12 +1023,17 @@ class AmbilightPipeline:
                 and not self._cfg.capture.monitor_id
                 and self._cfg is ConfigManager.get()
             ):
+                # save() serialises the in-memory instance, so set the field then
+                # confirm the write reached disk. If it didn't, clear the pin so a
+                # later run retries instead of treating it as already persisted.
                 self._cfg.capture.monitor_id = resolved_id
-                ConfigManager.save()
-                logger.info(
-                    "[Pipeline] Pinned capture.monitor_id=%s (migrated from index %d).",
-                    resolved_id, self._cfg.capture.monitor_index,
-                )
+                if ConfigManager.save():
+                    logger.info(
+                        "[Pipeline] Pinned capture.monitor_id=%s (migrated from index %d).",
+                        resolved_id, self._cfg.capture.monitor_index,
+                    )
+                else:
+                    self._cfg.capture.monitor_id = ""
         except Exception as exc:  # pragma: no cover - persistence edge cases
             logger.debug("[Pipeline] monitor_id backfill skipped: %s", exc)
 
@@ -1015,6 +1047,7 @@ class AmbilightPipeline:
             except Exception:
                 pass
         self._captures = {}
+        self._resolved_index = {}
         logger.info("[Pipeline] Capture released (effect/off mode).")
 
     def _set_capture_active(self, active: bool) -> None:

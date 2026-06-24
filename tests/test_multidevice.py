@@ -13,6 +13,22 @@ def test_single_device_fallback():
     assert specs[0]["monitor_index"] == 2   # inherits capture.monitor_index
 
 
+def test_single_device_prefers_device_monitor_id():
+    # device.monitor_id wins over the global capture.monitor_id (matches the
+    # multi-device path); otherwise setting it would be silently ignored.
+    cfg = AppConfig()
+    cfg.capture.monitor_id = "CAP-ID"
+    cfg.device.monitor_id = "DEV-ID"
+    assert _device_specs(cfg)[0]["monitor_id"] == "DEV-ID"
+
+
+def test_single_device_falls_back_to_capture_monitor_id():
+    cfg = AppConfig()
+    cfg.capture.monitor_id = "CAP-ID"
+    cfg.device.monitor_id = ""
+    assert _device_specs(cfg)[0]["monitor_id"] == "CAP-ID"
+
+
 def test_multi_device_list_used_when_present():
     cfg = AppConfig()
     cfg.devices = [

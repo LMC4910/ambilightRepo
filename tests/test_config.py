@@ -111,6 +111,17 @@ def test_conflicting_macs_warn(tmp_path, caplog):
     assert any("MAC mismatch" in r.message for r in caplog.records)
 
 
+def test_save_reports_success_and_failure(tmp_path):
+    # save() must report whether the write reached disk so callers (e.g. the
+    # monitor_id backfill) don't mark state persisted after a swallowed failure.
+    path = tmp_path / "configuration.yaml"
+    ConfigManager.load(path)
+    assert ConfigManager.save(path) is True
+    assert path.exists()
+    # Parent directory doesn't exist → the atomic temp write can't be created.
+    assert ConfigManager.save(tmp_path / "missing_dir" / "configuration.yaml") is False
+
+
 def test_atomic_save_round_trip(tmp_path):
     path = tmp_path / "configuration.yaml"
     ConfigManager.load(path)            # seeds defaults + records path

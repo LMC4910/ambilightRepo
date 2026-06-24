@@ -45,10 +45,10 @@ def _list_monitors() -> None:
     """
     try:
         from ambilight.monitors import list_monitors
-    except Exception as exc:  # pragma: no cover - import edge cases
+        mons = list_monitors()
+    except Exception as exc:  # pragma: no cover - import/enumeration edge cases
         print(f"[ERROR] Could not enumerate monitors: {exc}")
         return
-    mons = list_monitors()
     if not mons:
         print("No monitors detected.")
         return
