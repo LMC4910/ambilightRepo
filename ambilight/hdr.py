@@ -35,7 +35,9 @@ def _gdi_names_by_index() -> List[str]:
     import ctypes
     from ctypes import wintypes
 
-    user32 = ctypes.windll.user32
+    # Private handle so our ``.argtypes`` mutations don't leak onto the shared
+    # ``ctypes.windll.user32`` that dxcam reuses (see monitors.py for details).
+    user32 = ctypes.WinDLL("user32")
 
     class RECT(ctypes.Structure):
         _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
@@ -73,7 +75,9 @@ def _hdr_by_gdi_name() -> Dict[str, bool]:
     import ctypes
     from ctypes import wintypes
 
-    user32 = ctypes.windll.user32
+    # Private handle (see monitors.py) — avoids polluting the shared user32 that
+    # dxcam reuses with our DISPLAYCONFIG argtypes.
+    user32 = ctypes.WinDLL("user32")
 
     UINT32 = ctypes.c_uint32
 
