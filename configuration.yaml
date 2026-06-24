@@ -1,22 +1,30 @@
 capture:
-  method: wgc
-  monitor_index: 2
+  method: dxgi
+  monitor_index: 3
+  monitor_id: ACR0E24-44909E0D-UID4356
   fps_target: 30
   analysis_width: 80
   analysis_height: 45
+  hdr:
+    mode: auto
+    exposure: 1
+    contrast: 1.15
+    saturation_recovery: 1.5
 device:
   ip: 192.168.1.29
   port: 5577
   mac: 0b:0d:23:00:0c:00
   subnet: 192.168.1.
-  connect_timeout: 2.0
-  send_timeout: 1.0
-  reconnect_interval: 5.0
+  connect_timeout: 2
+  send_timeout: 1
+  reconnect_interval: 5
   discovery_timeout: 0.5
-  cache_file: device_cache.json
+  cache_file: C:\Users\Lmc49\.ambilight\device_cache.json
   led_count: 30
   monitor_index: 2
+  monitor_id: ''
   name: RGB Light Strip
+  protocol: magichome
   enabled: true
 devices:
 - ip: 192.168.1.29
@@ -25,6 +33,7 @@ devices:
   led_count: 30
   name: RGB Light Strip
   enabled: true
+  cache_file: C:\Users\Lmc49\.ambilight\device_cache.json
 zones:
   top: 7
   bottom: 7
@@ -36,8 +45,9 @@ color:
   kmeans_clusters: 3
   ignore_black_threshold: 30
   ignore_white_threshold: 225
-  saturation_weight_power: 2.0
+  saturation_weight_power: 2
   min_saturation: 0.05
+  vibrance: 1
 smoothing:
   enabled: true
   base_alpha: 0.3
@@ -101,8 +111,35 @@ gpu:
 logging:
   level: INFO
   file_level: INFO
-  file: logs/ambilight.log
+  file: C:\Users\Lmc49\.ambilight\logs/ambilight.log
   max_bytes: 20971520
   backup_count: 10
   show_fps: true
-  fps_interval: 5.0
+  fps_interval: 5
+mqtt:
+  enabled: false
+  broker: ''
+  port: 1883
+  username: ''
+  password: ''
+  tls: false
+  base_topic: ambilight
+  ha_discovery: false
+  device_id: ''
+notifications:
+  enabled: true
+  default_color:
+  - 255
+  - 255
+  - 255
+  brightness: 1.0
+  blink_count: 2
+  on_ms: 180
+  off_ms: 120
+  color_mode: icon
+  suppress_during_dnd: false
+  flash_when_locked: true
+  dedup_window_s: 5
+  min_flash_interval_s: 1.5
+  app_overrides: {}
+  keyword_rules: []
