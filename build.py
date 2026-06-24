@@ -120,7 +120,14 @@ def _check_version_sync() -> str:
 
 def build_service(gpu: bool = False) -> None:
     print(f"\n[1/2] Building Python service with PyInstaller ({'GPU' if gpu else 'lean CPU'})…")
-    _check_tool("pyinstaller")
+    # Invoke PyInstaller via the current interpreter (`python -m PyInstaller`)
+    # rather than the `pyinstaller` console script: pip user installs put that
+    # script in a Scripts dir that's often not on PATH, so a bare `pyinstaller`
+    # FATALs even though the package is installed. Verify the module is present.
+    import importlib.util as _ilu
+    if _ilu.find_spec("PyInstaller") is None:
+        print("[FATAL] PyInstaller is not installed. Run: pip install pyinstaller")
+        sys.exit(1)
 
     if SERVICE_DIST.exists():
         shutil.rmtree(SERVICE_DIST)
@@ -211,7 +218,7 @@ def build_service(gpu: bool = False) -> None:
 
     sep = os.pathsep  # ; on Windows, : elsewhere
     _run([
-        "pyinstaller",
+        sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
         # Build a windowed (no-console) binary. The service is a background
