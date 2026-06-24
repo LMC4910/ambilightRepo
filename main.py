@@ -37,18 +37,28 @@ from ambilight.pipeline import AmbilightPipeline
 # ---------------------------------------------------------------------------
 
 def _list_monitors() -> None:
-    """Print available monitor indices detected by MSS."""
+    """Print connected displays with their stable identity.
+
+    The ``Id`` column is what you put in ``capture.monitor_id`` (or a device's
+    ``monitor_id``) to pin a physical monitor regardless of how the index shifts
+    across capture backends — useful on hybrid Intel-iGPU + discrete-GPU setups.
+    """
     try:
-        import mss  # type: ignore[import-untyped]
-        with mss.mss() as sct:
-            real = sct.monitors[1:]
-            print(f"{'Index':<6}  {'Resolution':<18}  {'Position'}")
-            for i, mon in enumerate(real):
-                res = f"{mon['width']}×{mon['height']}"
-                pos = f"({mon['left']}, {mon['top']})"
-                print(f"{i:<6}  {res:<18}  {pos}")
-    except ImportError:
-        print("[ERROR] mss is not installed.  Run: pip install mss")
+        from ambilight.monitors import list_monitors
+    except Exception as exc:  # pragma: no cover - import edge cases
+        print(f"[ERROR] Could not enumerate monitors: {exc}")
+        return
+    mons = list_monitors()
+    if not mons:
+        print("No monitors detected.")
+        return
+    print(f"{'Index':<6}  {'Resolution':<13}  {'Position':<14}  {'Name':<22}  {'Id'}")
+    for m in mons:
+        res = f"{m['width']}×{m['height']}"
+        pos = f"({m.get('left', 0)}, {m.get('top', 0)})"
+        name = (m.get('name') or '')[:22]
+        flag = ' *primary' if m.get('primary') else ''
+        print(f"{m['index']:<6}  {res:<13}  {pos:<14}  {name:<22}  {m.get('id', '')}{flag}")
 
 
 def _run_discovery(cfg: AppConfig) -> None:

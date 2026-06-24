@@ -138,6 +138,7 @@ def _device_specs(cfg) -> list[dict]:
                 "mac": d.get("mac", ""),
                 "port": _resolve_port(proto, d.get("port")),
                 "monitor_index": int(d.get("monitor_index", 0)),
+                "monitor_id": str(d.get("monitor_id") or ""),
                 "led_count": int(d.get("led_count", 30)),
                 "name": d.get("name") or d.get("ip") or "device",
                 "protocol": proto,
@@ -153,6 +154,7 @@ def _device_specs(cfg) -> list[dict]:
         specs.append({
             "ip": dev.ip, "mac": dev.mac, "port": _resolve_port(proto, dev.port),
             "monitor_index": cfg.capture.monitor_index,
+            "monitor_id": cfg.capture.monitor_id,
             "led_count": getattr(dev, "led_count", 30),
             "name": getattr(dev, "name", "") or dev.ip,
             "protocol": proto,
@@ -919,43 +921,89 @@ class AmbilightPipeline:
         self._set_capture_active(self._power and self._effects.current_mode == "screen_sync")
 
     def _acquire_captures(self) -> None:
-        """Open one ScreenCaptureManager per distinct monitor (idempotent)."""
+        """Open one ScreenCaptureManager per distinct monitor (idempotent).
+
+        Each requested monitor is resolved to a *stable identity target* (by
+        ``monitor_id`` when set, else by index) so the capture backends re-find
+        the same physical display via ``gdi_name``/position rather than a bare
+        index — the fix for hybrid-GPU setups where an index points each backend
+        at a different monitor (or none).
+        """
         if self._captures:
             return
         cfg = self._cfg
         specs = _device_specs(cfg)
 
-        # Clamp requested monitor indices to the displays that actually exist.
-        # A stale index (e.g. monitor_index: 3 on a 2-monitor PC) otherwise grabs
-        # the wrong screen — or nothing — leaving the LEDs frozen while the
-        # service reports "active".
         try:
-            from .monitors import list_monitors
-            monitor_count = len(list_monitors())
+            from .monitors import list_monitors, resolve_monitor
+            mons = list_monitors()
         except Exception:
-            monitor_count = 0
+            mons, resolve_monitor = [], None
+        monitor_count = len(mons)
+
+        # monitor_index -> first non-empty monitor_id in that group, so a group
+        # keyed by index still resolves by its stable id when one is stored.
+        id_by_index: dict[int, str] = {}
+        for sp in specs:
+            mi = sp["monitor_index"]
+            if sp.get("monitor_id") and mi not in id_by_index:
+                id_by_index[mi] = sp["monitor_id"]
 
         caps: dict[int, ScreenCaptureManager] = {}
-        # Key each capture by the *requested* monitor index so the channel
-        # lookup in the grab loop (small_by_mon.get(ch.monitor_index)) still
-        # resolves; open the backend on the *clamped* index so it grabs a real
-        # display.
+        # Key each capture by the *requested* monitor index so the channel lookup
+        # in the grab loop (small_by_mon.get(ch.monitor_index)) still resolves;
+        # the backend opens the *resolved target* so it grabs the right display.
         for raw_mi in sorted({sp["monitor_index"] for sp in specs}):
-            mi = raw_mi
-            if monitor_count > 0 and mi > monitor_count - 1:
-                logger.warning(
-                    "[Pipeline] monitor_index %d is out of range (%d display(s) "
-                    "detected); falling back to monitor 0.", raw_mi, monitor_count,
+            stored = {"id": id_by_index.get(raw_mi, ""), "index": raw_mi}
+            target = resolve_monitor(stored, mons) if (mons and resolve_monitor) else None
+            if target is None:
+                # No identity/index match — clamp to a real display (legacy
+                # behaviour) so a stale index doesn't freeze the LEDs.
+                mi = raw_mi
+                if monitor_count > 0 and mi > monitor_count - 1:
+                    logger.warning(
+                        "[Pipeline] monitor_index %d is out of range (%d display(s) "
+                        "detected); falling back to monitor 0.", raw_mi, monitor_count,
+                    )
+                    mi = 0
+                target = mons[mi] if (mons and mi < monitor_count) else {"index": mi}
+            elif target.get("index") != raw_mi:
+                logger.info(
+                    "[Pipeline] monitor %r resolved to index %d (config index was %d) "
+                    "via stable identity.", stored["id"] or "(by index)", target["index"], raw_mi,
                 )
-                mi = 0
+            # Pin capture.monitor_id on first run so the selection survives a
+            # later display reorder (best-effort; only the global capture target).
+            if raw_mi == cfg.capture.monitor_index and target.get("id"):
+                self._backfill_capture_id(target["id"])
             cap = ScreenCaptureManager(
-                preferred_method=cfg.capture.method, monitor_index=mi, fps_target=cfg.capture.fps_target,
+                preferred_method=cfg.capture.method, target=target, fps_target=cfg.capture.fps_target,
                 analysis_width=cfg.capture.analysis_width, analysis_height=cfg.capture.analysis_height,
             )
             cap.start()
             caps[raw_mi] = cap
         self._captures = caps
         logger.info("[Pipeline] Capture acquired (%d monitor(s)).", len(caps))
+
+    def _backfill_capture_id(self, resolved_id: str) -> None:
+        """Persist ``capture.monitor_id`` once if it was unset, migrating an
+        index-only config to a stable identity. Best-effort and event-free (uses
+        ``ConfigManager.save`` directly), so it never triggers a restart."""
+        try:
+            from .config import ConfigManager
+            if (
+                resolved_id
+                and not self._cfg.capture.monitor_id
+                and self._cfg is ConfigManager.get()
+            ):
+                self._cfg.capture.monitor_id = resolved_id
+                ConfigManager.save()
+                logger.info(
+                    "[Pipeline] Pinned capture.monitor_id=%s (migrated from index %d).",
+                    resolved_id, self._cfg.capture.monitor_index,
+                )
+        except Exception as exc:  # pragma: no cover - persistence edge cases
+            logger.debug("[Pipeline] monitor_id backfill skipped: %s", exc)
 
     def _release_captures(self) -> None:
         """Stop + release all capture devices (frees the OS duplication + CPU)."""

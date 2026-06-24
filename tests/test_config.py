@@ -62,6 +62,35 @@ def test_devices_list_monitor_index_coerced(tmp_path):
     assert cfg.devices[0]["monitor_index"] == 3
 
 
+def test_monitor_id_defaults_empty_and_back_compat(tmp_path):
+    # A pre-upgrade config has no monitor_id; load must not fail and defaults to "".
+    path = tmp_path / "configuration.yaml"
+    path.write_text("capture:\n  monitor_index: 1\n", encoding="utf-8")
+    cfg = ConfigManager.load(path)
+    assert cfg.capture.monitor_id == ""
+    assert cfg.device.monitor_id == ""
+
+
+def test_monitor_id_coerced_to_str(tmp_path):
+    # A YAML scalar (bare number) must become a string so identity matching works.
+    path = tmp_path / "configuration.yaml"
+    path.write_text(
+        "capture:\n  monitor_id: 12345\n"
+        "devices:\n- ip: 192.168.1.29\n  monitor_id: 678\n  led_count: 30\n",
+        encoding="utf-8",
+    )
+    cfg = ConfigManager.load(path)
+    assert cfg.capture.monitor_id == "12345" and isinstance(cfg.capture.monitor_id, str)
+    assert cfg.devices[0]["monitor_id"] == "678"
+
+
+def test_monitor_id_round_trips_through_save(tmp_path):
+    path = tmp_path / "configuration.yaml"
+    ConfigManager.load(path)
+    ConfigManager.update({"capture": {"monitor_id": "ACR10CA-54606CFE-UID4352"}}, path=path)
+    assert ConfigManager.load(path).capture.monitor_id == "ACR10CA-54606CFE-UID4352"
+
+
 def test_absurd_led_count_warns(tmp_path, caplog):
     path = tmp_path / "configuration.yaml"
     path.write_text("device:\n  led_count: 3000\n", encoding="utf-8")
