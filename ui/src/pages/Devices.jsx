@@ -46,6 +46,12 @@ export default function Devices() {
     }])
   }
   const updateManaged = (i, key, val) => saveManaged(managed.map((m, idx) => (idx === i ? { ...m, [key]: val } : m)))
+  // Set both the index and the stable identity so capture re-finds this physical
+  // monitor even when its index differs across backends / display reorders.
+  const updateManagedMonitor = (i, index) => {
+    const mc = monitorChoices.find((c) => c.index === index)
+    saveManaged(managed.map((m, idx) => (idx === i ? { ...m, monitor_index: index, monitor_id: mc?.id || '' } : m)))
+  }
   const removeManaged = (i) => saveManaged(managed.filter((_, idx) => idx !== i))
   const handleTest = async (ip, port, protocol) => { setTestingIp(ip); await testDevice(ip, port, protocol); setTestingIp(null) }
   const handleManualAdd = async (e) => {
@@ -157,7 +163,7 @@ export default function Devices() {
                     <div className="flex items-center justify-between">
                       <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Target Monitor</span>
                       <select className="custom-input rounded-xl text-sm font-semibold w-56 py-2 px-3" value={m.monitor_index ?? 0}
-                        onChange={(e) => updateManaged(i, 'monitor_index', Number(e.target.value))}>
+                        onChange={(e) => updateManagedMonitor(i, Number(e.target.value))}>
                         {monitorChoices.map((mc) => <option key={mc.index} value={mc.index}>{monitorLabel(mc)}</option>)}
                       </select>
                     </div>
