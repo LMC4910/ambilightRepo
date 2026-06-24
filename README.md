@@ -767,21 +767,26 @@ A single installer bundles the Electron app **and** the Python service (compiled
 
 ### Building installers
 
+**One-line build** (from the repo root — builds the PyInstaller service **and** the OS installer):
+
 ```bash
-# Python 3.12 + Node 20 + pnpm required. From the repo root:
-
-# 1. Build the service binary (PyInstaller one-dir) → dist/service/ambilight-service
-pip install pyinstaller
-python build.py --service
-
-# 2. Build the app + installer for the current OS
-cd ui
-pnpm install
-pnpm run dist:win      # or dist:mac / dist:linux  (each runs gen:icons + vite build first)
-# → installer in ui/release/  (e.g. "Ambilight Desktop Setup <version>.exe" + latest.yml)
+build-installer            # Windows  → ui\release\Ambilight Desktop Setup <version>.exe (+ latest.yml)
+./build-installer.sh       # macOS/Linux → ui/release/ (DMG, or AppImage + deb)
+python build.py            # cross-platform equivalent the wrappers call
 ```
 
-`python build.py` (no flags) builds both the service and the UI for the host OS. CI mirrors this: `.github/workflows/build.yml` (PR/branch artifacts) and `.github/workflows/release.yml` (tag `v*` → signed build + publish to GitHub Releases).
+Prerequisites: Python 3.12 (`pip install -r requirements.txt`, which includes PyInstaller and the Windows capture backends) + Node 20 + pnpm. Add `--service`/`--ui` to build just one half, or `--gpu` for the large CuPy/CUDA build.
+
+Under the hood that runs:
+
+```bash
+# 1. Service binary (PyInstaller one-dir) → dist/service/ambilight-service
+python build.py --service
+# 2. App + installer for the current OS (gen:icons + vite build + electron-builder)
+cd ui && pnpm install && pnpm run dist:win   # or dist:mac / dist:linux
+```
+
+CI mirrors `python build.py`: `.github/workflows/build.yml` (PR/branch artifacts) and `.github/workflows/release.yml` (tag `v*` → signed build + publish to GitHub Releases).
 
 > Design details: [Service Architecture doc](docs/06_service_architecture.md) · [Electron Architecture doc](docs/05_electron_architecture.md).
 
