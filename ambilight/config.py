@@ -40,7 +40,8 @@ class HdrConfig:
 @dataclass
 class CaptureConfig:
     method: str = "wgc"           # wgc | dxgi | mss
-    monitor_index: int = 0        # 0 = primary
+    monitor_index: int = 0        # 0 = primary (fallback when monitor_id is unset)
+    monitor_id: str = ""          # stable monitor identity (EDID/gdi_name/pos); see monitors.py
     fps_target: int = 30
     analysis_width: int = 80
     analysis_height: int = 45
@@ -59,7 +60,8 @@ class DeviceConfig:
     discovery_timeout: float = 0.5
     cache_file: str = "device_cache.json"
     led_count: int = 30           # LEDs per strip (addressable devices only)
-    monitor_index: int = 0        # which monitor this device mirrors
+    monitor_index: int = 0        # which monitor this device mirrors (fallback for monitor_id)
+    monitor_id: str = ""          # stable monitor identity (preferred over monitor_index)
     name: str = ""                # friendly label (defaults to IP)
     protocol: str = "magichome"   # magichome | wled — selects the LED driver
     enabled: bool = True          # include this device in the pipeline
@@ -356,6 +358,14 @@ class ConfigManager:
                     dev["monitor_index"], 0, f"devices[{i}].monitor_index"
                 )
 
+        # 1b. monitor_id is a free-form stable identity string; coerce to str so
+        #     a YAML scalar (e.g. a bare number) can't break identity matching.
+        config.capture.monitor_id = str(config.capture.monitor_id or "")
+        config.device.monitor_id = str(config.device.monitor_id or "")
+        for dev in config.devices:
+            if isinstance(dev, dict) and dev.get("monitor_id") is not None:
+                dev["monitor_id"] = str(dev.get("monitor_id") or "")
+
         # 2. led_count sanity — a single-RGB strip is one channel; even long
         #    addressable strips rarely exceed a few hundred LEDs. Absurd values
         #    (e.g. 3000) usually mean a stale/typo'd config.
@@ -515,16 +525,21 @@ class ConfigManager:
         return cls._instance
 
     @classmethod
-    def save(cls, path: str | Path | None = None) -> None:
+    def save(cls, path: str | Path | None = None) -> bool:
         """Atomically save the current configuration.
 
         Defaults to the path the config was loaded from (``_loaded_path``) so
         UI/API edits persist back to the same file — critical for installed
         builds where the load path is the writable ``~/.ambilight/configuration.yaml``
         rather than a (read-only) bundled default.
+
+        Returns *True* once the write reached disk, *False* otherwise — callers
+        that mutate in-memory state to mark something "persisted" (e.g. the
+        monitor_id backfill) must gate on this so a swallowed write failure
+        doesn't suppress later retries.
         """
         if cls._instance is None:
-            return
+            return False
 
         if path is None:
             path = cls._loaded_path
@@ -532,7 +547,7 @@ class ConfigManager:
         import dataclasses
         import tempfile
         import os
-        
+
         try:
             # Write to a temporary file in the same directory, then replace atomically
             temp_fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".tmp", text=True)
@@ -540,8 +555,10 @@ class ConfigManager:
                 yaml.safe_dump(dataclasses.asdict(cls._instance), fh, default_flow_style=False, sort_keys=False)
             os.replace(temp_path, path)
             logger.debug("Configuration saved atomically to %s", path)
+            return True
         except Exception as exc:
             logger.error("Failed to save configuration: %s", exc)
+            return False
 
     @classmethod
     def update(cls, override: dict[str, Any], path: str | Path | None = None) -> None:

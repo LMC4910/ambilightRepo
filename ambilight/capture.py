@@ -58,6 +58,84 @@ def is_black_frame(frame: Optional[np.ndarray], threshold: float = BLACK_LUMA_TH
 
 
 # ---------------------------------------------------------------------------
+# Monitor target resolution
+# ---------------------------------------------------------------------------
+#
+# A capture *target* is a monitor identity bundle — not a bare index — so each
+# backend can map it to its own addressing using session-unique signals
+# (``gdi_name`` / position), never resolution. This is what fixes hybrid-GPU
+# setups where a global index points at a different physical monitor (or none)
+# under DXGI than under WGC/MSS.
+
+def _as_target(monitor) -> dict:
+    """Normalise a capture target into an identity dict.
+
+    Accepts either a bare 0-based monitor index (legacy callers / tests) or a
+    resolved monitor dict from :func:`ambilight.monitors.resolve_monitor` /
+    ``list_monitors`` (``{index, id, gdi_name, left, top, width, height, …}``).
+    Always returns a dict carrying at least ``index``.
+    """
+    if isinstance(monitor, dict):
+        t = dict(monitor)
+        try:
+            t["index"] = int(t.get("index", 0))
+        except (TypeError, ValueError):
+            t["index"] = 0
+        return t
+    try:
+        return {"index": int(monitor)}
+    except (TypeError, ValueError):
+        return {"index": 0}
+
+
+def _dxgi_outputs(dxcam) -> "list[dict]":
+    r"""Enumerate DXGI outputs in dxcam's (adapter, output) order.
+
+    Returns ``[{device_idx, output_idx, gdi_name, left, top, width, height}]``.
+    Reads dxcam's already-built output factory, so the indices line up exactly
+    with ``dxcam.create(device_idx, output_idx)``. ``gdi_name`` (``\\.\DISPLAYn``)
+    and position come straight from each output's ``DXGI_OUTPUT_DESC``. Raises if
+    the factory/descriptors are unavailable, so the caller falls back to index
+    addressing.
+    """
+    # Reuse the module-level singleton instance to avoid dxcam's "only 1
+    # instance allowed" warning that calling DXFactory() again would emit.
+    factory = getattr(dxcam, "__factory", None) or dxcam.DXFactory()
+    outs: "list[dict]" = []
+    for didx, outputs in enumerate(factory.outputs):
+        for oidx, output in enumerate(outputs):
+            coords = output.desc.DesktopCoordinates
+            outs.append({
+                "device_idx": didx,
+                "output_idx": oidx,
+                "gdi_name": output.devicename,
+                "left": int(coords.left),
+                "top": int(coords.top),
+                "width": int(coords.right - coords.left),
+                "height": int(coords.bottom - coords.top),
+            })
+    return outs
+
+
+def _match_output(outputs: "list[dict]", target: dict) -> "Optional[tuple[int, int]]":
+    """Pick the ``(device_idx, output_idx)`` whose DXGI output matches *target*
+    by ``gdi_name`` first, then ``(left, top)`` — both unique within a session,
+    so same-resolution monitors are never confused. Returns *None* when nothing
+    matches (the monitor isn't reachable via DXGI)."""
+    gdi = (target.get("gdi_name") or "").strip()
+    if gdi:
+        for o in outputs:
+            if o.get("gdi_name") == gdi:
+                return o["device_idx"], o["output_idx"]
+    left, top = target.get("left"), target.get("top")
+    if left is not None and top is not None:
+        for o in outputs:
+            if o.get("left") == left and o.get("top") == top:
+                return o["device_idx"], o["output_idx"]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Abstract backend
 # ---------------------------------------------------------------------------
 
@@ -67,9 +145,16 @@ class CaptureBackend(ABC):
     name: str = "base"
 
     @abstractmethod
-    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
+    def open(self, target, target_size=None, fps_target: int = 30) -> bool:
         """
-        Initialise the backend for *monitor_index*.
+        Initialise the backend for *target*.
+
+        *target* is either a bare 0-based monitor index (legacy) or a resolved
+        monitor dict (``{index, id, gdi_name, left, top, width, height, …}``)
+        from :func:`ambilight.monitors.resolve_monitor`. Backends map it to their
+        own internal addressing using session-unique signals (``gdi_name`` /
+        position), never resolution; one that *cannot* reach the target returns
+        *False* so the manager promotes the next backend.
 
         ``target_size`` is the optional ``(width, height)`` the backend may
         pre-downscale to (used by WGC); ``fps_target`` caps delivery rate.
@@ -151,7 +236,7 @@ class WGCBackend(CaptureBackend):
         with self._lock:
             self._latest_frame = bgr
 
-    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
+    def open(self, target, target_size=None, fps_target: int = 30) -> bool:
         try:
             import sys
             import time as _time
@@ -162,6 +247,9 @@ class WGCBackend(CaptureBackend):
             # extension is missing, which the manager handles by failing over.
             from windows_capture import WindowsCapture  # type: ignore[import-untyped]
 
+            # WGC follows EnumDisplayMonitors order, the same order the resolved
+            # target's index is in, so the index is the correct addressing here.
+            monitor_index = int(_as_target(target).get("index", 0))
             self._target_size = target_size
             # Cap delivery to the target FPS (ms) so a 144 FPS game doesn't flood
             # the callback. Without this the GIL is held copying frames at the
@@ -248,30 +336,26 @@ class DXGIBackend(CaptureBackend):
     def __init__(self) -> None:
         self._camera: Optional[object] = None
 
-    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
+    def open(self, target, target_size=None, fps_target: int = 30) -> bool:
         try:
             import sys
             if sys.platform != "win32":
                 return False
 
             import dxcam  # type: ignore[import-untyped]
-            # Hybrid-graphics (NVIDIA Optimus / AMD switchable) laptops drive the
-            # panel from the integrated GPU while the discrete GPU enumerates as
-            # device 0. dxcam.create() defaults to device_idx=0, so DXGI
-            # duplication of the dGPU returns an all-black frame even though the
-            # desktop is composited by the iGPU. Probe the adapters and keep the
-            # first that delivers a non-black frame for this output; fall back to
-            # the default device if every adapter reads black (e.g. a genuinely
-            # dark screen at startup) so single-GPU behaviour is unchanged.
-            camera = self._open_on_best_device(dxcam, monitor_index, fps_target)
+            t = _as_target(target)
+            camera = self._open_on_best_device(dxcam, t, fps_target)
             if camera is None:
                 logger.info(
                     "[DXGI] dxcam imported but no adapter could duplicate monitor "
-                    "%d; falling back.", monitor_index,
+                    "(id=%s, index=%s); falling back.", t.get("id"), t.get("index"),
                 )
                 return False
             self._camera = camera
-            logger.info("[DXGI] dxcam capture started for monitor %d.", monitor_index)
+            logger.info(
+                "[DXGI] dxcam capture started for monitor index %s (id=%s).",
+                t.get("index"), t.get("id"),
+            )
             return True
         except Exception as exc:
             # info (not debug) so a missing/under-bundled dxcam or comtypes shows
@@ -280,18 +364,48 @@ class DXGIBackend(CaptureBackend):
             logger.info("[DXGI] Backend unavailable: %s: %s", type(exc).__name__, exc)
             return False
 
-    def _open_on_best_device(self, dxcam, output_idx: int, fps_target: int):
-        """Return a started dxcam camera bound to the adapter that actually drives
-        *output_idx*, or ``None`` if no adapter exposes it.
+    def _open_on_best_device(self, dxcam, target: dict, fps_target: int):
+        """Return a started dxcam camera for *target*, or ``None`` if DXGI cannot
+        reach that monitor.
 
-        Single-GPU machines return on the first iteration (device 0 delivers a
-        non-black frame), so this adds no overhead there. The multi-device probe
-        only runs when device 0 duplicates black — the Optimus symptom.
+        Resolution path:
+
+        1. **Identity match (multi-adapter correct).** Enumerate the DXGI outputs
+           and pick the ``(device_idx, output_idx)`` whose ``gdi_name``/position
+           equals the target's. This addresses the right adapter directly — the
+           fix for hybrid-GPU setups where a global index points DXGI at the wrong
+           output (or off the end of an adapter). If the monitor exists to Windows
+           but *no* DXGI output exposes it (e.g. an iGPU-driven panel absent from
+           this dGPU), return ``None`` so the manager fails over.
+        2. **Fallback (single-GPU / enumeration unavailable).** Probe adapters
+           0..N for the target's index — the original Optimus-black behaviour.
         """
+        pairs = None  # explicit [(device_idx, output_idx)] once resolved by identity
+        has_identity = bool((target.get("gdi_name") or "").strip()) or target.get("left") is not None
+        try:
+            outs = _dxgi_outputs(dxcam)
+            if outs:
+                matched = _match_output(outs, target)
+                if matched is not None:
+                    pairs = [matched]
+                elif has_identity:
+                    # Known monitor, but no DXGI output exposes it — unreachable.
+                    logger.info(
+                        "[DXGI] monitor (id=%s) is not exposed by any DXGI output; "
+                        "failing over to another backend.", target.get("id"),
+                    )
+                    return None
+        except Exception as exc:
+            logger.debug("[DXGI] output enumeration failed (%s); using index probe.", exc)
+
+        if pairs is None:
+            output_idx = int(target.get("index", 0))
+            pairs = [(dev, output_idx) for dev in range(self._MAX_DEVICES)]
+
         fallback = None  # first frame-delivering (but black) camera, as last resort
-        for dev in range(self._MAX_DEVICES):
+        for dev, out in pairs:
             try:
-                cam = dxcam.create(device_idx=dev, output_idx=output_idx, output_color="BGR")
+                cam = dxcam.create(device_idx=dev, output_idx=out, output_color="BGR")
             except Exception:
                 continue  # this (device, output) pair doesn't exist
             if cam is None:
@@ -312,8 +426,7 @@ class DXGIBackend(CaptureBackend):
             if frame is not None and float(frame.mean()) > BLACK_LUMA_THRESHOLD:
                 if dev != 0:
                     logger.info(
-                        "[DXGI] Capturing from GPU adapter %d — device 0 duplication "
-                        "was black (hybrid/Optimus graphics).", dev,
+                        "[DXGI] Capturing from GPU adapter %d, output %d.", dev, out,
                     )
                 if fallback is not None:
                     self._safe_stop(fallback)
@@ -377,6 +490,7 @@ class MSSBackend(CaptureBackend):
         self._sct: Optional[object] = None
         self._monitor: Optional[dict] = None
         self._monitor_index: int = 0
+        self._target: dict = {"index": 0}
         # Latch so a sustained failure (screen lock / display sleep makes BitBlt
         # raise on *every* grab) logs once instead of at the capture frame rate.
         self._fail_logged: bool = False
@@ -407,11 +521,24 @@ class MSSBackend(CaptureBackend):
             real_monitors = monitors[1:]
             if not real_monitors:
                 return False  # nothing to capture (headless/virtual session)
-            # Clamp into range; a negative index would otherwise select from the
-            # end of the list via Python's negative indexing.
-            idx = min(max(self._monitor_index, 0), len(real_monitors) - 1)
+            # Prefer matching by virtual-desktop position (always unique, so a
+            # same-resolution monitor is never confused) before falling back to
+            # the index. This keeps MSS pointed at the *same physical monitor* the
+            # other backends resolved, even when the mss order differs.
+            chosen = None
+            left, top = self._target.get("left"), self._target.get("top")
+            if left is not None and top is not None:
+                for mon in real_monitors:
+                    if mon.get("left") == left and mon.get("top") == top:
+                        chosen = mon
+                        break
+            if chosen is None:
+                # Clamp into range; a negative index would otherwise select from
+                # the end of the list via Python's negative indexing.
+                idx = min(max(self._monitor_index, 0), len(real_monitors) - 1)
+                chosen = real_monitors[idx]
             self._sct = sct
-            self._monitor = real_monitors[idx]
+            self._monitor = chosen
             keep = True
             return True
         finally:
@@ -419,12 +546,13 @@ class MSSBackend(CaptureBackend):
                 with suppress(Exception):
                     sct.close()
 
-    def open(self, monitor_index: int, target_size=None, fps_target: int = 30) -> bool:
-        self._monitor_index = monitor_index
+    def open(self, target, target_size=None, fps_target: int = 30) -> bool:
+        self._target = _as_target(target)
+        self._monitor_index = int(self._target.get("index", 0))
         try:
             if not self._ensure_session():
                 return False
-            logger.info("[MSS] Capture initialised for monitor %d.", monitor_index)
+            logger.info("[MSS] Capture initialised for monitor index %d.", self._monitor_index)
             return True
         except Exception as exc:
             logger.debug("[MSS] Not available: %s", exc)
@@ -495,7 +623,13 @@ class ScreenCaptureManager:
         One of ``"wgc"``, ``"dxgi"``, ``"mss"``.  The manager always tries
         this first, then falls back down the chain.
     monitor_index:
-        Zero-based monitor index (0 = primary).
+        Zero-based monitor index (0 = primary). Legacy/back-compat shorthand;
+        ignored when *target* is given.
+    target:
+        Resolved monitor identity dict (``{index, id, gdi_name, left, top, …}``)
+        from :func:`ambilight.monitors.resolve_monitor`. Preferred over
+        *monitor_index* so each backend can re-find the same physical monitor by
+        a stable identifier rather than a per-backend index.
     fps_target:
         Target frame rate.  :meth:`grab` will sleep to honour this.
     """
@@ -515,8 +649,10 @@ class ScreenCaptureManager:
         fps_target: int = 30,
         analysis_width: int = 80,
         analysis_height: int = 45,
+        target=None,
     ) -> None:
-        self._monitor_index = monitor_index
+        self._target = _as_target(target if target is not None else monitor_index)
+        self._monitor_index = int(self._target.get("index", 0))
         self._fps_target = fps_target
         self._frame_interval = 1.0 / max(fps_target, 1)
         self._target_size = (analysis_width, analysis_height)
@@ -574,7 +710,7 @@ class ScreenCaptureManager:
         """
         for backend in self._candidates:
             try:
-                opened = backend.open(self._monitor_index, self._target_size, self._fps_target)
+                opened = backend.open(self._target, self._target_size, self._fps_target)
             except Exception as exc:  # defensive — a backend should never raise here
                 logger.debug("[Capture] %s.open() raised: %s", backend.name, exc)
                 opened = False

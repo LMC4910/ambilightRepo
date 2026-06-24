@@ -30,7 +30,13 @@ export default function Onboarding({ onDone }) {
   const next = () => setStep((s) => Math.min(STEPS.length - 1, s + 1))
   const back = () => setStep((s) => Math.max(0, s - 1))
   const finish = async () => { try { await window.api.onboarding.complete() } catch (e) { /* ignore */ } onDone() }
-  const chooseMonitor = async (i) => { setMonitorIdx(i); await updateSettings({ capture: { monitor_index: i } }) }
+  const chooseMonitor = async (i) => {
+    setMonitorIdx(i)
+    // Persist the stable identity too so capture re-finds this physical monitor
+    // even if its index shifts across backends / display reorders.
+    const mon = monitors.find((m) => m.index === i)
+    await updateSettings({ capture: { monitor_index: i, monitor_id: mon?.id || '' } })
+  }
   const chooseDevice = async (d) => {
     const protocol = d.protocol || 'magichome'
     setSelectedIp(d.ip); setSelectedProtocol(protocol)

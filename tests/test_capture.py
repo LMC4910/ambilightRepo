@@ -7,6 +7,7 @@ logic: BGRA→BGR conversion, graceful WGC fallback, and manager promotion.
 import builtins
 import logging
 import sys
+import types
 
 import numpy as np
 
@@ -302,3 +303,95 @@ def test_manager_recovery_respects_cooldown(monkeypatch):
     clock["now"] += mgr._COOLDOWN_S
     assert mgr.grab() is None
     assert b.opened > opened_after_first
+
+
+# --- identity-based target resolution -------------------------------------
+
+def test_as_target_normalizes_int_and_dict():
+    from ambilight.capture import _as_target
+    assert _as_target(2) == {"index": 2}
+    t = _as_target({"index": "3", "gdi_name": r"\\.\DISPLAY3"})
+    assert t["index"] == 3 and t["gdi_name"] == r"\\.\DISPLAY3"
+    assert _as_target("nope") == {"index": 0}      # non-numeric → 0
+
+
+def test_match_output_by_gdi_then_position():
+    from ambilight.capture import _match_output
+    # Mirrors a real hybrid-GPU layout: outputs split across two adapters.
+    outs = [
+        {"device_idx": 0, "output_idx": 0, "gdi_name": r"\\.\DISPLAY5", "left": 0, "top": 0, "width": 1920, "height": 1080},
+        {"device_idx": 0, "output_idx": 1, "gdi_name": r"\\.\DISPLAY4", "left": 1920, "top": 0, "width": 1080, "height": 1920},
+        {"device_idx": 1, "output_idx": 0, "gdi_name": r"\\.\DISPLAY1", "left": 3000, "top": 0, "width": 1920, "height": 1080},
+    ]
+    # gdi_name wins, and addresses the right adapter (device 1) — not output_idx 2.
+    assert _match_output(outs, {"gdi_name": r"\\.\DISPLAY1"}) == (1, 0)
+    # same-resolution monitors are separated by position, never resolution.
+    assert _match_output(outs, {"left": 1920, "top": 0}) == (0, 1)
+    # not exposed by any DXGI output → unreachable.
+    assert _match_output(outs, {"gdi_name": r"\\.\DISPLAY9", "left": 9, "top": 9}) is None
+
+
+def _fake_mss(monkeypatch, virtual, *real):
+    class _Sct:
+        monitors = [virtual, *real]
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "mss", types.SimpleNamespace(mss=lambda: _Sct()))
+
+
+def test_mss_open_matches_by_position_not_index(monkeypatch):
+    """Same-resolution monitors: MSS must point at the target's position even when
+    the bare index would pick a different one (e.g. mss order differs)."""
+    from ambilight.capture import MSSBackend
+    mon_a = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+    mon_b = {"left": 1920, "top": 0, "width": 1920, "height": 1080}
+    _fake_mss(monkeypatch, {"left": 0, "top": 0, "width": 3840, "height": 1080}, mon_a, mon_b)
+
+    b = MSSBackend()
+    # index 0 would select mon_a, but the target's position points at mon_b.
+    assert b.open({"index": 0, "left": 1920, "top": 0}) is True
+    assert b._monitor is mon_b
+
+
+def test_mss_open_falls_back_to_index_without_position(monkeypatch):
+    from ambilight.capture import MSSBackend
+    mon_a = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+    mon_b = {"left": 1920, "top": 0, "width": 1920, "height": 1080}
+    _fake_mss(monkeypatch, {"left": 0, "top": 0, "width": 3840, "height": 1080}, mon_a, mon_b)
+
+    b = MSSBackend()
+    assert b.open({"index": 1}) is True   # no position hint → clamp by index
+    assert b._monitor is mon_b
+
+
+class _TargetAwareBackend(CaptureBackend):
+    """Backend that can only capture a fixed set of monitor indices — models a
+    DXGI adapter that simply doesn't expose an iGPU-driven panel."""
+
+    def __init__(self, name, reachable):
+        self.name = name
+        self._reachable = set(reachable)
+
+    def open(self, target, target_size=None, fps_target=30):
+        from ambilight.capture import _as_target
+        return _as_target(target).get("index") in self._reachable
+
+    def grab(self):
+        return np.zeros((2, 2, 3), np.uint8)
+
+    def close(self):
+        pass
+
+
+def test_manager_promotes_backend_that_can_reach_target():
+    """The user's scenario: a monitor unreachable by the preferred backend (DXGI)
+    must fail over to one that can reach it (MSS)."""
+    mgr = ScreenCaptureManager(preferred_method="dxgi", target={"index": 2, "gdi_name": r"\\.\DISPLAY3"})
+    dxgi = _TargetAwareBackend("dxgi", reachable={0, 1})   # can't reach monitor 2
+    mss = _TargetAwareBackend("mss", reachable={0, 1, 2})
+    mgr._candidates = [dxgi, mss]
+    mgr.start()
+    assert mgr._active is mss
+    assert mgr.active_backend == "mss"
