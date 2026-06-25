@@ -1,37 +1,15 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { Bell, Save, Plus, Trash2, Zap, AlertTriangle, CheckCircle2, Smartphone } from 'lucide-react'
-import Toggle from '../components/Toggle'
+import { Icon, PageHead, ServiceStatus, Section, Empty, Toggle, Stepper, Swatch } from '../components/shell'
 
 const N_DEFAULTS = {
-  enabled: false,
-  default_color: [255, 255, 255],
-  brightness: 1.0,
-  blink_count: 2,
-  on_ms: 180,
-  off_ms: 120,
-  color_mode: 'icon',
-  suppress_during_dnd: false,
-  flash_when_locked: true,
-  dedup_window_s: 5.0,
-  min_flash_interval_s: 1.5,
-  app_overrides: {},
-  keyword_rules: [],
+  enabled: false, default_color: [255, 255, 255], brightness: 1.0, blink_count: 2, on_ms: 180, off_ms: 120,
+  color_mode: 'icon', suppress_during_dnd: false, flash_when_locked: true, dedup_window_s: 5.0,
+  min_flash_interval_s: 1.5, app_overrides: {}, keyword_rules: [],
 }
 
-// Monotonic id source for stable React keys on editable rows (index keys cause
-// input/focus to jump to the wrong row when items are removed).
 let _rowId = 0
 const nextId = () => (_rowId += 1)
-
-const clamp = (n) => Math.max(0, Math.min(255, Math.round(Number(n) || 0)))
-const rgbToHex = (rgb) => '#' + (rgb || [255, 255, 255]).map((c) => clamp(c).toString(16).padStart(2, '0')).join('')
-const hexToRgb = (hex) => {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '')
-  if (!m) return [255, 255, 255]
-  const n = parseInt(m[1], 16)
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
-}
 
 // Convert the persisted config shape ↔ an editable draft (app_overrides dict ↔ rows).
 const toDraft = (n) => {
@@ -54,37 +32,17 @@ const toDraft = (n) => {
 }
 
 const buildPayload = (d) => ({
-  enabled: d.enabled,
-  default_color: d.default_color,
-  brightness: d.brightness,
-  blink_count: d.blink_count,
-  on_ms: d.on_ms,
-  off_ms: d.off_ms,
-  color_mode: d.color_mode,
-  suppress_during_dnd: d.suppress_during_dnd,
-  flash_when_locked: d.flash_when_locked,
-  dedup_window_s: d.dedup_window_s,
-  min_flash_interval_s: d.min_flash_interval_s,
-  app_overrides: Object.fromEntries(
-    d.overrides.filter((o) => o.app.trim()).map((o) => [o.app.trim(), o.color])
-  ),
+  enabled: d.enabled, default_color: d.default_color, brightness: d.brightness, blink_count: d.blink_count,
+  on_ms: d.on_ms, off_ms: d.off_ms, color_mode: d.color_mode, suppress_during_dnd: d.suppress_during_dnd,
+  flash_when_locked: d.flash_when_locked, dedup_window_s: d.dedup_window_s, min_flash_interval_s: d.min_flash_interval_s,
+  app_overrides: Object.fromEntries(d.overrides.filter((o) => o.app.trim()).map((o) => [o.app.trim(), o.color])),
   keyword_rules: d.keyword_rules.filter((r) => r.keyword.trim()).map((r) => ({ keyword: r.keyword.trim(), color: r.color })),
 })
 
-function ColorSwatch({ value, onChange }) {
-  return (
-    <input type="color" value={rgbToHex(value)} onChange={(e) => onChange(hexToRgb(e.target.value))}
-      className="w-9 h-9 rounded-lg bg-transparent border border-white/10 cursor-pointer p-0.5" />
-  )
-}
-
 function PermissionBanner() {
   const [info, setInfo] = useState(null)
-
   useEffect(() => {
     let alive = true
-    // Access the store method via getState() so it doesn't need to be an effect
-    // dependency (Zustand methods are stable; this keeps exhaustive-deps quiet).
     const tick = () => useStore.getState().notifPermission().then((r) => { if (alive) setInfo(r) }).catch(() => {})
     tick()
     const id = setInterval(tick, 4000)
@@ -94,15 +52,13 @@ function PermissionBanner() {
   if (!info) return null
   const status = info.status
   const platform = info.platform || ''
-  const ok = status === 'granted'
-  if (ok) {
+  if (status === 'granted') {
     return (
-      <div className="flex items-center gap-2 border px-3 py-2 rounded-xl text-xs font-medium bg-emerald-500/10 border-emerald-500/20 text-emerald-300">
-        <CheckCircle2 className="w-4 h-4 shrink-0" /> Notification access granted.
+      <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderColor: 'color-mix(in srgb,var(--good) 24%,transparent)', background: 'var(--good-bg)' }}>
+        <Icon n="check-circle-2" style={{ color: 'var(--good)' }} /><span style={{ fontSize: 12.5, color: 'var(--good)', fontWeight: 500 }}>Notification access granted.</span>
       </div>
     )
   }
-
   const grantUrl = platform === 'darwin'
     ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'
     : 'ms-settings:privacy-notifications'
@@ -114,152 +70,127 @@ function PermissionBanner() {
   } else if (platform === 'darwin') {
     text = 'Grant Full Disk Access so notifications can be read (best-effort; may break on macOS updates).'
   }
-
   return (
-    <div className="flex items-center gap-2 border px-3 py-2 rounded-xl text-xs font-medium bg-amber-500/10 border-amber-500/30 text-amber-300">
-      <AlertTriangle className="w-4 h-4 shrink-0" />
-      <span className="min-w-0">{text}</span>
-      <button onClick={() => window.api.system?.openExternal(grantUrl)}
-        className="ml-auto shrink-0 px-2.5 py-1 rounded bg-white/5 border border-white/10 hover:bg-white/10 text-slate-200">
-        Grant access
-      </button>
+    <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderColor: 'color-mix(in srgb,var(--warn) 28%,transparent)', background: 'var(--warn-bg)' }}>
+      <Icon n="alert-triangle" style={{ color: 'var(--warn)' }} />
+      <span style={{ fontSize: 12.5, color: 'var(--warn)', minWidth: 0 }}>{text}</span>
+      <button className="btn btn-sm" style={{ marginLeft: 'auto' }} onClick={() => window.api.system?.openExternal(grantUrl)}>Grant access</button>
     </div>
   )
 }
 
-function NumField({ label, value, onChange, step = 1, min = 0, suffix }) {
-  return (
-    <label className="flex items-center gap-3 text-sm">
-      <span className="text-slate-400 min-w-[150px]">{label}</span>
-      <input type="number" step={step} min={min} value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="custom-input rounded-lg px-2 py-1.5 text-sm w-28" />
-      {suffix && <span className="text-xs text-slate-500">{suffix}</span>}
-    </label>
-  )
-}
-
 export default function Notifications() {
-  const { settings, updateSettings, saving, testFlash } = useStore()
+  const { settings, updateSettings, saving, testFlash, toast } = useStore()
   const [draft, setDraft] = useState(null)
+  const [newApp, setNewApp] = useState('')
+  const [newKw, setNewKw] = useState('')
 
-  // getState() avoids listing the (stable) store method as an effect dependency.
   useEffect(() => { if (!settings) useStore.getState().fetchSettings() }, [])
   useEffect(() => { if (settings) setDraft(toDraft(settings.notifications)) }, [settings])
 
-  if (!draft) return null
+  if (!draft) return <div className="main"><PageHead crumb="Configuration" title="Notifications" sub="Flash your lights on desktop alerts" /><div className="content content-narrow"><div className="card card-pad subtle">Loading…</div></div></div>
+
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }))
   const payload = buildPayload(draft)
   const dirty = JSON.stringify(payload) !== JSON.stringify(buildPayload(toDraft(settings?.notifications)))
+  const n = draft
 
-  // override rows (keyed by stable _id)
-  const setOverride = (id, key, val) => set({ overrides: draft.overrides.map((o) => (o._id === id ? { ...o, [key]: val } : o)) })
-  const addOverride = () => set({ overrides: [...draft.overrides, { _id: nextId(), app: '', color: [255, 255, 255] }] })
-  const removeOverride = (id) => set({ overrides: draft.overrides.filter((o) => o._id !== id) })
-  // keyword rules
-  const setRule = (id, key, val) => set({ keyword_rules: draft.keyword_rules.map((r) => (r._id === id ? { ...r, [key]: val } : r)) })
-  const addRule = () => set({ keyword_rules: [...draft.keyword_rules, { _id: nextId(), keyword: '', color: [255, 105, 180] }] })
-  const removeRule = (id) => set({ keyword_rules: draft.keyword_rules.filter((r) => r._id !== id) })
+  const commitApp = () => { if (!newApp.trim()) return; set({ overrides: [...n.overrides, { _id: nextId(), app: newApp.trim(), color: [120, 140, 255] }] }); setNewApp('') }
+  const commitKw = () => { if (!newKw.trim()) return; set({ keyword_rules: [...n.keyword_rules, { _id: nextId(), keyword: newKw.trim(), color: [225, 48, 108] }] }); setNewKw('') }
 
   return (
-    <section className="glass-panel rounded-3xl p-8 flex flex-col gap-5 animate-fade-up">
-      <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-white flex items-center gap-2"><Bell className="w-5 h-5 text-indigo-400" /> Notification Flash</h3>
-        <Toggle checked={draft.enabled} onChange={(v) => set({ enabled: v })} label="Enabled" />
-      </div>
+    <div className="main">
+      <PageHead crumb="Configuration" title="Notifications" sub="Flash your lights on desktop alerts">
+        <ServiceStatus status={useStore.getState().status} />
+        <button className={`btn ${dirty ? 'btn-primary' : ''}`} disabled={!dirty || saving} onClick={() => { updateSettings({ notifications: payload }); toast('Notification settings saved') }}><Icon n={dirty ? 'save' : 'check'} />{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}</button>
+      </PageHead>
 
-      <p className="text-xs text-slate-500 -mt-2">
-        Briefly flash the lights when an app notification arrives — so you catch it even in fullscreen,
-        during Do Not Disturb, or while the screen is locked. Defaults to the app icon’s colour; override per app below.
-      </p>
+      <div className="content content-narrow page-enter">
+        <div className="stack">
+          <PermissionBanner />
 
-      <PermissionBanner />
-
-      {/* Flash appearance */}
-      <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
-        <h4 className="text-sm font-semibold text-white">Flash appearance</h4>
-
-        <label className="flex items-center gap-3 text-sm">
-          <span className="text-slate-400 min-w-[150px]">Colour source</span>
-          <select className="custom-input rounded-lg px-2 py-1.5 text-sm" value={draft.color_mode}
-            onChange={(e) => set({ color_mode: e.target.value })}>
-            <option value="icon">App icon colour</option>
-            <option value="fixed">Always the default colour</option>
-          </select>
-        </label>
-
-        <label className="flex items-center gap-3 text-sm">
-          <span className="text-slate-400 min-w-[150px]">Default / fallback colour</span>
-          <ColorSwatch value={draft.default_color} onChange={(c) => set({ default_color: c })} />
-        </label>
-
-        <label className="flex items-center gap-3 text-sm">
-          <span className="text-slate-400 min-w-[150px]">Brightness</span>
-          <input type="range" min="0" max="1" step="0.05" value={draft.brightness}
-            onChange={(e) => set({ brightness: Number(e.target.value) })} className="flex-1 max-w-[240px]" />
-          <span className="text-xs text-slate-500 w-10">{Math.round(draft.brightness * 100)}%</span>
-        </label>
-
-        <NumField label="Blinks" value={draft.blink_count} onChange={(v) => set({ blink_count: v })} min={1} />
-        <NumField label="On duration" value={draft.on_ms} onChange={(v) => set({ on_ms: v })} step={10} min={20} suffix="ms" />
-        <NumField label="Off duration" value={draft.off_ms} onChange={(v) => set({ off_ms: v })} step={10} min={0} suffix="ms" />
-
-        <button onClick={() => testFlash(draft.default_color)}
-          className="self-start mt-1 btn-neon-blue px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
-          <Zap className="w-4 h-4" /> Test flash
-        </button>
-      </div>
-
-      {/* Behaviour */}
-      <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
-        <h4 className="text-sm font-semibold text-white">Behaviour</h4>
-        <Toggle checked={draft.flash_when_locked} onChange={(v) => set({ flash_when_locked: v })}
-          label="Flash even when the screen is locked or asleep" />
-        <Toggle checked={draft.suppress_during_dnd} onChange={(v) => set({ suppress_during_dnd: v })}
-          label="Suppress during Do Not Disturb / Focus Assist" />
-        <NumField label="De-dup window" value={draft.dedup_window_s} onChange={(v) => set({ dedup_window_s: v })} step={0.5} suffix="s" />
-        <NumField label="Min gap between flashes" value={draft.min_flash_interval_s} onChange={(v) => set({ min_flash_interval_s: v })} step={0.5} suffix="s" />
-      </div>
-
-      {/* Per-app overrides */}
-      <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
-        <h4 className="text-sm font-semibold text-white">Per-app colours</h4>
-        <p className="text-xs text-slate-500">Pin a colour for a specific app (matched by its name or id).</p>
-        {draft.overrides.length === 0 && <div className="text-xs text-slate-500">No overrides — the icon colour is used.</div>}
-        {draft.overrides.map((o) => (
-          <div key={o._id} className="flex gap-2 items-center">
-            <input className="custom-input rounded-lg px-2 py-1.5 text-sm flex-1" placeholder="app name or id (e.g. Discord)"
-              value={o.app} onChange={(e) => setOverride(o._id, 'app', e.target.value)} />
-            <ColorSwatch value={o.color} onChange={(c) => setOverride(o._id, 'color', c)} />
-            <button onClick={() => removeOverride(o._id)} aria-label="Remove app override" title="Remove app override" className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+          {/* master */}
+          <div className="card card-pad" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div className="feat-ic"><Icon n="bell" /></div>
+              <div><div style={{ fontSize: 15, fontWeight: 600 }}>Notification flash</div><div className="subtle" style={{ fontSize: 12.5 }}>Briefly flash the strip when a desktop notification arrives</div></div>
+            </div>
+            <Toggle checked={n.enabled} onChange={(v) => set({ enabled: v })} />
           </div>
-        ))}
-        <button onClick={addOverride} className="self-start px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Add app</button>
-      </div>
 
-      {/* Keyword rules (Phone Link / forwarded) */}
-      <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
-        <h4 className="text-sm font-semibold text-white flex items-center gap-2"><Smartphone className="w-4 h-4 text-indigo-400" /> Keyword rules (phone / forwarded)</h4>
-        <p className="text-xs text-slate-500">
-          Phone notifications forwarded by Phone Link appear as “Phone Link”. Match a word in the notification text
-          (e.g. <span className="font-mono">instagram</span>) to give it a colour. Matched against the app name, title and body.
-        </p>
-        {draft.keyword_rules.length === 0 && <div className="text-xs text-slate-500">No keyword rules yet.</div>}
-        {draft.keyword_rules.map((r) => (
-          <div key={r._id} className="flex gap-2 items-center">
-            <input className="custom-input rounded-lg px-2 py-1.5 text-sm flex-1" placeholder="text contains… (e.g. instagram)"
-              value={r.keyword} onChange={(e) => setRule(r._id, 'keyword', e.target.value)} />
-            <ColorSwatch value={r.color} onChange={(c) => setRule(r._id, 'color', c)} />
-            <button onClick={() => removeRule(r._id)} aria-label="Remove keyword rule" title="Remove keyword rule" className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+          <div style={n.enabled ? {} : { opacity: 0.5, pointerEvents: 'none' }}>
+            <div className="grid-2">
+              <div className="card card-pad" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="card-title" style={{ marginBottom: 8 }}>Flash appearance</div>
+                <label className="field-row"><span className="fr-l">Colour mode</span>
+                  <select className="field" style={{ maxWidth: 200 }} value={n.color_mode} onChange={(e) => set({ color_mode: e.target.value })}>
+                    <option value="icon">Match app icon</option><option value="fixed">Fixed colour</option></select></label>
+                <div className="field-row"><span className="fr-l">Default colour</span><Swatch rgb={n.default_color} onChange={(c) => set({ default_color: c })} /></div>
+                <label className="field-row"><span className="fr-l">Brightness</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, maxWidth: 200 }}><input type="range" className="rng" style={{ flex: 1 }} min="0.1" max="1" step="0.05" value={n.brightness} onChange={(e) => set({ brightness: +e.target.value })} /><span className="mono" style={{ fontSize: 12, width: 34 }}>{Math.round(n.brightness * 100)}%</span></span></label>
+              </div>
+              <div className="card card-pad" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="card-title" style={{ marginBottom: 8 }}>Timing</div>
+                <div className="field-row"><span className="fr-l">Blink count</span><Stepper value={n.blink_count} onChange={(v) => set({ blink_count: v })} min={1} max={10} /></div>
+                <label className="field-row"><span className="fr-l">On duration <small>{n.on_ms}ms</small></span>
+                  <input type="range" className="rng" style={{ flex: 1, maxWidth: 170 }} min="50" max="600" step="10" value={n.on_ms} onChange={(e) => set({ on_ms: +e.target.value })} /></label>
+                <label className="field-row"><span className="fr-l">Off duration <small>{n.off_ms}ms</small></span>
+                  <input type="range" className="rng" style={{ flex: 1, maxWidth: 170 }} min="50" max="600" step="10" value={n.off_ms} onChange={(e) => set({ off_ms: +e.target.value })} /></label>
+                <button className="btn btn-sm" style={{ alignSelf: 'flex-start', marginTop: 4 }} onClick={() => testFlash(n.default_color)}><Icon n="zap" />Test flash</button>
+              </div>
+            </div>
+
+            <Section title="Behaviour" />
+            <div className="card card-pad" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div className="field-row"><span className="fr-l">Suppress during Do Not Disturb<small>Stay dark while Windows DND / Focus Assist is on</small></span><Toggle checked={n.suppress_during_dnd} onChange={(v) => set({ suppress_during_dnd: v })} /></div>
+              <div className="hairline" />
+              <div className="field-row"><span className="fr-l">Flash when screen locked<small>Allow flashes on the lock screen / while asleep</small></span><Toggle checked={n.flash_when_locked} onChange={(v) => set({ flash_when_locked: v })} /></div>
+              <div className="hairline" />
+              <div className="field-row"><span className="fr-l">De-dup window<small>Ignore repeat notifications within this window</small></span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Stepper value={n.dedup_window_s} onChange={(v) => set({ dedup_window_s: v })} min={0} max={60} /><span className="subtle">s</span></span></div>
+              <div className="hairline" />
+              <div className="field-row"><span className="fr-l">Min interval between flashes<small>Rate-limit bursts of alerts</small></span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Stepper value={n.min_flash_interval_s} onChange={(v) => set({ min_flash_interval_s: v })} min={0} max={30} /><span className="subtle">s</span></span></div>
+            </div>
+
+            <Section title="Per-app colours" count={n.overrides.length} />
+            <div className="stack">
+              {n.overrides.length === 0 ? <div className="card"><Empty icon="app-window" title="No app overrides">Pick a colour for specific apps so you know who’s pinging you at a glance.</Empty></div> :
+                <div className="tile-grid">
+                  {n.overrides.map((o, i) => (
+                    <div key={o._id} className="card card-pad" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
+                        <Swatch rgb={o.color} onChange={(c) => set({ overrides: n.overrides.map((x, idx) => (idx === i ? { ...x, color: c } : x)) })} />
+                        <input className="field" style={{ flex: 1 }} placeholder="app name or id" value={o.app} onChange={(e) => set({ overrides: n.overrides.map((x, idx) => (idx === i ? { ...x, app: e.target.value } : x)) })} />
+                      </div>
+                      <button className="btn btn-sm btn-danger icon-btn" onClick={() => set({ overrides: n.overrides.filter((_, idx) => idx !== i) })}><Icon n="trash-2" /></button>
+                    </div>
+                  ))}
+                </div>}
+              <div style={{ display: 'flex', gap: 10 }}><input className="field" placeholder="App name (e.g. Discord)" value={newApp} onChange={(e) => setNewApp(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && commitApp()} /><button className="btn btn-primary" onClick={commitApp}><Icon n="plus" />Add app</button></div>
+            </div>
+
+            <Section title="Keyword rules" count={n.keyword_rules.length} />
+            <div className="stack">
+              <div className="hint">Phone notifications forwarded by Phone Link appear as “Phone Link”. Match a word in the text (e.g. <span className="mono" style={{ color: 'var(--tx-2)' }}>instagram</span>) to give it a colour — matched against app name, title and body.</div>
+              {n.keyword_rules.length > 0 && (
+                <div className="tile-grid">
+                  {n.keyword_rules.map((k, i) => (
+                    <div key={k._id} className="card card-pad" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+                        <Swatch rgb={k.color} onChange={(c) => set({ keyword_rules: n.keyword_rules.map((x, idx) => (idx === i ? { ...x, color: c } : x)) })} />
+                        <input className="field mono" style={{ flex: 1 }} placeholder="text contains…" value={k.keyword} onChange={(e) => set({ keyword_rules: n.keyword_rules.map((x, idx) => (idx === i ? { ...x, keyword: e.target.value } : x)) })} />
+                      </div>
+                      <button className="btn btn-sm btn-danger icon-btn" onClick={() => set({ keyword_rules: n.keyword_rules.filter((_, idx) => idx !== i) })}><Icon n="trash-2" /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 10 }}><input className="field" placeholder="Keyword (e.g. urgent)" value={newKw} onChange={(e) => setNewKw(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && commitKw()} /><button className="btn btn-primary" onClick={commitKw}><Icon n="plus" />Add rule</button></div>
+            </div>
           </div>
-        ))}
-        <button onClick={addRule} className="self-start px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Add rule</button>
+        </div>
       </div>
-
-      <button onClick={() => updateSettings({ notifications: payload })} disabled={!dirty || saving}
-        className="btn-neon-blue px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 self-end disabled:opacity-40">
-        <Save className="w-4 h-4" /> {saving ? 'Saving…' : dirty ? 'Save changes' : 'Saved'}
-      </button>
-    </section>
+    </div>
   )
 }

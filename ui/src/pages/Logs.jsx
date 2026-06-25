@@ -1,51 +1,80 @@
-import React, { useEffect, useState, useRef } from 'react'
-import { Terminal, FolderOpen, Trash2, Search } from 'lucide-react'
+import React, { useEffect, useRef, useState } from 'react'
+import { Icon, PageHead, Empty } from '../components/shell'
 
-const LEVELS = ['ALL', 'DEBUG', 'INFO', 'WARNING', 'ERROR']
+const LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+const LEVEL_STYLE = {
+  DEBUG: ['#7d8597', 'var(--s3)'], INFO: ['#5fa8d8', 'rgba(95,168,216,.12)'],
+  WARNING: ['var(--warn)', 'var(--warn-bg)'], ERROR: ['var(--bad)', 'var(--bad-bg)'], CRITICAL: ['var(--bad)', 'var(--bad-bg)'],
+}
+
+// The service writes a plain-text log file; we tail it and best-effort split each
+// line into time / level / message for the styled view (raw fallback otherwise).
+function parseLine(line) {
+  const lvl = (line.match(/\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b/) || [])[1] || null
+  const ts = (line.match(/^\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)/) || [])[1] || ''
+  const msg = ts ? line.slice(line.indexOf(ts) + ts.length).replace(/^[\s,|-]+/, '') : line
+  return { raw: line, lvl, ts, msg }
+}
 
 export default function Logs() {
   const [raw, setRaw] = useState('')
   const [level, setLevel] = useState('ALL')
   const [query, setQuery] = useState('')
-  const endRef = useRef(null)
+  const [autoscroll, setAuto] = useState(true)
+  const boxRef = useRef(null)
 
   useEffect(() => {
-    const fetchLogs = async () => setRaw(await window.api.logs.read())
+    const fetchLogs = async () => { try { setRaw(await window.api.logs.read()) } catch (e) { /* offline */ } }
     fetchLogs()
     const timer = setInterval(fetchLogs, 2000)
     return () => clearInterval(timer)
   }, [])
 
   const lines = raw.split('\n').filter((ln) => {
+    if (!ln) return false
     if (level !== 'ALL' && !ln.includes(level)) return false
     if (query && !ln.toLowerCase().includes(query.toLowerCase())) return false
     return true
   })
 
-  useEffect(() => { if (endRef.current) endRef.current.scrollIntoView() }, [raw])
+  useEffect(() => { if (autoscroll && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight }, [raw, autoscroll, lines.length])
+
   const handleClear = async () => { await window.api.logs.clear(); setRaw('') }
 
   return (
-    <section className="glass-panel rounded-3xl p-8 flex flex-col animate-fade-up" style={{ height: 'calc(100vh - 8rem)' }}>
-      <div className="flex justify-between items-center mb-5 gap-3 flex-wrap">
-        <h3 className="text-lg font-semibold text-white flex items-center gap-2"><Terminal className="w-5 h-5 text-indigo-400" /> Logs</h3>
-        <div className="flex gap-2 items-center">
-          <select className="custom-input rounded-xl px-3 py-2 text-sm" value={level} onChange={(e) => setLevel(e.target.value)}>
-            {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
-          </select>
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-500" />
-            <input className="custom-input rounded-xl pl-9 pr-3 py-2 text-sm w-44" placeholder="Search…" value={query} onChange={(e) => setQuery(e.target.value)} />
+    <div className="main">
+      <PageHead crumb="System" title="Logs" sub="Live service output">
+        <button className="btn btn-sm" onClick={() => window.api.logs.openFolder()}><Icon n="folder-open" />Open folder</button>
+        <button className="btn btn-sm btn-danger" onClick={handleClear}><Icon n="trash-2" />Clear</button>
+      </PageHead>
+
+      <div className="content page-enter" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexShrink: 0 }}>
+          <div style={{ position: 'relative', flex: 1 }}>
+            <Icon n="search" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--faint)', pointerEvents: 'none' }} />
+            <input className="field" style={{ paddingLeft: 36 }} placeholder="Filter logs…" value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
-          <button onClick={() => window.api.logs.openFolder()} title="Open log folder"
-            className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300"><FolderOpen className="w-4 h-4" /></button>
-          <button onClick={handleClear} title="Clear logs" className="btn-neon-red px-3 py-2 rounded-xl"><Trash2 className="w-4 h-4" /></button>
+          <select className="field" style={{ width: 140 }} value={level} onChange={(e) => setLevel(e.target.value)}>
+            <option value="ALL">All levels</option>{LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+          <button className={`btn ${autoscroll ? 'btn-primary' : ''}`} onClick={() => setAuto((a) => !a)}><Icon n="arrow-down-to-line" />Auto-scroll</button>
+        </div>
+
+        <div ref={boxRef} className="card logbox">
+          {lines.length === 0 ? <Empty icon="terminal" title="No matching log lines">Adjust your filter or level to see output.</Empty> :
+            lines.map((ln, i) => {
+              const p = parseLine(ln)
+              const [c, bg] = LEVEL_STYLE[p.lvl] || LEVEL_STYLE.INFO
+              return (
+                <div key={i} className="logline">
+                  {p.ts && <span className="lt">{p.ts}</span>}
+                  {p.lvl ? <span className="ll" style={{ color: c, background: bg }}>{p.lvl}</span> : null}
+                  <span className="lm">{p.lvl || p.ts ? p.msg : ln}</span>
+                </div>
+              )
+            })}
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto rounded-xl border border-white/5 bg-black/40 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap text-emerald-300/90">
-        {lines.length ? lines.join('\n') : 'No matching log lines.'}
-        <div ref={endRef} />
-      </div>
-    </section>
+    </div>
   )
 }

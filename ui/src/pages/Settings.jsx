@@ -1,24 +1,30 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
-import { Save, Sliders, RefreshCw } from 'lucide-react'
-import Toggle from '../components/Toggle'
+import { Icon, PageHead, Toggle } from '../components/shell'
 
-const SECTIONS = [
-  ['capture', 'Capture'], ['device', 'Device'], ['zones', 'Zones'], ['color', 'Color'],
-  ['smoothing', 'Smoothing'], ['gpu', 'GPU'], ['logging', 'Logging'],
-  ['mqtt', 'MQTT / Home Assistant'],
+// Section nav (id, label, icon). "general" is hand-built; the rest are rendered
+// generically from whatever the backend config actually contains.
+const SETTINGS_TABS = [
+  ['general', 'General', 'sliders-horizontal'],
+  ['capture', 'Capture', 'monitor'],
+  ['device', 'Device', 'wifi'],
+  ['zones', 'Zones', 'layout-grid'],
+  ['color', 'Colour', 'palette'],
+  ['smoothing', 'Smoothing', 'wind'],
+  ['gpu', 'Performance', 'cpu'],
+  ['logging', 'Logging', 'file-text'],
+  ['mqtt', 'Integrations', 'plug'],
 ]
+
 const ENUMS = {
   'capture.method': ['wgc', 'dxgi', 'mss'],
   'capture.hdr.mode': ['auto', 'on', 'off'],
   'color.mode': ['average', 'edges', 'dominant', 'kmeans', 'saturation_weighted'],
   'gpu.prefer': ['cupy', 'opencv_cuda', 'torch', 'none'],
 }
-
-// Short hints for the non-obvious game-quality knobs.
 const HINTS = {
   'capture.hdr.mode': 'auto = tone-map only HDR displays; on = always; off = never',
-  'color.vibrance': '1.0 = off; higher makes game colors more vivid',
+  'color.vibrance': '1.0 = off; higher makes game colours more vivid',
   'mqtt.enabled': 'Connect to an MQTT broker (off by default)',
   'mqtt.broker': 'Broker host/IP; leave blank to disable',
   'mqtt.password': 'Stored in the OS keyring, never written to the config file',
@@ -28,46 +34,74 @@ const HINTS = {
   'mqtt.device_id': 'Stable Home Assistant device id (blank = hostname)',
 }
 
-function Field({ section, name, value, onChange }) {
+function SettingsField({ section, name, value, onChange }) {
   const key = `${section}.${name}`
   const label = name.replace(/_/g, ' ')
+  const hint = HINTS[key]
   let control
   if (typeof value === 'boolean') {
     control = <Toggle checked={value} onChange={(v) => onChange(name, v)} />
   } else if (ENUMS[key]) {
     control = (
-      <select className="custom-input rounded-lg px-2 py-1.5 text-sm" value={value} onChange={(e) => onChange(name, e.target.value)}>
-        {ENUMS[key].map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+      <select className="field set-val" style={{ width: 150 }} value={value} onChange={(e) => onChange(name, e.target.value)}>
+        {ENUMS[key].map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     )
   } else if (typeof value === 'number') {
-    control = <input className="custom-input rounded-lg px-2 py-1.5 text-sm w-28 text-right font-mono" type="number" step="any" value={value}
+    control = <input className="field set-val mono" style={{ width: 120 }} type="number" step="any" value={value}
       onChange={(e) => onChange(name, e.target.value === '' ? '' : Number(e.target.value))} />
   } else if (name === 'password') {
-    // Write-only: the backend never echoes it (stored in the keyring), so the
-    // value is always blank here; typing a new one sets it.
-    control = <input className="custom-input rounded-lg px-2 py-1.5 text-sm w-44" type="password" autoComplete="new-password"
+    control = <input className="field set-val mono" style={{ width: 200 }} type="password" autoComplete="new-password"
       placeholder="•••• (stored)" value={value ?? ''} onChange={(e) => onChange(name, e.target.value)} />
   } else {
-    control = <input className="custom-input rounded-lg px-2 py-1.5 text-sm w-44" type="text" value={value ?? ''} onChange={(e) => onChange(name, e.target.value)} />
+    control = <input className="field set-val mono" style={{ width: 200 }} type="text" value={value ?? ''} onChange={(e) => onChange(name, e.target.value)} />
   }
-  const hint = HINTS[key]
   return (
-    <label className="flex justify-between items-center gap-4 py-1.5">
-      <span className="text-slate-400 capitalize text-sm">
-        {label}
-        {hint && <span className="block text-[10px] text-slate-500 normal-case">{hint}</span>}
-      </span>
-      <span className="min-w-[120px] text-right">{control}</span>
-    </label>
+    <div className="set-row">
+      <div className="set-row-l"><span style={{ textTransform: 'capitalize' }}>{label}</span>{hint && <small>{hint}</small>}</div>
+      <div className="set-row-r">{control}</div>
+    </div>
+  )
+}
+
+function SectionCard({ id, title, icon, sec, onField }) {
+  const hasEnabled = typeof sec.enabled === 'boolean'
+  const dimmed = hasEnabled && !sec.enabled
+  return (
+    <div className="set-card-wrap" id={`setsec-${id}`}>
+      <div className="card set-card">
+        <div className="set-card-h">
+          <h3><Icon n={icon} />{title}</h3>
+          {hasEnabled && <Toggle checked={sec.enabled} onChange={(v) => onField([id, 'enabled'], v)} />}
+        </div>
+        <div className="set-card-body" style={dimmed ? { opacity: 0.42, pointerEvents: 'none' } : {}}>
+          {Object.entries(sec).map(([name, value]) => {
+            if (name === 'enabled' && hasEnabled) return null
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+              return (
+                <div key={name} className="set-sub">
+                  <div className="set-sub-h">{name.replace(/_/g, ' ')}</div>
+                  {Object.entries(value).map(([sub, sv]) => (
+                    <SettingsField key={sub} section={`${id}.${name}`} name={sub} value={sv} onChange={(n, v) => onField([id, name, n], v)} />
+                  ))}
+                </div>
+              )
+            }
+            return <SettingsField key={name} section={id} name={name} value={value} onChange={(n, v) => onField([id, n], v)} />
+          })}
+        </div>
+      </div>
+    </div>
   )
 }
 
 export default function Settings() {
-  const { settings, fetchSettings, updateSettings, saving } = useStore()
+  const { settings, fetchSettings, updateSettings, saving, toast } = useStore()
   const [draft, setDraft] = useState(null)
   const [autostart, setAutostart] = useState(false)
   const [update, setUpdate] = useState({ state: 'idle' })
+  const [active, setActive] = useState('general')
+  const scrollRef = useRef(null)
 
   useEffect(() => { if (!settings) fetchSettings() }, [])
   useEffect(() => { if (settings) setDraft(structuredClone(settings)) }, [settings])
@@ -79,9 +113,9 @@ export default function Settings() {
   }, [])
 
   const updateLabel = {
-    idle: 'Up to date', checking: 'Checking…', available: 'Update available',
+    idle: 'Automatic · up to date', checking: 'Checking…', available: 'Update available',
     downloading: `Downloading… ${update.percent ?? 0}%`, downloaded: 'Update ready', error: 'Check failed',
-  }[update.state] || 'Up to date'
+  }[update.state] || 'Automatic · up to date'
 
   const toggleAutostart = async () => {
     try {
@@ -90,11 +124,13 @@ export default function Settings() {
     } catch (e) { console.error(e) }
   }
 
-  if (!draft) return <section className="glass-panel rounded-3xl p-8 text-slate-400 animate-fade-up">Loading settings…</section>
+  if (!draft) {
+    return <div className="main"><PageHead crumb="Configuration" title="Settings" sub="Capture, colour science & system" /><div className="content"><div className="card card-pad subtle">Loading settings…</div></div></div>
+  }
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings)
-  // Immutable set at an arbitrary depth so nested config (e.g. capture.hdr.mode)
-  // edits without clobbering siblings.
+  // Only show tabs whose card actually renders (general + existing config sections).
+  const tabs = SETTINGS_TABS.filter(([id]) => id === 'general' || draft[id])
   const changePath = (path, val) => setDraft((d) => {
     const next = structuredClone(d)
     let o = next
@@ -103,52 +139,77 @@ export default function Settings() {
     return next
   })
 
+  const offsetOf = (el) => {
+    const sc = scrollRef.current
+    return el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop
+  }
+  const jump = (id) => {
+    const el = document.getElementById(`setsec-${id}`), sc = scrollRef.current
+    setActive(id)
+    if (!el || !sc) return
+    const target = Math.max(0, offsetOf(el) - 8)
+    const start = sc.scrollTop, dist = target - start, dur = 360
+    const ease = (p) => 1 - Math.pow(1 - p, 3)
+    // Use the rAF timestamp as the time base (no impure performance.now()).
+    let t0 = null
+    const stepFn = (now) => {
+      if (t0 === null) t0 = now
+      const p = Math.min(1, (now - t0) / dur)
+      sc.scrollTop = start + dist * ease(p)
+      if (p < 1) requestAnimationFrame(stepFn)
+    }
+    requestAnimationFrame(stepFn)
+  }
+  const onScroll = () => {
+    const sc = scrollRef.current; if (!sc) return
+    const y = sc.scrollTop + 70; let cur = tabs[0][0]
+    for (const [id] of tabs) { const el = document.getElementById(`setsec-${id}`); if (el && offsetOf(el) <= y) cur = id }
+    setActive(cur)
+  }
+
   return (
-    <section className="glass-panel rounded-3xl p-8 flex flex-col gap-4 animate-fade-up">
-      <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-white flex items-center gap-2"><Sliders className="w-5 h-5 text-indigo-400" /> Settings</h3>
-        <button onClick={() => updateSettings(draft)} disabled={!dirty || saving}
-          className="btn-neon-blue px-5 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2 disabled:opacity-40">
-          <Save className="w-4 h-4" /> {saving ? 'Saving…' : dirty ? 'Save changes' : 'Saved'}
-        </button>
-      </div>
+    <div className="main">
+      <PageHead crumb="Configuration" title="Settings" sub="Capture, colour science & system">
+        <button className="btn btn-sm" onClick={() => { setDraft(structuredClone(settings)); toast('Reverted unsaved changes') }} disabled={!dirty}><Icon n="rotate-ccw" />Revert</button>
+        <button className={`btn ${dirty ? 'btn-primary' : ''}`} disabled={!dirty || saving} onClick={() => { updateSettings(draft); toast('Settings saved') }}><Icon n={dirty ? 'save' : 'check'} />{saving ? 'Saving…' : dirty ? 'Save changes' : 'Saved'}</button>
+      </PageHead>
 
-      <div className="glass-panel rounded-2xl p-4 flex justify-between items-center">
-        <span className="text-slate-400 text-sm">Start on login</span>
-        <Toggle checked={autostart} onChange={toggleAutostart} />
-      </div>
-
-      <div className="glass-panel rounded-2xl p-4 flex justify-between items-center">
-        <span className="text-slate-400 text-sm">Software updates — {updateLabel}</span>
-        {update.state === 'downloaded' ? (
-          <button onClick={() => window.api.updater.install()} className="btn-neon-blue px-4 py-2 rounded-xl text-sm font-semibold">Restart to update</button>
-        ) : (
-          <button onClick={() => window.api.updater.check()} disabled={update.state === 'checking' || update.state === 'downloading'}
-            className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2 disabled:opacity-40">
-            <RefreshCw className={`w-4 h-4 ${update.state === 'checking' ? 'spin' : ''}`} /> Check for updates
-          </button>
-        )}
-      </div>
-
-      {SECTIONS.filter(([s]) => draft[s]).map(([section, title]) => (
-        <div key={section} className="glass-panel rounded-2xl p-5">
-          <h4 className="text-sm font-semibold text-white mb-2">{title}</h4>
-          {Object.entries(draft[section]).map(([name, value]) => (
-            (value && typeof value === 'object' && !Array.isArray(value)) ? (
-              <div key={name} className="mt-2 pl-3 border-l border-white/10">
-                <h5 className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1">{name.replace(/_/g, ' ')}</h5>
-                {Object.entries(value).map(([sub, sv]) => (
-                  <Field key={sub} section={`${section}.${name}`} name={sub} value={sv}
-                    onChange={(n, v) => changePath([section, name, n], v)} />
-                ))}
-              </div>
-            ) : (
-              <Field key={name} section={section} name={name} value={value}
-                onChange={(n, v) => changePath([section, n], v)} />
-            )
+      <div className="content settings-content page-enter" ref={scrollRef} onScroll={onScroll}>
+        <div className="settings-nav">
+          {tabs.map(([id, label, icon]) => (
+            <button key={id} className={`set-tab ${active === id ? 'active' : ''}`} onClick={() => jump(id)}><Icon n={icon} />{label}</button>
           ))}
         </div>
-      ))}
-    </section>
+
+        <div className="settings-grid">
+          {/* General — autostart + updates */}
+          <div className="set-card-wrap" id="setsec-general">
+            <div className="card set-card">
+              <div className="set-card-h"><h3><Icon n="sliders-horizontal" />General</h3></div>
+              <div className="set-card-body">
+                <div className="set-row">
+                  <div className="set-row-l"><span>Start on login</span><small>Launch Ambi Light automatically when you log in</small></div>
+                  <div className="set-row-r"><Toggle checked={autostart} onChange={toggleAutostart} /></div>
+                </div>
+                <div className="hairline" />
+                <div className="set-row">
+                  <div className="set-row-l"><span>Software updates</span><small>{updateLabel}</small></div>
+                  <div className="set-row-r">
+                    {update.state === 'downloaded'
+                      ? <button className="btn btn-sm btn-primary" onClick={() => window.api.updater.install()}>Restart to update</button>
+                      : <button className="btn btn-sm" onClick={() => window.api.updater.check()} disabled={update.state === 'checking' || update.state === 'downloading'}><Icon n="refresh-cw" {...(update.state === 'checking' ? { className: 'spin' } : {})} />Check for updates</button>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Schema-driven sections */}
+          {SETTINGS_TABS.filter(([id]) => id !== 'general' && draft[id]).map(([id, title, icon]) => (
+            <SectionCard key={id} id={id} title={title} icon={icon} sec={draft[id]} onField={changePath} />
+          ))}
+        </div>
+      </div>
+    </div>
   )
 }

@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import { useStore } from '../store'
-import { Layers, Check, Trash2, Plus, Download, Upload, Repeat, Save } from 'lucide-react'
-import Toggle from '../components/Toggle'
+import { Icon, PageHead, Section, Empty, Toggle } from '../components/shell'
 
 const AP_DEFAULTS = { enabled: false, poll_interval: 2.0, default_profile: '', rules: [] }
 
 function AutoSwitchPanel({ profiles }) {
-  const { settings, fetchSettings, updateSettings, saving } = useStore()
+  const { settings, fetchSettings, updateSettings, saving, toast } = useStore()
   const [draft, setDraft] = useState(null)
   const [current, setCurrent] = useState(null)
 
@@ -29,50 +28,32 @@ function AutoSwitchPanel({ profiles }) {
   const removeRule = (i) => setDraft((d) => ({ ...d, rules: d.rules.filter((_, idx) => idx !== i) }))
 
   return (
-    <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
-      <div className="flex justify-between items-center">
-        <h4 className="text-sm font-semibold text-white flex items-center gap-2"><Repeat className="w-4 h-4 text-indigo-400" /> Auto-switch by app</h4>
-        <Toggle checked={!!draft.enabled} onChange={(v) => setDraft((d) => ({ ...d, enabled: v }))} label="Enabled" />
-      </div>
-
-      <div className="text-xs text-slate-500">
-        Foreground app: <span className="text-slate-200 font-mono">{current || 'unknown'}</span>
-        {current && (
-          <button onClick={() => addRule(current)} className="ml-2 px-2 py-0.5 rounded bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-xs inline-flex items-center gap-1">
-            <Plus className="w-3 h-3" /> rule for this app
-          </button>
-        )}
-      </div>
-
-      <label className="flex items-center gap-3 text-sm">
-        <span className="text-slate-400 min-w-[110px]">Default profile</span>
-        <select className="custom-input rounded-lg px-2 py-1.5 text-sm" value={draft.default_profile} onChange={(e) => setDraft((d) => ({ ...d, default_profile: e.target.value }))}>
-          <option value="">(leave unchanged)</option>
-          {profiles.map((p) => <option key={p} value={p}>{p}</option>)}
-        </select>
-      </label>
-
-      <div className="flex flex-col gap-2">
-        {draft.rules.length === 0 && <div className="text-xs text-slate-500">No rules — add one to map an app to a profile.</div>}
-        {draft.rules.map((r, i) => (
-          <div key={i} className="flex gap-2 items-center">
-            <input className="custom-input rounded-lg px-2 py-1.5 text-sm flex-[2]" placeholder="app contains… (e.g. game.exe)" value={r.match} onChange={(e) => setRule(i, 'match', e.target.value)} />
-            <span className="text-slate-500">→</span>
-            <select className="custom-input rounded-lg px-2 py-1.5 text-sm flex-1" value={r.profile} onChange={(e) => setRule(i, 'profile', e.target.value)}>
-              <option value="">(select profile)</option>
-              {profiles.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <button onClick={() => removeRule(i)} className="btn-neon-red px-2.5 py-1.5 rounded-lg"><Trash2 className="w-4 h-4" /></button>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex gap-2">
-        <button onClick={() => addRule()} className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Add rule</button>
-        <button onClick={() => updateSettings({ auto_profile: draft })} disabled={!dirty || saving}
-          className="btn-neon-blue px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 ml-auto disabled:opacity-40">
-          <Save className="w-4 h-4" /> {saving ? 'Saving…' : dirty ? 'Save rules' : 'Saved'}
-        </button>
+    <div className="card" style={{ marginTop: 'var(--gap)' }}>
+      <div className="card-h"><h3><Icon n="repeat" />Auto-switch by app</h3><Toggle checked={!!draft.enabled} onChange={(v) => setDraft((d) => ({ ...d, enabled: v }))} /></div>
+      <div className="card-pad" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div className="hint">
+          Foreground app: <span className="mono" style={{ color: 'var(--tx-2)' }}>{current || 'unknown'}</span>
+          {current && <button className="btn btn-sm" style={{ marginLeft: 10 }} onClick={() => addRule(current)}><Icon n="plus" />rule for this app</button>}
+        </div>
+        <label className="field-row" style={{ padding: 0 }}><span className="fr-l">Default profile</span>
+          <select className="field" style={{ maxWidth: 220 }} value={draft.default_profile} onChange={(e) => setDraft((d) => ({ ...d, default_profile: e.target.value }))}>
+            <option value="">(leave unchanged)</option>{profiles.map((p) => <option key={p} value={p}>{p}</option>)}</select></label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {draft.rules.length === 0 && <div className="hint">No rules — add one to map an app to a profile.</div>}
+          {draft.rules.map((r, i) => (
+            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input className="field mono" style={{ flex: 2 }} placeholder="app contains… (e.g. game.exe)" value={r.match} onChange={(e) => setRule(i, 'match', e.target.value)} />
+              <Icon n="arrow-right" style={{ color: 'var(--faint)' }} />
+              <select className="field" style={{ flex: 1 }} value={r.profile} onChange={(e) => setRule(i, 'profile', e.target.value)}>
+                <option value="">(select profile)</option>{profiles.map((p) => <option key={p} value={p}>{p}</option>)}</select>
+              <button className="btn btn-sm btn-danger icon-btn" onClick={() => removeRule(i)}><Icon n="trash-2" /></button>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <button className="btn btn-sm" onClick={() => addRule()}><Icon n="plus" />Add rule</button>
+          <button className="btn btn-sm btn-primary" onClick={() => { updateSettings({ auto_profile: draft }); toast('Auto-switch rules saved') }} disabled={!dirty || saving}><Icon n="save" />{dirty ? 'Save rules' : 'Saved'}</button>
+        </div>
       </div>
     </div>
   )
@@ -84,7 +65,7 @@ export default function Profiles() {
 
   useEffect(() => {
     fetchProfiles()
-    const t = setInterval(fetchProfiles, 4000)  // reflect auto-switch changes
+    const t = setInterval(fetchProfiles, 4000) // reflect auto-switch changes
     return () => clearInterval(t)
   }, [])
 
@@ -100,42 +81,45 @@ export default function Profiles() {
   }
 
   return (
-    <section className="glass-panel rounded-3xl p-8 flex flex-col gap-4 animate-fade-up">
-      <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-white flex items-center gap-2"><Layers className="w-5 h-5 text-indigo-400" /> Profiles</h3>
-        <button onClick={handleImport} title="Import profile from file"
-          className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm flex items-center gap-2"><Upload className="w-4 h-4" /> Import</button>
-      </div>
+    <div className="main">
+      <PageHead crumb="Configuration" title="Profiles" sub="Saved configurations & automatic switching">
+        <button className="btn btn-sm" onClick={handleImport}><Icon n="upload" />Import</button>
+      </PageHead>
 
-      {profiles.length === 0 ? (
-        <div className="glass-panel rounded-2xl p-6 text-center text-slate-500">No saved profiles yet.</div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {profiles.map((name) => {
-            const active = name === activeProfile
-            return (
-            <div key={name} className={`glass-panel rounded-2xl p-4 flex justify-between items-center ${active ? 'ring-1 ring-indigo-500/60 active-device-pulse' : ''}`}>
-              <span className="font-semibold capitalize flex items-center gap-2">
-                {name}
-                {active && <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 bg-emerald-400/10 border border-emerald-400/20 px-2 py-0.5 rounded">Active</span>}
-              </span>
-              <div className="flex gap-2">
-                <button onClick={() => applyProfile(name)} className={`px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 ${active ? 'nav-item-active' : 'btn-neon-blue'}`}><Check className="w-4 h-4" /> {active ? 'Active' : 'Apply'}</button>
-                <button onClick={() => window.api.profiles.export(name)} title="Export" className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300"><Download className="w-4 h-4" /></button>
-                <button onClick={() => deleteProfile(name)} title="Delete" className="btn-neon-red px-3 py-2 rounded-xl"><Trash2 className="w-4 h-4" /></button>
-              </div>
+      <div className="content content-narrow page-enter">
+        <div className="stack">
+          <Section title="Saved profiles" count={profiles.length} />
+          {profiles.length === 0 ? (
+            <div className="card"><Empty icon="layers" title="No profiles yet">Save your current settings as a profile to switch between setups instantly.</Empty></div>
+          ) : (
+            <div className="tile-grid">
+              {profiles.map((name) => {
+                const active = name === activeProfile
+                return (
+                  <div key={name} className={`card prof-tile ${active ? 'active' : ''}`} style={active ? { borderColor: 'var(--accent-22)' } : {}}>
+                    <div className="prof-tile-top">
+                      <span className="prof-tile-ic"><Icon n="layers" /></span>
+                      <span className="prof-tile-name">{name}</span>
+                      {active && <span className="tag good" style={{ marginLeft: 'auto' }}><span className="d" />Active</span>}
+                    </div>
+                    <div className="prof-tile-foot">
+                      <button className={`btn btn-sm ${active ? '' : 'btn-primary'}`} onClick={() => applyProfile(name)} disabled={active}><Icon n="check" />{active ? 'Active' : 'Apply'}</button>
+                      <button className="btn btn-sm icon-btn" title="Export" onClick={() => window.api.profiles.export(name)}><Icon n="download" /></button>
+                      <button className="btn btn-sm btn-danger icon-btn" title="Delete" onClick={() => deleteProfile(name)}><Icon n="trash-2" /></button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
-            )
-          })}
+          )}
+          <form onSubmit={handleSave} style={{ display: 'flex', gap: 10 }}>
+            <input className="field" placeholder="Save current settings as…" value={newName} onChange={(e) => setNewName(e.target.value)} />
+            <button type="submit" className="btn btn-primary"><Icon n="plus" />Save</button>
+          </form>
+
+          <AutoSwitchPanel profiles={profiles} />
         </div>
-      )}
-
-      <form onSubmit={handleSave} className="flex gap-2 items-center">
-        <input className="custom-input rounded-xl px-3 py-2.5 text-sm flex-1" placeholder="Save current settings as…" value={newName} onChange={(e) => setNewName(e.target.value)} />
-        <button type="submit" className="btn-neon-blue px-5 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2"><Plus className="w-4 h-4" /> Save</button>
-      </form>
-
-      <AutoSwitchPanel profiles={profiles} />
-    </section>
+      </div>
+    </div>
   )
 }
