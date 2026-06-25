@@ -155,6 +155,29 @@ class MqttConfig:
 
 
 @dataclass
+class OwnershipConfig:
+    """Cross-instance device exclusivity (cooperative ownership).
+
+    When two Ambilight instances on the same LAN can both reach a controller,
+    the hardware (MagicHome accepts any TCP client; WLED is stateless UDP) cannot
+    arbitrate — so instances cooperatively claim devices and a deterministic rule
+    decides who drives, preventing last-packet-wins flicker. A claim is keyed by
+    device identity (MAC for magichome, IP for wled) and kept alive by a
+    heartbeat; a crashed owner's claim expires after ``ttl`` and another instance
+    takes over. Coordination uses MQTT when a broker is configured, else a LAN
+    UDP announce. Off changes nothing for single-instance setups (you always win
+    an unclaimed device).
+    """
+    enabled: bool = True
+    instance_id: str = ""            # stable per-install UUID; auto-minted on first load
+    instance_label: str = ""         # human label for the UI; blank → hostname
+    priority: int = 0                # higher wins a contested device
+    heartbeat_interval: float = 10.0  # seconds between claim re-announcements
+    ttl: float = 30.0                # a claim older than this (no heartbeat) is stale
+    lan_port: int = 48900            # UDP port for the LAN announce fallback
+
+
+@dataclass
 class NotificationConfig:
     """Flash the LEDs when an OS notification arrives (Notification Flash).
 
@@ -198,6 +221,7 @@ class AppConfig:
     gpu: GpuConfig = field(default_factory=GpuConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
+    ownership: OwnershipConfig = field(default_factory=OwnershipConfig)
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
 
@@ -303,10 +327,18 @@ class ConfigManager:
         if not isinstance(config, AppConfig):
             config = AppConfig()
 
+        # Remember whether the ownership instance_id was already present so we can
+        # persist a freshly-minted one (normalize fills it in-memory below).
+        id_before = str(getattr(config.ownership, "instance_id", "") or "").strip()
+
         cls._normalize_and_validate(config)
 
         cls._instance = config
         cls._loaded_path = str(path)
+        # Persist a newly-minted instance_id so the install's identity is stable
+        # across restarts (required for sticky ownership claims).
+        if not id_before and config.ownership.instance_id:
+            cls.save()
         return config
 
     # ------------------------------------------------------------------
@@ -514,6 +546,45 @@ class ConfigManager:
             str(k): _norm_color(v, [255, 255, 255], f"notifications.app_overrides[{k}]")
             for k, v in raw_overrides.items()
         }
+
+        # 7. Ownership — mint a stable per-install instance_id (persisted by
+        #    load()/update() so it survives restarts), default the label to the
+        #    hostname (mirrors mqtt.device_id), and clamp the timing knobs so a
+        #    bad value can't make heartbeats spin or claims never expire.
+        import socket
+        import uuid
+
+        o = config.ownership
+        if not str(o.instance_id or "").strip():
+            o.instance_id = uuid.uuid4().hex
+        else:
+            o.instance_id = str(o.instance_id).strip()
+        if not str(o.instance_label or "").strip():
+            try:
+                o.instance_label = socket.gethostname() or o.instance_id[:8]
+            except Exception:
+                o.instance_label = o.instance_id[:8]
+        try:
+            o.priority = int(o.priority)
+        except (TypeError, ValueError):
+            o.priority = 0
+        try:
+            o.heartbeat_interval = max(1.0, float(o.heartbeat_interval))
+        except (TypeError, ValueError):
+            o.heartbeat_interval = 10.0
+        try:
+            # ttl must exceed the heartbeat or a live owner's claim would expire
+            # between beats; floor it at 2× the interval.
+            o.ttl = max(float(o.ttl), 2.0 * o.heartbeat_interval)
+        except (TypeError, ValueError):
+            o.ttl = max(30.0, 2.0 * o.heartbeat_interval)
+        try:
+            o.lan_port = int(o.lan_port)
+        except (TypeError, ValueError):
+            o.lan_port = 48900
+        if not 1 <= o.lan_port <= 65535:
+            logger.warning("[Config] ownership.lan_port=%s out of range; using 48900.", o.lan_port)
+            o.lan_port = 48900
 
     @classmethod
     def get(cls) -> AppConfig:
