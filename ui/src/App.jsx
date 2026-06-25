@@ -1,147 +1,36 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { useStore } from './store'
-import {
-  Activity, Cpu, MonitorPlay, Monitor, Zap, ServerCrash, Play, Square, RotateCw, Clock, Power,
-  AlertTriangle, ShieldAlert, CheckCircle2, Sparkles,
-} from 'lucide-react'
+import { TitleBar, Sidebar, Toasts } from './components/shell'
+import { serviceAction } from './shared/service'
+import Wizard from './components/Wizard'
+import Dashboard from './pages/Dashboard'
 import Devices from './pages/Devices'
-import Settings from './pages/Settings'
+import Zones from './pages/Zones'
 import Profiles from './pages/Profiles'
 import Effects from './pages/Effects'
 import Notifications from './pages/Notifications'
+import Settings from './pages/Settings'
 import Logs from './pages/Logs'
 import Diagnostics from './pages/Diagnostics'
-import Onboarding from './pages/Onboarding'
-import ZonePreview from './components/ZonePreview'
-import ZoneEditor from './components/ZoneEditor'
-import UpdateBanner from './components/UpdateBanner'
 
-const TABS = ['dashboard', 'devices', 'zones', 'profiles', 'effects', 'notifications', 'settings', 'logs', 'diagnostics']
-
-// [label, mode, params]
-const MODES = [
-  ['Screen Sync', 'screen_sync', undefined],
-  ['Rainbow', 'rainbow', { speed: 1.0 }],
-  ['Candle', 'candle', undefined],
-  ['Audio', 'audio', { mode: 'level' }],
-  ['Sunrise', 'sunrise', { duration: 300 }],
-  ['Sunset', 'sunset', { duration: 300 }],
-  ['Ocean', 'ocean', undefined],
-  ['Ambient', 'ambient', undefined],
-]
-
-const STATUS_STYLES = {
-  connected: { wrap: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400', dot: 'bg-emerald-500', ping: 'bg-emerald-400', label: 'Service Online' },
-  connecting: { wrap: 'bg-blue-500/10 border-blue-500/20 text-blue-400', dot: 'bg-blue-500', ping: 'bg-blue-400', label: 'Connecting…' },
-  disconnected: { wrap: 'bg-red-500/10 border-red-500/20 text-red-400', dot: 'bg-red-500', ping: '', label: 'Service Offline' },
+const PAGES = {
+  dashboard: Dashboard, devices: Devices, zones: Zones, profiles: Profiles, effects: Effects,
+  notifications: Notifications, settings: Settings, logs: Logs, diagnostics: Diagnostics,
 }
 
-// Translate the pipeline's capture-health metrics into a human banner. The
-// strip can be silently dark even while the service is "online" — a fullscreen
-// game on the MSS backend (or DRM content) yields black frames — so we surface
-// the cause and the fix rather than a flat green "active".
-function CaptureHealthBanner({ metrics }) {
-  const backend = (metrics.capture_backend || '').toUpperCase()
-  const hdr = !!metrics.hdr_active
-  const reason = metrics.capture_reason || 'ok'
-  const captureOk = metrics.capture_ok !== false
-
-  let tone, Icon, text
-  if (!captureOk && reason === 'black') {
-    tone = 'bg-red-500/10 border-red-500/30 text-red-300'; Icon = AlertTriangle
-    text = 'Not syncing — capture is black. A fullscreen game on the MSS backend renders black; install the WGC backend (windows-capture) for proper capture.'
-  } else if (!captureOk && reason === 'drm_suspected') {
-    tone = 'bg-amber-500/10 border-amber-500/30 text-amber-300'; Icon = ShieldAlert
-    text = 'Not syncing — the screen is black. DRM-protected content (Netflix, Disney+, etc.) is blocked by Windows and can’t be captured.'
-  } else if (!captureOk && reason === 'no_frames') {
-    tone = 'bg-red-500/10 border-red-500/30 text-red-300'; Icon = AlertTriangle
-    text = 'Not syncing — capture is producing no frames. Check the selected monitor in Devices, or that a capture backend is available.'
-  } else if (!captureOk) {
-    tone = 'bg-red-500/10 border-red-500/30 text-red-300'; Icon = AlertTriangle
-    text = 'Not syncing — capture is unavailable.'
-  } else if (metrics.degraded || metrics.capture_degraded) {
-    tone = 'bg-amber-500/10 border-amber-500/30 text-amber-300'; Icon = AlertTriangle
-    text = 'Capture fell back to MSS — fullscreen games and overlay video may appear black. Install windows-capture for the WGC backend.'
-  } else {
-    tone = 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'; Icon = CheckCircle2
-    text = `Syncing${backend ? ` • ${backend}` : ''}`
-  }
-
-  return (
-    <div className={`flex items-center gap-2 border px-3 py-2 rounded-xl text-xs font-medium ${tone}`}>
-      <Icon className="w-4 h-4 shrink-0" />
-      <span className="min-w-0">{text}</span>
-      {hdr && (
-        <span className="ml-auto shrink-0 inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-fuchsia-300 bg-fuchsia-500/10 border border-fuchsia-500/30 px-2 py-0.5 rounded-full">
-          <Sparkles className="w-3 h-3" /> HDR
-        </span>
-      )}
-    </div>
-  )
+// metrics.color → "#rrggbb"
+const liveHexOf = (c) => {
+  if (!Array.isArray(c)) return '#3a3f4a'
+  return '#' + c.map((x) => Math.max(0, Math.min(255, x | 0)).toString(16).padStart(2, '0')).join('')
 }
 
-function MetricCard({ title, value, unit, icon: Icon, delay }) {
-  return (
-    <div className="glass-panel p-5 rounded-2xl flex flex-col justify-between min-h-[120px] transition-transform hover:scale-[1.02] metric-card-animate animate-fade-up" style={{ animationDelay: delay }}>
-      <div className="flex justify-between items-start">
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{title}</span>
-        {Icon && <Icon className="w-4 h-4 text-slate-500" />}
-      </div>
-      <div className="flex items-baseline space-x-1">
-        <span className="text-2xl font-bold text-blue-400">{value}</span>
-        <span className="text-xs font-semibold text-slate-500">{unit}</span>
-      </div>
-    </div>
-  )
-}
-
-// At-a-glance "what's actually capturing" — no more guessing from the logs.
-// WGC/DXGI are the good backends (emerald); MSS is the degraded fallback (amber:
-// fullscreen games / overlay video render black on it); not syncing or no backend
-// yet reads neutral ("Idle"/"—"); an unrecognised backend is shown neutral too
-// rather than implying it's healthy. Backend comes straight from the live metrics
-// stream (pipeline → capture_backend).
-function CaptureSourceCard({ metrics, delay }) {
-  const raw = (metrics.capture_backend || '').toLowerCase()
-  const syncing = metrics.mode === 'screen_sync'
-
-  let label, valueClass, sub
-  if (!syncing) {
-    label = 'Idle'; valueClass = 'text-slate-400'; sub = 'not syncing'
-  } else if (!raw) {
-    label = '—'; valueClass = 'text-slate-400'; sub = 'starting…'
-  } else if (raw === 'mss') {
-    label = 'MSS'; valueClass = 'text-amber-400'; sub = 'fallback • may be black'
-  } else if (raw === 'wgc') {
-    label = 'WGC'; valueClass = 'text-emerald-400'; sub = 'full capture'
-  } else if (raw === 'dxgi') {
-    label = 'DXGI'; valueClass = 'text-emerald-400'; sub = 'GPU capture'
-  } else {
-    // Unknown backend: neutral, not green — don't imply a confirmed-healthy state.
-    label = raw.toUpperCase(); valueClass = 'text-slate-400'; sub = 'unknown backend'
-  }
-
-  return (
-    <div className="glass-panel p-5 rounded-2xl flex flex-col justify-between min-h-[120px] transition-transform hover:scale-[1.02] metric-card-animate animate-fade-up" style={{ animationDelay: delay }}>
-      <div className="flex justify-between items-start">
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Capture Source</span>
-        <Monitor className="w-4 h-4 text-slate-500" />
-      </div>
-      <div className="flex flex-col">
-        <span className={`text-2xl font-bold leading-tight ${valueClass}`}>{label}</span>
-        {sub && <span className="text-[10px] font-semibold text-slate-500 mt-0.5">{sub}</span>}
-      </div>
-    </div>
-  )
-}
-
-function App() {
-  const { status, metrics, settings, setStatus, setMetrics, fetchSettings } = useStore()
-  const [activeTab, setActiveTab] = useState('dashboard')
-  const [showOnboarding, setShowOnboarding] = useState(false)
+export default function App() {
+  const { status, metrics, settings, ui, setUiPref, toasts, setStatus, setMetrics, fetchSettings } = useStore()
+  const [tab, setTab] = useState('dashboard')
+  const [wizardOpen, setWizardOpen] = useState(false)
 
   useEffect(() => {
-    window.api.onboarding?.get().then((done) => setShowOnboarding(!done)).catch(() => {})
+    window.api.onboarding?.get().then((done) => setWizardOpen(!done)).catch(() => {})
     fetchSettings()
     const checkStatus = async () => {
       try { setStatus(await window.api.service.status()) } catch (e) { setStatus('disconnected') }
@@ -173,177 +62,58 @@ function App() {
     }
   }, [])
 
-  const handleService = async (action) => {
-    try { setStatus('connecting'); await window.api.service[action]() } catch (e) { console.error(`service ${action} failed`, e) }
-  }
-  const setMode = (mode, params) => useStore.getState().setMode(mode, params)
-
-  const st = STATUS_STYLES[status] || STATUS_STYLES.disconnected
-  const isOff = metrics.mode === 'off'
   const online = status === 'connected'
+  const isOff = metrics.mode === 'off'
+  const liveHex = useMemo(() => liveHexOf(metrics.color), [metrics.color])
+
+  // Effective accent: echo the live LED when enabled & syncing, else the saved accent.
+  const accent = (ui.accentFollowsLive && !isOff && status !== 'disconnected') ? liveHex : ui.accent
+  const rootStyle = {
+    '--accent': accent,
+    '--live': (isOff || status === 'disconnected') ? '#3a3f4a' : liveHex,
+  }
+
+  const setMode = useStore.getState().setMode
+  const Page = PAGES[tab] || Dashboard
 
   return (
-    <div className="flex h-screen w-full overflow-hidden antialiased">
-      {showOnboarding && <Onboarding onDone={() => setShowOnboarding(false)} />}
-
-      {/* Sidebar */}
-      <aside className="w-64 xl:w-72 glass-panel border-r border-white/10 flex flex-col p-5 xl:p-6 gap-5 xl:gap-6 shrink-0 overflow-y-auto z-10">
-        {/* Brand */}
-        <div className="flex items-center space-x-3 px-2">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/30"
-            style={{ background: 'linear-gradient(135deg, #6366f1, #a855f7)' }}>
-            <Zap className="w-5 h-5 text-white" />
-          </div>
-          <h1 className="text-xl font-bold tracking-tight text-white">Ambient</h1>
+    <div className="ambi-root"
+      data-theme={ui.theme}
+      data-density={ui.density === 'compact' ? 'compact' : 'comfortable'}
+      data-glass="1"
+      data-side={ui.sidebarCollapsed ? 'collapsed' : 'expanded'}
+      style={rootStyle}>
+      <div className="app">
+        <TitleBar
+          online={online}
+          ip={settings?.device?.ip}
+          theme={ui.theme}
+          onToggleTheme={() => setUiPref('theme', ui.theme === 'dark' ? 'light' : 'dark')}
+          onMin={() => window.api.window?.minimize?.()}
+          onMax={() => window.api.window?.maximize?.()}
+          onClose={() => window.api.window?.close?.()}
+        />
+        <div className="body">
+          <Sidebar
+            tab={tab} setTab={setTab}
+            online={online}
+            managedCount={settings?.devices?.length || 0}
+            mode={metrics.mode}
+            setMode={setMode}
+            settings={settings}
+            onStart={() => serviceAction('start')}
+            onStop={() => serviceAction('stop')}
+            onRestart={() => serviceAction('restart')}
+            onOpenWizard={() => setWizardOpen(true)}
+            collapsed={ui.sidebarCollapsed}
+            setCollapsed={(v) => setUiPref('sidebarCollapsed', v)}
+          />
+          <Page />
         </div>
+      </div>
 
-        {/* Status */}
-        <div className={`flex items-center space-x-2 border px-3 py-2 rounded-lg ${st.wrap}`}>
-          <span className="relative flex h-2 w-2">
-            {st.ping && <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${st.ping}`} />}
-            <span className={`relative inline-flex rounded-full h-2 w-2 ${st.dot}`} />
-          </span>
-          <span className="text-[10px] font-bold uppercase tracking-widest">{st.label}</span>
-        </div>
-
-        {/* Power toggle */}
-        <button onClick={() => setMode(isOff ? 'screen_sync' : 'off')} disabled={!online}
-          className={`flex items-center justify-center gap-2 w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
-            isOff ? 'bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10'
-                  : 'text-white'} ${isOff ? '' : 'nav-item-active'}`}>
-          <Power className="w-4 h-4" /> {isOff ? 'Lights Off — Turn On' : 'Turn Lights Off'}
-        </button>
-
-        {/* Quick controls */}
-        <div className="grid grid-cols-3 gap-2">
-          <button title="Start" onClick={() => handleService('start')} disabled={online}
-            className="glass-panel hover:bg-white/10 transition-colors p-2 rounded-lg flex justify-center items-center disabled:opacity-40">
-            <Play className="w-4 h-4 text-emerald-400" />
-          </button>
-          <button title="Stop" onClick={() => handleService('stop')} disabled={status === 'disconnected'}
-            className="glass-panel bg-red-500/10 hover:bg-red-500/20 transition-colors p-2 rounded-lg flex justify-center items-center border border-red-500/30 disabled:opacity-40">
-            <Square className="w-4 h-4 text-red-400" />
-          </button>
-          <button title="Restart" onClick={() => handleService('restart')}
-            className="glass-panel hover:bg-white/10 transition-colors p-2 rounded-lg flex justify-center items-center">
-            <RotateCw className="w-4 h-4 text-blue-400" />
-          </button>
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 space-y-1">
-          {TABS.map((tab) => (
-            <button key={tab} onClick={() => setActiveTab(tab)}
-              className={`w-full text-left flex items-center px-4 py-2.5 text-sm rounded-xl transition-all capitalize ${
-                activeTab === tab ? 'nav-item-active font-semibold' : 'text-slate-400 hover:bg-white/5 hover:text-white font-medium'}`}>
-              {tab}
-            </button>
-          ))}
-        </nav>
-
-        {/* Modes */}
-        <div className="mt-auto pt-6 border-t border-white/5">
-          <h2 className="text-[10px] uppercase tracking-[0.2em] font-bold text-slate-500 mb-4">Modes</h2>
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            {MODES.map(([label, mode, params]) => (
-              <button key={label} onClick={() => setMode(mode, { ...(params || {}), ...(settings?.effects?.params?.[mode] || {}) })}
-                className={`text-[11px] py-2 px-1 rounded-lg border transition-colors ${
-                  metrics.mode === mode ? 'nav-item-active border-transparent font-semibold'
-                                        : 'bg-white/5 hover:bg-white/10 border-white/5 text-slate-300'}`}>
-                {label}
-              </button>
-            ))}
-          </div>
-          <button onClick={() => setShowOnboarding(true)}
-            className="w-full bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 text-[11px] py-2.5 rounded-xl border border-indigo-500/30 transition-all font-bold uppercase tracking-wider">
-            Setup wizard
-          </button>
-        </div>
-      </aside>
-
-      {/* Main */}
-      <main className="flex-1 min-w-0 overflow-y-auto p-5 xl:p-8 relative">
-        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-indigo-600/10 rounded-full blur-[120px] -z-10 pointer-events-none" />
-        <div className="max-w-6xl mx-auto space-y-8 min-w-0">
-          <UpdateBanner />
-
-          {activeTab === 'dashboard' && (
-            <>
-              <header className="animate-fade-up">
-                <h2 className="text-2xl font-semibold text-white tracking-tight mb-6">Performance Metrics</h2>
-                {status === 'disconnected' ? (
-                  <div className="glass-panel rounded-2xl p-12 text-center text-slate-400">
-                    <ServerCrash className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                    <p>Waiting for the background service…</p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-                    <MetricCard title="Capture Rate" value={metrics.fps.toFixed(1)} unit="FPS" icon={MonitorPlay} delay="0s" />
-                    <CaptureSourceCard metrics={metrics} delay="0.05s" />
-                    <MetricCard title="Latency" value={metrics.latency_ms.toFixed(1)} unit="ms" icon={Activity} delay="0.1s" />
-                    <MetricCard title="Processing" value={(metrics.process_time_ms || 0).toFixed(1)} unit="ms" icon={Cpu} delay="0.2s" />
-                    <MetricCard title="LED TX" value={(metrics.led_transmit_ms || 0).toFixed(1)} unit="ms" icon={Zap} delay="0.3s" />
-                    <MetricCard title="Uptime" value={Math.floor((metrics.uptime_s || 0) / 60)} unit="min" icon={Clock} delay="0.4s" />
-                  </div>
-                )}
-              </header>
-
-              {online && !isOff && metrics.mode === 'screen_sync' && (
-                <section className="animate-fade-up" style={{ animationDelay: '0.15s' }}>
-                  <CaptureHealthBanner metrics={metrics} />
-                </section>
-              )}
-
-              {status !== 'disconnected' && (
-                <>
-                  <section className="animate-fade-up" style={{ animationDelay: '0.2s' }}>
-                    <ZonePreview zones={metrics.zones || []} color={metrics.color || [0, 0, 0]} />
-                  </section>
-
-                  <section className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-up" style={{ animationDelay: '0.3s' }}>
-                    <div className="glass-panel p-6 rounded-2xl">
-                      <h4 className="text-sm font-semibold text-white mb-4">Device Connection</h4>
-                      <div className="space-y-4">
-                        <div className="flex justify-between items-center">
-                          <span className="text-xs text-slate-400">Controllers</span>
-                          <span className="text-xs font-mono text-emerald-400 px-2 py-1 bg-emerald-400/10 rounded">
-                            {metrics.devices_connected ?? 0}/{metrics.devices ?? 0} connected
-                          </span>
-                        </div>
-                        <div className="w-full bg-white/5 h-1 rounded-full overflow-hidden">
-                          <div className="bg-indigo-500 h-full transition-all"
-                            style={{ width: `${metrics.devices ? Math.round(100 * (metrics.devices_connected || 0) / metrics.devices) : 0}%` }} />
-                        </div>
-                      </div>
-                    </div>
-                    <div className="glass-panel p-6 rounded-2xl">
-                      <h4 className="text-sm font-semibold text-white mb-4">Quick Toggle</h4>
-                      <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                        <span className="text-xs text-slate-300">Lights {isOff ? 'off' : 'on'}</span>
-                        <button onClick={() => setMode(isOff ? 'screen_sync' : 'off')} disabled={!online}
-                          className={`w-10 h-5 rounded-full relative transition-colors disabled:opacity-40 ${isOff ? 'bg-white/15' : 'bg-indigo-600'}`}>
-                          <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isOff ? 'left-1' : 'right-1'}`} />
-                        </button>
-                      </div>
-                    </div>
-                  </section>
-                </>
-              )}
-            </>
-          )}
-
-          {activeTab === 'devices' && <Devices />}
-          {activeTab === 'zones' && <ZoneEditor />}
-          {activeTab === 'profiles' && <Profiles />}
-          {activeTab === 'effects' && <Effects />}
-          {activeTab === 'notifications' && <Notifications />}
-          {activeTab === 'settings' && <Settings />}
-          {activeTab === 'logs' && <Logs />}
-          {activeTab === 'diagnostics' && <Diagnostics />}
-        </div>
-      </main>
+      {wizardOpen && <Wizard onClose={() => setWizardOpen(false)} />}
+      <Toasts toasts={toasts} />
     </div>
   )
 }
-
-export default App
