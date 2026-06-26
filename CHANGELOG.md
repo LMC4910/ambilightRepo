@@ -5,6 +5,71 @@ All notable changes to **Ambilight Desktop** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-06-26
+
+Major release. A **ground-up redesign** of the desktop app on a new "Ambi Light"
+design system, a **cross-instance device-ownership coordinator** that lets
+several PCs share the same controllers without fighting over them, and a
+hardened, fully self-healing capture stack. The service API, configuration
+format, and `~/.ambilight` data directory are backward-compatible — existing
+1.x installs upgrade in place and keep their devices, profiles, and settings.
+
+### Added
+- **Cross-instance device ownership (multi-PC).** When two or more Ambilight
+  instances on the same LAN can both reach a controller, the hardware can't
+  arbitrate (MagicHome accepts any TCP client; WLED is stateless UDP), so the
+  strip used to flicker as the last packet won. A new cooperative
+  `OwnershipCoordinator` (`ambilight/ownership/`) fixes this: each install has a
+  stable `instance_id`, announces the device keys it wants over a heartbeat, and
+  a deterministic rule (**higher priority → earliest claim → lowest instance id**)
+  elects a single owner per device. A crashed owner's claim expires after a TTL
+  and another instance takes over automatically. Coordination rides the
+  configured **MQTT** broker when present, otherwise a zero-config **LAN UDP**
+  announce. The pipeline gates output on the live claim, and the ownership state
+  is exposed on the API. Enabled by default and fully transparent for
+  single-instance setups (you always win an unclaimed device). New `ownership`
+  config block; see `OwnershipConfig` in `ambilight/config.py`.
+- **`--selfcheck` capture probe.** `python -m ambilight.service --selfcheck`
+  exercises each capture backend (WGC/DXGI/MSS) and reports which are available
+  and producing real frames — a fast diagnostic for "video is black" reports and
+  a build smoke-test for frozen artifacts.
+- **Dedicated Zones page.** The zone-layout editor is now a first-class
+  navigation tab (per-edge LED counts + strip thickness with a live-tinted
+  preview that hot-reloads the running pipeline).
+- **One-line installer build.** `build-installer` (Windows `.cmd`) /
+  `./build-installer.sh` (macOS/Linux) build the PyInstaller service **and** the
+  OS installer in a single command.
+
+### Changed
+- **Complete desktop-app redesign ("Ambi Light").** The Electron UI was rebuilt
+  on a new design system: a **frameless window** with custom title-bar controls,
+  a persistent **sidebar + in-app router**, a cohesive dark theme
+  (`ds.css` + `pages.css`), toast notifications, and persisted UI preferences.
+  Every page — Dashboard, Devices, Zones, Effects, Profiles, Notifications,
+  Settings, Logs, Diagnostics — was redesigned and re-wired to live service data,
+  and first-run onboarding is now a guided **5-step setup wizard**.
+- **Hardened, self-healing capture stack.** Backends now self-heal instead of
+  exhausting and log-storming; DXGI is bound to the **GPU adapter that actually
+  drives the chosen display** (fixes black/wrong-monitor capture on multi-GPU
+  systems); monitors are resolved by a **stable identity** that survives backend
+  switches and reconnects (`monitor_id` persisted with the selection); recovery
+  is **frame-verified** (a backend only counts as healthy once it returns a real
+  frame); and a leaked MSS session on repeated re-init was fixed.
+- **HDR queries no longer break DXGI.** Per-monitor HDR detection now uses a
+  private `user32` handle so it can't disturb the dxcam/DXGI device.
+- **Capture backends are fully bundled.** The frozen build now requires and
+  packages WGC, DXGI, MSS **and OpenCV (`cv2`)**, and the post-build step
+  smoke-tests the frozen service so a packaged install can't silently fall back
+  to a slower backend. PyInstaller is invoked via `python -m` for reliability.
+
+### Fixed
+- Capture no longer emits an "all backends exhausted" log storm when a backend
+  hiccups; it self-heals and continues.
+- The dashboard renders an unknown/unexpected capture backend as a neutral state
+  instead of a misleading healthy-green indicator.
+
+[2.0.0]: https://github.com/LMC4910/ambilightRepo/releases/tag/v2.0.0
+
 ## [1.1.0] - 2026-06-23
 
 Feature release: a second LED protocol (WLED), automatic HDR handling and better
