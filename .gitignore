@@ -138,6 +138,9 @@ service.out.log
 # PyInstaller leftovers occasionally written at the repo root
 *.spec.bak
 
+# Native helper build output (CMake); the sources under native/ are tracked
+native/build/
+
 # IDE
 .vscode/
 .idea/
