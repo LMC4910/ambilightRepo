@@ -106,7 +106,15 @@ async function fetchApi(endpoint, options = {}, _retried = false) {
       getAuthToken(true);
       return fetchApi(endpoint, options, true);
     }
-    throw new Error(`API Error: ${res.status} ${res.statusText}`);
+    // Surface the service's own explanation (FastAPI puts it in `detail`) rather
+    // than a bare status line — e.g. "Could not reach device at 192.168.1.50:5577"
+    // is far more actionable than "502 Bad Gateway".
+    let detail = '';
+    try {
+      const body = await res.json();
+      if (body && body.detail) detail = String(body.detail);
+    } catch (_) { /* non-JSON / empty body — fall back to the status line */ }
+    throw new Error(detail || `API Error: ${res.status} ${res.statusText}`);
   }
   return await res.json();
 }

@@ -131,6 +131,12 @@ export const useStore = create((set, get) => ({
       return true;
     } catch (e) {
       console.error(e);
+      // The service explains why (offline / wrong IP / wrong protocol) in the
+      // error message — show it instead of leaving the click with no feedback.
+      // Electron wraps IPC rejections as "Error invoking remote method '…': Error: <msg>";
+      // strip that wrapper so the toast shows just the real reason.
+      const reason = (e?.message || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+      get().toast(reason || `Could not reach device at ${ip}`);
       return false;
     }
   },
