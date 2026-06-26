@@ -1,5 +1,21 @@
 import { create } from 'zustand'
 
+// --- Persisted UI preferences (theme / density / sidebar / accent) ---------
+// These are renderer-only look-and-feel prefs; kept in localStorage so they
+// survive relaunches without touching the service config.
+const UI_PREFS_KEY = 'ambi.ui'
+const DEFAULT_UI = {
+  theme: 'dark',            // 'dark' | 'light'
+  density: 'comfortable',   // 'comfortable' | 'compact'
+  sidebarCollapsed: false,
+  accentFollowsLive: true,  // echo the live LED colour as the accent
+  accent: '#6f74e6',
+}
+function loadUiPrefs() {
+  try { return { ...DEFAULT_UI, ...(JSON.parse(localStorage.getItem(UI_PREFS_KEY)) || {}) } }
+  catch { return { ...DEFAULT_UI } }
+}
+
 export const useStore = create((set, get) => ({
   status: 'disconnected', // 'disconnected', 'connecting', 'connected'
   metrics: {
@@ -20,6 +36,22 @@ export const useStore = create((set, get) => ({
   monitors: [],
   scanning: false,
   saving: false,
+
+  // --- UI preferences ---
+  ui: loadUiPrefs(),
+  setUiPref: (key, value) => set((s) => {
+    const ui = { ...s.ui, [key]: value }
+    try { localStorage.setItem(UI_PREFS_KEY, JSON.stringify(ui)) } catch { /* ignore */ }
+    return { ui }
+  }),
+
+  // --- Transient toasts (consumed by <Toasts/>) ---
+  toasts: [],
+  toast: (msg) => {
+    const id = Math.random().toString(36).slice(2)
+    set((s) => ({ toasts: [...s.toasts, { id, msg }] }))
+    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), 2200)
+  },
 
   setStatus: (status) => set({ status }),
   setMetrics: (metrics) => set({ metrics }),
@@ -84,6 +116,7 @@ export const useStore = create((set, get) => ({
     try {
       const data = await window.api.devices.scan();
       set({ devices: data.devices || [] });
+      get().toast(`Scan complete · ${(data.devices || []).length} device${(data.devices || []).length === 1 ? '' : 's'}`);
     } catch (e) {
       console.error(e);
     } finally {
@@ -94,6 +127,7 @@ export const useStore = create((set, get) => ({
   testDevice: async (ip, port, protocol) => {
     try {
       await window.api.devices.test(ip, port, protocol);
+      get().toast('LEDs flashed white');
       return true;
     } catch (e) {
       console.error(e);
@@ -116,6 +150,7 @@ export const useStore = create((set, get) => ({
       set({ activeProfile: name });
       get().fetchSettings();
       get().fetchProfiles();
+      get().toast(`Profile "${name}" applied`);
     } catch (e) {
       console.error(e);
     }
@@ -125,6 +160,7 @@ export const useStore = create((set, get) => ({
     try {
       await window.api.profiles.save(name);
       await get().fetchProfiles();
+      get().toast(`Saved "${name}"`);
     } catch (e) {
       console.error(e);
     }
@@ -134,6 +170,7 @@ export const useStore = create((set, get) => ({
     try {
       await window.api.profiles.delete(name);
       await get().fetchProfiles();
+      get().toast(`Deleted "${name}"`);
     } catch (e) {
       console.error(e);
     }
@@ -160,6 +197,7 @@ export const useStore = create((set, get) => ({
   testFlash: async (color) => {
     try {
       await window.api.notifications.test(color);
+      get().toast('Test flash sent');
       return true;
     } catch (e) {
       console.error(e);

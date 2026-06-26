@@ -38,6 +38,7 @@ from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
 from .integrations.mqtt_bridge import MqttBridge
 from .notifications import NotificationFlashService
+from .ownership import OwnershipCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ config_watcher = None
 auto_switcher = None
 mqtt_bridge = None
 notification_flash = None
+coordinator = None
 
 # Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
 latest_metrics: Dict[str, Any] = {}
@@ -71,7 +73,7 @@ _last_metrics_persist = 0.0
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global monitor, config_watcher, auto_switcher, mqtt_bridge, notification_flash
+    global monitor, config_watcher, auto_switcher, mqtt_bridge, notification_flash, coordinator
 
     # 0. Security: Generate Token
     generate_and_save_token()
@@ -88,6 +90,20 @@ async def startup_event() -> None:
 
     # 2. Setup Pipeline Controller (subscribes to events)
     await controller.setup()
+
+    # 2b. Cross-instance ownership coordinator: claims devices on the LAN (over
+    #     MQTT when a broker is set, else UDP) and publishes OWNERSHIP_UPDATE so
+    #     the pipeline only drives strips this instance owns — preventing two
+    #     instances on the same network from fighting over a controller. Created
+    #     before the capture process so it can gate output from boot.
+    coordinator = OwnershipCoordinator(ConfigManager.get())
+
+    async def _refresh_ownership(cfg) -> None:
+        if coordinator is not None:
+            coordinator.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_ownership)
+    coordinator.start()
 
     # 3. Start the actual capture process
     controller.start()
@@ -161,6 +177,8 @@ async def _cache_metrics(metrics: dict) -> None:
 async def shutdown_event() -> None:
     logger.info("[API] Shutting down. Stopping pipeline.")
     controller.stop()
+    if coordinator:
+        coordinator.stop()
     if mqtt_bridge:
         mqtt_bridge.stop()
     if notification_flash:
@@ -517,11 +535,31 @@ async def autostart_disable() -> Dict[str, bool]:
 
 @app.get("/api/devices", dependencies=[Depends(verify_token)])
 async def list_devices() -> Dict[str, List[Dict[str, Any]]]:
-    """Return the last-known devices from the on-disk cache (fast, no scan)."""
+    """Return the last-known devices from the on-disk cache (fast, no scan).
+
+    Each record is annotated with its cross-instance ``device_key`` and current
+    ``owner`` ({instance_id, label, is_self} or null when unclaimed) so the UI can
+    show whether this instance or another one is driving the strip.
+    """
+    from .pipeline import device_key
     cfg = ConfigManager.get()
     cache = DeviceCache(path=cfg.device.cache_file)
     devices = await asyncio.get_running_loop().run_in_executor(None, cache.load)
-    return {"devices": [d.to_dict() for d in devices]}
+    out: List[Dict[str, Any]] = []
+    for d in devices:
+        rec = d.to_dict()
+        try:
+            key = device_key({
+                "protocol": rec.get("protocol", "magichome"),
+                "mac": rec.get("mac", ""), "ip": rec.get("ip", ""),
+            })
+            rec["device_key"] = key
+            rec["owner"] = coordinator.owner_of(key) if coordinator is not None else None
+        except Exception:  # pragma: no cover - defensive
+            rec["device_key"] = ""
+            rec["owner"] = None
+        out.append(rec)
+    return {"devices": out}
 
 
 @app.post("/api/devices/scan", dependencies=[Depends(verify_token)])
@@ -621,6 +659,47 @@ async def device_capabilities(ip: str, protocol: str = "magichome") -> Dict[str,
         "supports_addressable": info.supports_addressable,
         "supports_rgbw": info.supports_rgbw,
     }
+
+
+# ---------------------------------------------------------------------------
+# OWNERSHIP ENDPOINTS (cross-instance device exclusivity)
+# ---------------------------------------------------------------------------
+
+class OwnershipActionRequest(pydantic.BaseModel):
+    device_key: str
+    force: bool = False   # claim only: out-prioritise the current owner ("take control")
+
+
+@app.get("/api/ownership", dependencies=[Depends(verify_token)])
+async def ownership_status() -> Dict[str, Any]:
+    """This instance's identity plus the owner/claimants of every known device."""
+    o = ConfigManager.get().ownership
+    return {
+        "enabled": bool(o.enabled),
+        "instance_id": o.instance_id,
+        "instance_label": o.instance_label,
+        "transport": coordinator.transport_kind if coordinator is not None else None,
+        "devices": coordinator.snapshot() if coordinator is not None else [],
+    }
+
+
+@app.post("/api/ownership/claim", dependencies=[Depends(verify_token)])
+async def ownership_claim(request: OwnershipActionRequest) -> Dict[str, Any]:
+    """Claim a device for this instance. ``force`` takes control from another
+    instance that currently owns it."""
+    if coordinator is None:
+        raise HTTPException(status_code=503, detail="ownership coordinator not running")
+    owned = coordinator.claim(request.device_key, force=request.force)
+    return {"device_key": request.device_key, "owned": owned}
+
+
+@app.post("/api/ownership/release", dependencies=[Depends(verify_token)])
+async def ownership_release(request: OwnershipActionRequest) -> Dict[str, Any]:
+    """Release a device so another instance may take it over."""
+    if coordinator is None:
+        raise HTTPException(status_code=503, detail="ownership coordinator not running")
+    coordinator.release(request.device_key)
+    return {"device_key": request.device_key, "released": True}
 
 
 # ---------------------------------------------------------------------------

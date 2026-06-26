@@ -36,7 +36,11 @@ contextBridge.exposeInMainWorld('api', {
       const listener = (_, visible) => callback(visible)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.removeListener('window:visibility', listener)
-    }
+    },
+    // Custom title-bar controls for the frameless window.
+    minimize: () => ipcRenderer.send('window:minimize'),
+    maximize: () => ipcRenderer.send('window:maximize'),
+    close: () => ipcRenderer.send('window:close')
   },
   onboarding: {
     get: () => ipcRenderer.invoke('app:onboarding:get'),

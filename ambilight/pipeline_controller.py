@@ -86,6 +86,7 @@ class PipelineController:
         await bus.subscribe("SYSTEM_RESUME", self._on_display_on)
         await bus.subscribe("DISPLAY_CHANGED", self._on_display_changed)
         await bus.subscribe("CONFIG_UPDATE", self._on_config_update)
+        await bus.subscribe("OWNERSHIP_UPDATE", self._on_ownership_update)
 
     def _spawn(self) -> None:
         """Launch a fresh worker process. Caller manages _should_run."""
@@ -222,6 +223,14 @@ class PipelineController:
     async def _on_config_update(self, cfg: AppConfig) -> None:
         logger.info("[PipelineController] Config update received. Sending to pipeline.")
         self._command_queue.put({"action": "reload", "config": cfg})
+
+    async def _on_ownership_update(self, owned_keys) -> None:
+        """Relay the coordinator's owned-device set to the capture process so it
+        gates LED output (the pipeline runs in a separate process and can't see
+        the event bus directly)."""
+        keys = list(owned_keys or [])
+        logger.info("[PipelineController] Ownership update: %d owned device(s).", len(keys))
+        self._command_queue.put({"action": "set_owned_devices", "owned_keys": keys})
 
     def set_mode(self, mode: str, params: dict) -> None:
         """Send mode change command to the pipeline process."""

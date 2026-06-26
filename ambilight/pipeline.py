@@ -94,6 +94,8 @@ class _Channel:
     analyzer: "ColorAnalyzer"
     smoother: "SmoothingEngine"
     led_count: int
+    key: str = ""            # cross-instance device identity (see device_key)
+    owned: bool = True       # ownership gate: drive this device only while True
     last_zone_colors: list = dc_field(default_factory=list)
     black_streak: int = 0   # consecutive black frames seen (transient-black debounce)
     last_output_rgb: tuple = (0, 0, 0)   # this channel's last real colour (flash restore)
@@ -167,6 +169,23 @@ def _device_specs(cfg) -> list[dict]:
     return specs
 
 
+def device_key(spec: dict) -> str:
+    """Stable cross-instance identity for a device spec.
+
+    MagicHome is keyed by MAC — hardware-stable across DHCP changes and identical
+    on every machine that can see the controller — falling back to IP when no MAC
+    is known. Other protocols (WLED) have no MAC rediscovery, so they key by IP.
+    Used both for the topology signature and as the key two instances agree on
+    when claiming a device for exclusive control (see ``ownership``).
+    """
+    proto = str(spec.get("protocol", "magichome")).lower()
+    if proto == "magichome":
+        ident = str(spec.get("mac") or spec.get("ip") or "").lower()
+    else:
+        ident = str(spec.get("ip") or "")
+    return f"{proto}:{ident}"
+
+
 class AmbilightPipeline:
     """
     Top-level Ambilight engine.
@@ -217,6 +236,17 @@ class AmbilightPipeline:
         self._flash_queue: deque = deque(maxlen=3)
         self._flash_active: Optional[dict] = None
         self._last_output_rgb: tuple = (0, 0, 0)   # last real colour, for restore
+
+        # Cross-instance device ownership gate. When enabled, the coordinator in
+        # the main process tells us which device keys we may drive via the
+        # "set_owned_devices" command; until the first such command we stand by so
+        # two instances never fight over a strip (last-packet-wins flicker).
+        # Disabled → every configured device is driven locally (legacy behaviour).
+        self._ownership_enabled: bool = bool(
+            getattr(self._cfg, "ownership", None) and self._cfg.ownership.enabled
+        )
+        # None = no ownership decision received yet (stand by when enabled).
+        self._owned_keys: Optional[set] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -387,7 +417,7 @@ class AmbilightPipeline:
                         r, g, b = color
                     if color is not None or flash_rgb is not None:
                         out = flash_rgb if flash_rgb is not None else (r, g, b)
-                        for ch in self._channels:
+                        for ch in self._owned_channels():
                             ch.led.set_rgb(*out)
                             if color is not None:
                                 ch.last_output_rgb = (int(r), int(g), int(b))
@@ -446,7 +476,9 @@ class AmbilightPipeline:
                         self._consecutive_black = 0
 
                     # --- Per-device analysis + output ---
-                    for ch in self._channels:
+                    # Only owned channels: skip analysis+send for devices another
+                    # instance is driving (ownership gate).
+                    for ch in self._owned_channels():
                         small = small_by_mon.get(ch.monitor_index)
                         if small is None:
                             continue
@@ -494,8 +526,9 @@ class AmbilightPipeline:
                     if not black_ok:
                         capture_ok = False
                         capture_reason = black_reason
-                    # Live preview reflects the first channel.
-                    self._last_zone_colors = self._channels[0].last_zone_colors if self._channels else []
+                    # Live preview reflects the first channel we actually drive.
+                    _owned = self._owned_channels()
+                    self._last_zone_colors = _owned[0].last_zone_colors if _owned else []
 
                 # Remember the last real colour so a flash that fires while the
                 # strip is later locked/paused can restore the frozen frame.
@@ -575,15 +608,18 @@ class AmbilightPipeline:
         if action == "reload":
             self._cfg = cmd["config"]
             self._apply_config_hot()
+        elif action == "set_owned_devices":
+            self._apply_owned(set(cmd.get("owned_keys") or []))
         elif action == "flash":
             self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {})
         elif action == "set_mode":
             mode = cmd.get("mode")
             params = cmd.get("params", {})
             if mode == "off":
-                # Power the strip off completely and stop any effect.
+                # Power the strip off completely and stop any effect. Only our
+                # owned devices — never power off a strip another instance drives.
                 self._effects.set_mode("screen_sync")
-                for ch in self._channels:
+                for ch in self._owned_channels():
                     ch.led.turn_off()
                 self._power = False
                 self._mode = "off"
@@ -591,12 +627,62 @@ class AmbilightPipeline:
             else:
                 # Check each strip's power and turn it on if off,
                 # before applying the mode (FR-POWER).
-                for ch in self._channels:
+                for ch in self._owned_channels():
                     ch.led.ensure_on()
                 self._power = True
                 self._effects.set_mode(mode, params)
                 self._mode = mode
                 logger.info("[Pipeline] Mode switched to %s", mode)
+
+    # ------------------------------------------------------------------
+    # Cross-instance ownership gate
+    # ------------------------------------------------------------------
+
+    def _is_owned(self, key: str) -> bool:
+        """Whether this instance may drive the device identified by *key*.
+
+        Ownership disabled → always True (drive every configured device). Enabled
+        but no decision received yet (``_owned_keys is None``) → False, so we stand
+        by rather than risk fighting another instance before the coordinator has
+        resolved who owns what.
+        """
+        if not self._ownership_enabled:
+            return True
+        return self._owned_keys is not None and key in self._owned_keys
+
+    def _owned_channels(self) -> "list[_Channel]":
+        """Channels this instance is currently allowed to drive.
+
+        A channel without an ``owned`` flag (legacy/test doubles) is treated as
+        driven, preserving pre-ownership behaviour.
+        """
+        return [ch for ch in self._channels if getattr(ch, "owned", True)]
+
+    def _reeval_ownership(self) -> None:
+        """Bring each channel's connection in line with its ownership flag:
+        connect+power on newly-acquired devices, disconnect released ones."""
+        for ch in self._channels:
+            want = self._is_owned(ch.key)
+            if want and not ch.owned:
+                ch.owned = True
+                try:
+                    if not ch.led.is_connected and ch.led.connect():
+                        ch.led.turn_on()
+                except Exception as exc:  # pragma: no cover - device hiccup
+                    logger.debug("[Pipeline] acquire connect failed for %s: %s", ch.key, exc)
+                logger.info("[Pipeline] Acquired device %s; now driving.", ch.key)
+            elif not want and ch.owned:
+                ch.owned = False
+                try:
+                    ch.led.disconnect()
+                except Exception as exc:  # pragma: no cover - device hiccup
+                    logger.debug("[Pipeline] release disconnect failed for %s: %s", ch.key, exc)
+                logger.info("[Pipeline] Yielded device %s; standing by.", ch.key)
+
+    def _apply_owned(self, keys: set) -> None:
+        """Adopt the owned-device set sent by the coordinator and reconcile."""
+        self._owned_keys = set(keys)
+        self._reeval_ownership()
 
     def _drain_flash_commands(self, enqueue: bool = True) -> None:
         """While paused, pull pending commands acting only on ``flash`` ones;
@@ -692,7 +778,7 @@ class AmbilightPipeline:
             fa = self._flash_queue.popleft()
             fa["i"] = 0
             fa["seg_end"] = now + fa["segments"][0]["dur"]
-            for ch in self._channels:
+            for ch in self._owned_channels():
                 try:
                     ch.led.ensure_on()
                 except Exception:  # pragma: no cover - device hiccup
@@ -721,7 +807,7 @@ class AmbilightPipeline:
         self._flash_active = None
         try:
             if not self._power:
-                for ch in self._channels:
+                for ch in self._owned_channels():
                     ch.led.set_rgb(0, 0, 0)
                     ch.led.turn_off()
             elif paused:
@@ -734,7 +820,7 @@ class AmbilightPipeline:
         """Repaint each channel's own last real colour (used after a paused/locked
         flash, where the normal loop isn't repainting). Per-channel so multi-device
         setups don't all collapse to a single colour."""
-        for ch in self._channels:
+        for ch in self._owned_channels():
             r, g, b = getattr(ch, "last_output_rgb", (0, 0, 0))
             try:
                 if ch.led.is_addressable:
@@ -752,7 +838,7 @@ class AmbilightPipeline:
         directive = self._flash_step(now, paused=True)
         if directive[0] == "on":
             fr, fg, fb = directive[1]
-            for ch in self._channels:
+            for ch in self._owned_channels():
                 try:
                     if ch.led.is_addressable:
                         ch.led.set_pixels([(fr, fg, fb)] * ch.led_count)
@@ -762,7 +848,7 @@ class AmbilightPipeline:
                     pass
             return True
         if directive[0] == "off":
-            for ch in self._channels:
+            for ch in self._owned_channels():
                 try:
                     if ch.led.is_addressable:
                         ch.led.set_pixels([(0, 0, 0)] * ch.led_count)
@@ -810,10 +896,17 @@ class AmbilightPipeline:
         If the device/monitor *topology* changed, rebuild captures + channels;
         otherwise update each channel's analysis settings in place.
         """
+        # Pick up an ownership enable/disable toggle. Disabling drives every
+        # device again; enabling re-gates against the last owned set received.
+        self._ownership_enabled = bool(
+            getattr(self._cfg, "ownership", None) and self._cfg.ownership.enabled
+        )
+
         if self._topology_sig() != self._topology:
             logger.info("[Pipeline] Device/monitor topology changed; rebuilding I/O.")
             self._teardown_io()
             self._build_io()
+            self._reeval_ownership()
             return
 
         z = self._cfg.zones
@@ -846,6 +939,8 @@ class AmbilightPipeline:
                 self._effects.set_mode(mode, params)
             except Exception as exc:
                 logger.debug("[Pipeline] effect re-apply failed: %s", exc)
+        # Re-gate in case ownership was just enabled/disabled (topology unchanged).
+        self._reeval_ownership()
         logger.info("[Pipeline] Hot-reloaded configuration (%d channel(s)).", len(self._channels))
 
     # ------------------------------------------------------------------
@@ -861,13 +956,8 @@ class AmbilightPipeline:
         WLED has no MAC-based rediscovery, so it is keyed by ``ip`` — otherwise
         changing a WLED device's IP while a MAC is set would not rebuild.
         """
-        def _identity(s: dict) -> str:
-            if s["protocol"] == "magichome":
-                return str(s["mac"] or s["ip"])
-            return str(s["ip"])
-
         return tuple(sorted(
-            (s["protocol"], _identity(s), s["port"], s["monitor_index"], s["led_count"])
+            (s["protocol"], device_key(s), s["port"], s["monitor_index"], s["led_count"])
             for s in _device_specs(self._cfg)
         ))
 
@@ -900,12 +990,19 @@ class AmbilightPipeline:
             led = create_driver({
                 **sp, "ip": ip, "kind": kind, "min_update_interval": min_interval,
             })
-            if led.connect():
-                led.turn_on()
+            key = device_key(sp)
+            owned = self._is_owned(key)
+            # Only open the socket for devices we own. A standby channel stays
+            # disconnected so we never touch a strip another instance is driving.
+            if owned:
+                if led.connect():
+                    led.turn_on()
+                else:
+                    logger.warning("[Pipeline] Could not connect to %s; will retry.", ip)
             else:
-                logger.warning("[Pipeline] Could not connect to %s; will retry.", ip)
+                logger.info("[Pipeline] Device %s owned by another instance; standing by.", key)
             self._channels.append(_Channel(
-                name=sp["name"], monitor_index=sp["monitor_index"], led=led,
+                name=sp["name"], monitor_index=sp["monitor_index"], led=led, key=key, owned=owned,
                 zones=ZoneManager(z.top, z.bottom, z.left, z.right, edge_fraction=z.edge_fraction),
                 analyzer=ColorAnalyzer(
                     mode=c.mode, black_threshold=c.ignore_black_threshold,
@@ -1061,8 +1158,11 @@ class AmbilightPipeline:
         """Turn off + release all LED controllers and capture managers."""
         for ch in self._channels:
             try:
-                ch.led.set_rgb(0, 0, 0)
-                ch.led.turn_off()
+                # Only blank/power off devices we actually own; a standby channel
+                # is for a strip another instance is driving — leave it untouched.
+                if getattr(ch, "owned", True):
+                    ch.led.set_rgb(0, 0, 0)
+                    ch.led.turn_off()
                 ch.led.disconnect()
             except Exception:
                 pass

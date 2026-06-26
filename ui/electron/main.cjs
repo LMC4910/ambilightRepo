@@ -448,6 +448,9 @@ function createWindow() {
     minHeight: 520,
     icon: appIcon(),
     title: APP_TITLE,
+    // Frameless: the renderer draws its own title bar (Ambi Light) with custom
+    // window controls. Drag regions are declared in CSS (.titlebar app-region).
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -619,6 +622,16 @@ function createWindow() {
       return false;
     }
   });
+
+  // --- Custom title-bar window controls (frameless window) ---
+  // Close mirrors the title-bar [x] and the OS frame would have: it hides to
+  // tray (see the 'close' handler below) rather than quitting, unless quitting.
+  ipcMain.on('window:minimize', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize(); });
+  ipcMain.on('window:maximize', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize(); else mainWindow.maximize();
+  });
+  ipcMain.on('window:close', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close(); });
 
   ipcMain.on('metrics:subscribe', () => { connectWebSocket(); });
   ipcMain.on('metrics:unsubscribe', () => {
