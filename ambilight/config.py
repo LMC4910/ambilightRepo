@@ -39,13 +39,17 @@ class HdrConfig:
 
 @dataclass
 class CaptureConfig:
-    method: str = "wgc"           # wgc | dxgi | mss
+    method: str = "wgc"           # wgc | dxgi | mss | hook
     monitor_index: int = 0        # 0 = primary (fallback when monitor_id is unset)
     monitor_id: str = ""          # stable monitor identity (EDID/gdi_name/pos); see monitors.py
     fps_target: int = 30
     analysis_width: int = 80
     analysis_height: int = 45
     hdr: HdrConfig = field(default_factory=HdrConfig)
+    # Opt-in "hook" backend only (DX11 game capture via the native helper). Empty
+    # = auto-detect the foreground fullscreen game; otherwise a target exe name
+    # (e.g. "game.exe"). Unused by the other backends; reserved for Phase 2.
+    hook_target: str = ""
 
 
 @dataclass

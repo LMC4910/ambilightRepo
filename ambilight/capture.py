@@ -783,7 +783,22 @@ class ScreenCaptureManager:
             "dxgi": DXGIBackend(),
             "mss": MSSBackend(),
         }
+        # The "hook" backend (DX11 game capture via a native helper process) is
+        # opt-in only: it is never auto-promoted into the WGC→DXGI→MSS chain
+        # because it launches a helper that injects into / hooks the game. Register
+        # it solely when explicitly requested, ordered first with the normal
+        # backends as fallback. Imported lazily so a missing module or unbuilt
+        # native binary never affects the default backends.
+        if preferred_method == "hook":
+            try:
+                from .hook_capture import HookCaptureBackend
+                all_backends = {"hook": HookCaptureBackend(), **all_backends}
+            except Exception as exc:  # noqa: BLE001 — never let opt-in break defaults
+                logger.warning("[Capture] hook backend unavailable: %s", exc)
         order = [preferred_method] + [k for k in all_backends if k != preferred_method]
+        # Drop an unknown/unavailable preferred method (e.g. "hook" when its import
+        # failed, or a typo) so the manager still has a valid candidate list.
+        order = [k for k in order if k in all_backends]
         self._candidates: list[CaptureBackend] = [all_backends[k] for k in order]
         self._active: Optional[CaptureBackend] = None
 
