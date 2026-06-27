@@ -75,6 +75,9 @@ class NotificationFlashService:
         self.dedup_window_s = float(n.dedup_window_s)
         self.min_flash_interval_s = float(n.min_flash_interval_s)
         self.app_overrides = dict(n.app_overrides or {})
+        # Case-insensitive view so an override keyed "discord" still matches an app
+        # whose display name / id is "Discord" (and vice-versa).
+        self._app_overrides_ci = {str(k).lower(): v for k, v in self.app_overrides.items()}
         self.keyword_rules = list(n.keyword_rules or [])
 
     # --- lifecycle --------------------------------------------------------
@@ -145,8 +148,8 @@ class NotificationFlashService:
         default. The forwarded-source, brand and icon steps are all "logo colour"
         sources and are skipped in ``fixed`` mode.
         """
-        # 1. Per-app override (by stable id or display name).
-        ov = self.app_overrides.get(ev.app_id) or self.app_overrides.get(ev.app_name)
+        # 1. Per-app override (by stable id or display name, case-insensitive).
+        ov = self._override_for(ev)
         if ov:
             return _as_rgb(ov, self.default_color)
 
@@ -158,20 +161,20 @@ class NotificationFlashService:
                 return _as_rgb(rule.get("color"), self.default_color)
 
         if self.color_mode != "fixed":
-            # 3. Forwarded / mirrored notifications: a bridge such as Phone Link or
-            #    Link to Windows attributes the alert to *itself*, so the real source
-            #    app — named in the title/body (e.g. an Instagram DM) — should drive
-            #    the colour. Detect it from the text and use its brand colour, ahead
-            #    of the bridge's own brand below. Explicit keyword rules still win.
+            # 3. Forwarded / mirrored notifications. A bridge such as Phone Link /
+            #    Link to Windows attributes the alert to *itself*, so resolve the REAL
+            #    source app and NEVER the bridge: try the source named in the text,
+            #    then the source app-name (some bridges report it directly), then the
+            #    forwarded toast's own icon — which is the source app's logo. The
+            #    bridge's app_id is the same for every forwarded app, so it must not
+            #    drive the brand lookup nor key the shared icon cache.
             if is_forwarder(ev.app_name, ev.app_id):
-                src = brand_color_from_text(haystack)
-                if src is not None:
-                    return _as_rgb(src, self.default_color)
+                return self._resolve_forwarded(ev, haystack)
 
             # 4. Curated brand/logo colour. Preferred over live icon extraction: it
             #    is the official brand colour and works even when the notification
-            #    carries no icon bytes (e.g. Phone Link forwards). Only used when the
-            #    user has set no override for this app (guaranteed by the order above).
+            #    carries no icon bytes. Only used when the user has set no override
+            #    for this app (guaranteed by the order above).
             brand = brand_color(ev.app_name, ev.app_id)
             if brand is not None:
                 return _as_rgb(brand, self.default_color)
@@ -198,6 +201,36 @@ class NotificationFlashService:
                 return _as_rgb(cached, self.default_color)
 
         # 6. Fallback.
+        return _as_rgb(self.default_color, [255, 255, 255])
+
+    def _override_for(self, ev: NotificationEvent) -> Optional[list]:
+        """Per-app override for *ev*, matched on app id or display name, exactly
+        first then case-insensitively."""
+        ov = self.app_overrides.get(ev.app_id) or self.app_overrides.get(ev.app_name)
+        if ov:
+            return ov
+        for key in (ev.app_id, ev.app_name):
+            if key:
+                ov = self._app_overrides_ci.get(str(key).lower())
+                if ov:
+                    return ov
+        return None
+
+    def _resolve_forwarded(self, ev: NotificationEvent, haystack: str) -> RGB:
+        """Resolve a forwarded/mirrored notification to its *source* app's colour.
+
+        Order: source named in the text → source app-name (never the bridge's
+        app_id) → the forwarded toast's own icon (the source app's logo, extracted
+        uncached because the bridge app_id is shared across every source) → default.
+        The bridge's own colour is deliberately never used.
+        """
+        src = brand_color_from_text(haystack) or brand_color(ev.app_name)
+        if src is not None:
+            return _as_rgb(src, self.default_color)
+        if ev.icon_bytes:
+            rgb = icon_dominant_color(ev.icon_bytes)
+            if rgb is not None:
+                return _as_rgb(rgb, self.default_color)
         return _as_rgb(self.default_color, [255, 255, 255])
 
     def _pattern(self) -> dict:
