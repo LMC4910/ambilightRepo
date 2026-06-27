@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ambilight_native LANGUAGES CXX)
+project(ambilight_native LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,7 @@ endif()
 # subdir (bin/Release); single-config (Ninja) use bin/ directly.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_subdirectory(third_party)     # vendored MinHook (inline hooks for DX9/DX12)
 add_subdirectory(shared_memory)   # ambshm static lib (shared by both targets)
 add_subdirectory(capture_host)    # capture_host.exe
 add_subdirectory(graphics_hook)   # graphics_hook.dll (injected into games)
