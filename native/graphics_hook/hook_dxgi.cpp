@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d10.h>
 #include <dxgi.h>
 
 #include <chrono>
@@ -92,9 +93,95 @@ bool ensure_staging(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC& bb) {
     return true;
 }
 
+// Convert a mapped BGRA/RGBA surface to BGR and publish it. Returns true on a
+// successful write (and stamps g_last_capture). Shared by the DX11 and DX10 paths.
+bool publish_bgr(const uint8_t* data, int pitch, UINT w, UINT h, DXGI_FORMAT fmt,
+                 const std::chrono::steady_clock::time_point& now) {
+    if (!dxgi_to_bgr(data, pitch, w, h, fmt, g_scratch)) {
+        if (g_warned_fmt != fmt) {
+            hook_log("unsupported backbuffer format %d (SDR only); skipping", static_cast<int>(fmt));
+            g_warned_fmt = fmt;
+        }
+        return false;
+    }
+    if (!g_writer->write_frame(g_scratch.data(), w, h, static_cast<uint64_t>(now_us()))) {
+        if (!g_logged_oversize) {
+            hook_log("frame %ux%u exceeds shared buffer; skipping (resize buffer)", w, h);
+            g_logged_oversize = true;
+        }
+        return false;
+    }
+    g_last_capture = now;
+    if (!g_logged_first_frame) {
+        hook_log("DXGI capture live: %ux%u fmt=%d", w, h, static_cast<int>(fmt));
+        g_logged_first_frame = true;
+    }
+    return true;
+}
+
+void capture_d11(IDXGISwapChain* sc, ID3D11Device* dev,
+                 const std::chrono::steady_clock::time_point& now) {
+    ID3D11DeviceContext* ctx = nullptr;
+    dev->GetImmediateContext(&ctx);
+    ID3D11Texture2D* back = nullptr;
+    if (ctx != nullptr &&
+        SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))) &&
+        back != nullptr) {
+        D3D11_TEXTURE2D_DESC td{};
+        back->GetDesc(&td);
+        if (td.SampleDesc.Count == 1 && ensure_staging(dev, td)) {
+            ctx->CopyResource(g_staging, back);
+            D3D11_MAPPED_SUBRESOURCE map{};
+            if (SUCCEEDED(ctx->Map(g_staging, 0, D3D11_MAP_READ, 0, &map))) {
+                publish_bgr(static_cast<const uint8_t*>(map.pData), static_cast<int>(map.RowPitch),
+                            td.Width, td.Height, td.Format, now);
+                ctx->Unmap(g_staging, 0);
+            }
+        }
+        back->Release();
+    }
+    if (ctx) ctx->Release();
+}
+
+// DX10 is rare today, so this uses a per-frame staging texture (no cache) to keep
+// the code small. Uses only d3d10.h interfaces (no d3d10.lib export is called),
+// so the DLL gains no forced d3d10.dll dependency.
+void capture_d10(IDXGISwapChain* sc, ID3D10Device* dev,
+                 const std::chrono::steady_clock::time_point& now) {
+    ID3D10Texture2D* back = nullptr;
+    if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D10Texture2D), reinterpret_cast<void**>(&back))) &&
+        back != nullptr) {
+        D3D10_TEXTURE2D_DESC td{};
+        back->GetDesc(&td);
+        if (td.SampleDesc.Count == 1) {
+            D3D10_TEXTURE2D_DESC sd{};
+            sd.Width = td.Width;
+            sd.Height = td.Height;
+            sd.MipLevels = 1;
+            sd.ArraySize = 1;
+            sd.Format = td.Format;
+            sd.SampleDesc.Count = 1;
+            sd.Usage = D3D10_USAGE_STAGING;
+            sd.CPUAccessFlags = D3D10_CPU_ACCESS_READ;
+            ID3D10Texture2D* staging = nullptr;
+            if (SUCCEEDED(dev->CreateTexture2D(&sd, nullptr, &staging)) && staging != nullptr) {
+                dev->CopyResource(staging, back);
+                D3D10_MAPPED_TEXTURE2D map{};
+                if (SUCCEEDED(staging->Map(0, D3D10_MAP_READ, 0, &map))) {
+                    publish_bgr(static_cast<const uint8_t*>(map.pData), static_cast<int>(map.RowPitch),
+                                td.Width, td.Height, td.Format, now);
+                    staging->Unmap(0);
+                }
+                staging->Release();
+            }
+        }
+        back->Release();
+    }
+}
+
 // The actual capture (separate from the SEH-guarded detour so its C++ objects
 // are legal). Best-effort: any failure simply skips this frame.
-void capture_dx11(IDXGISwapChain* sc) {
+void capture_dxgi(IDXGISwapChain* sc) {
     const auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::microseconds>(now - g_last_capture).count()
             < g_frame_interval_us) {
@@ -116,57 +203,26 @@ void capture_dx11(IDXGISwapChain* sc) {
     }
     if (fg_gate && desc.OutputWindow != GetForegroundWindow()) return;
 
-    ID3D11Device* dev = nullptr;
-    if (FAILED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&dev))) ||
-        dev == nullptr) {
-        return;  // not a DX11 swapchain (DX10/DX12 handled elsewhere)
+    // Branch on the swapchain's device type. (DX12 is handled by a separate path.)
+    ID3D11Device* d11 = nullptr;
+    if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&d11))) &&
+        d11 != nullptr) {
+        capture_d11(sc, d11, now);
+        d11->Release();
+        return;
     }
-    ID3D11DeviceContext* ctx = nullptr;
-    dev->GetImmediateContext(&ctx);
-
-    ID3D11Texture2D* back = nullptr;
-    if (ctx != nullptr &&
-        SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&back))) &&
-        back != nullptr) {
-        D3D11_TEXTURE2D_DESC td{};
-        back->GetDesc(&td);
-        if (td.SampleDesc.Count == 1 && ensure_staging(dev, td)) {
-            ctx->CopyResource(g_staging, back);
-            D3D11_MAPPED_SUBRESOURCE map{};
-            if (SUCCEEDED(ctx->Map(g_staging, 0, D3D11_MAP_READ, 0, &map))) {
-                if (dxgi_to_bgr(static_cast<const uint8_t*>(map.pData),
-                                static_cast<int>(map.RowPitch), td.Width, td.Height,
-                                td.Format, g_scratch)) {
-                    if (g_writer->write_frame(g_scratch.data(), td.Width, td.Height,
-                                              static_cast<uint64_t>(now_us()))) {
-                        g_last_capture = now;
-                        if (!g_logged_first_frame) {
-                            hook_log("DXGI capture live: %ux%u fmt=%d", td.Width, td.Height,
-                                     static_cast<int>(td.Format));
-                            g_logged_first_frame = true;
-                        }
-                    } else if (!g_logged_oversize) {
-                        hook_log("frame %ux%u exceeds shared buffer; skipping (resize buffer)",
-                                 td.Width, td.Height);
-                        g_logged_oversize = true;
-                    }
-                } else if (g_warned_fmt != td.Format) {
-                    hook_log("unsupported backbuffer format %d (SDR only); skipping",
-                             static_cast<int>(td.Format));
-                    g_warned_fmt = td.Format;
-                }
-                ctx->Unmap(g_staging, 0);
-            }
-        }
-        back->Release();
+    ID3D10Device* d10 = nullptr;
+    if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D10Device), reinterpret_cast<void**>(&d10))) &&
+        d10 != nullptr) {
+        capture_d10(sc, d10, now);
+        d10->Release();
+        return;
     }
-    if (ctx) ctx->Release();
-    if (dev) dev->Release();
 }
 
 HRESULT STDMETHODCALLTYPE Present_detour(IDXGISwapChain* self, UINT sync, UINT flags) {
     __try {
-        capture_dx11(self);
+        capture_dxgi(self);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         // Never let a capture fault break the game's present.
     }
