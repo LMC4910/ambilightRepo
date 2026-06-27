@@ -632,3 +632,73 @@ def brand_color(app_name: Optional[str], app_id: Optional[str] = None) -> Option
             if t in BRAND_COLORS:
                 return BRAND_COLORS[t]
     return None
+
+
+# --- Forwarded / mirrored notifications -------------------------------------
+# Bridges that relay phone notifications to the desktop report *themselves* as the
+# originating app (an Instagram DM mirrored by Phone Link shows up as "Phone Link").
+# For these we detect the real source app from the notification text and use ITS
+# brand colour instead of the bridge's.
+_FORWARDERS = frozenset({
+    "phonelink", "linktowindows", "yourphone", "yourphonecompanion",
+    "intelunison", "dellmobileconnect", "samsungflow", "samsungdex",
+    "airdroid", "pushbullet", "kdeconnect", "mobileconnect",
+})
+
+# Curated, distinctive source-app names safe to match inside free notification text
+# (word-boundary matched). Short/ambiguous names (e.g. "Line", "X") are excluded so
+# ordinary message wording can't trigger a false colour. Every name is a brand in
+# the table above.
+_SOURCE_BRAND_NAMES = (
+    "Microsoft Teams", "Facebook Messenger", "Google Chat", "Booking.com",
+    "Uber Eats", "Cash App", "Instagram", "WhatsApp", "Messenger", "Facebook",
+    "Snapchat", "Telegram", "Signal", "TikTok", "Twitter", "Discord", "Slack",
+    "WeChat", "Viber", "KakaoTalk", "Reddit", "LinkedIn", "Pinterest", "Tinder",
+    "Bumble", "Hinge", "Threads", "Grindr", "Tumblr", "Mastodon", "Bluesky",
+    "Skype", "Zoom", "Gmail", "Outlook", "YouTube", "Spotify", "Twitch", "Netflix",
+    "SoundCloud", "Uber", "Lyft", "DoorDash", "Grubhub", "Deliveroo", "Zomato",
+    "Swiggy", "PayPal", "Venmo", "Revolut", "Coinbase", "Binance", "Robinhood",
+    "Zelle", "Klarna", "Amazon", "Etsy", "AliExpress", "Airbnb", "GitHub", "GitLab",
+    "Strava", "Duolingo", "Notion", "Trello", "Asana", "Jira",
+)
+
+
+def _compile_source_patterns():
+    pats = []
+    # Longest names first so e.g. "Uber Eats" wins over "Uber".
+    for nm in sorted(_SOURCE_BRAND_NAMES, key=len, reverse=True):
+        rgb = brand_color(nm)
+        if rgb is None:
+            continue
+        body = r"\s+".join(re.escape(p) for p in nm.split())
+        pats.append((re.compile(r"\b" + body + r"\b", re.IGNORECASE), rgb))
+    return pats
+
+
+_SOURCE_PATTERNS = _compile_source_patterns()
+
+
+def is_forwarder(app_name: Optional[str], app_id: Optional[str] = None) -> bool:
+    """True when a notification comes from a phone-mirroring / relay bridge whose
+    own name is not the real source app (Phone Link, Link to Windows, ...)."""
+    if _norm(app_name) in _FORWARDERS:
+        return True
+    if app_id:
+        nid = _norm(app_id)
+        return any(f in nid for f in _FORWARDERS)
+    return False
+
+
+def brand_color_from_text(text: Optional[str]) -> Optional[RGB]:
+    """Detect a known source-app brand mentioned in *text* and return its colour.
+
+    For forwarded notifications whose attributed app is a bridge, the real app is
+    named in the title/body (e.g. "Instagram: liked your photo"). Matched against a
+    curated, distinctive set with word boundaries so ordinary wording doesn't fire.
+    """
+    if not text:
+        return None
+    for pat, rgb in _SOURCE_PATTERNS:
+        if pat.search(text):
+            return rgb
+    return None
