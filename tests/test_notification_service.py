@@ -78,6 +78,11 @@ def test_keyword_is_case_insensitive_substring(monkeypatch):
     assert svc.resolve_color(ev) == (1, 1, 1)
 
 
+# A made-up app that is NOT in the brand table, so the brand layer falls through
+# and the live icon-extraction path is exercised.
+_UNKNOWN = dict(app_id="com.acme.internaltool", app_name="Acme Internal Tool")
+
+
 def test_icon_color_cached_and_not_reextracted(monkeypatch):
     svc, _, _ = _service(monkeypatch)
     calls = {"n": 0}
@@ -87,7 +92,7 @@ def test_icon_color_cached_and_not_reextracted(monkeypatch):
         return (40, 50, 60)
 
     monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color", fake_extract)
-    ev = _event(app_id="slack", icon=b"PNGDATA")
+    ev = _event(icon=b"PNGDATA", **_UNKNOWN)
     assert svc.resolve_color(ev) == (40, 50, 60)
     assert svc.resolve_color(ev) == (40, 50, 60)
     assert calls["n"] == 1            # second lookup hits the cache
@@ -96,15 +101,59 @@ def test_icon_color_cached_and_not_reextracted(monkeypatch):
 def test_no_icon_falls_back_to_default(monkeypatch):
     svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
     monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color", lambda *a, **k: None)
-    assert svc.resolve_color(_event(app_id="noicon", icon=b"x")) == (7, 7, 7)
+    assert svc.resolve_color(_event(icon=b"x", **_UNKNOWN)) == (7, 7, 7)
 
 
 def test_missing_icon_bytes_not_cached(monkeypatch):
     # No icon payload at all → fall back, but DON'T persist the no-icon sentinel,
     # so a later notification that carries an icon can still populate the colour.
     svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
-    assert svc.resolve_color(_event(app_id="later", icon=None)) == (7, 7, 7)
-    assert "later" not in svc._color_cache
+    assert svc.resolve_color(_event(icon=None, **_UNKNOWN)) == (7, 7, 7)
+    assert _UNKNOWN["app_id"] not in svc._color_cache
+
+
+def test_brand_colour_for_known_app(monkeypatch):
+    # Known app, no override / keyword / icon → its official brand colour, not the
+    # white default. Discord's brand colour is #5865F2.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    assert svc.resolve_color(_event(app_id="discord", app_name="Discord", icon=None)) == (88, 101, 242)
+
+
+def test_override_beats_brand(monkeypatch):
+    svc, _, _ = _service(monkeypatch, app_overrides={"Discord": [1, 2, 3]})
+    assert svc.resolve_color(_event(app_name="Discord")) == (1, 2, 3)
+
+
+def test_keyword_beats_brand(monkeypatch):
+    svc, _, _ = _service(monkeypatch, keyword_rules=[{"keyword": "discord", "color": [9, 9, 9]}])
+    assert svc.resolve_color(_event(app_name="Discord")) == (9, 9, 9)
+
+
+def test_brand_beats_icon_and_skips_extraction(monkeypatch):
+    svc, _, _ = _service(monkeypatch)
+    called = {"n": 0}
+
+    def fake_extract(icon_bytes, analyzer=None):
+        called["n"] += 1
+        return (1, 1, 1)
+
+    monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color", fake_extract)
+    # Known app carrying an icon: brand colour wins and the icon is never extracted.
+    assert svc.resolve_color(_event(app_name="Discord", icon=b"PNG")) == (88, 101, 242)
+    assert called["n"] == 0
+
+
+def test_brand_matched_via_app_id(monkeypatch):
+    # Display name unknown, but the AUMID carries the brand token.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_id="com.squirrel.Discord.Discord", app_name="", icon=None)
+    assert svc.resolve_color(ev) == (88, 101, 242)
+
+
+def test_fixed_mode_skips_brand(monkeypatch):
+    # Fixed mode forces the default even for a known brand.
+    svc, _, _ = _service(monkeypatch, color_mode="fixed", default_color=[5, 6, 7])
+    assert svc.resolve_color(_event(app_name="Discord", icon=None)) == (5, 6, 7)
 
 
 def test_corrupt_cache_resets_to_empty(monkeypatch, tmp_path):
