@@ -1091,6 +1091,7 @@ class AmbilightPipeline:
                 cap = ScreenCaptureManager(
                     preferred_method=cfg.capture.method, target=target, fps_target=cfg.capture.fps_target,
                     analysis_width=cfg.capture.analysis_width, analysis_height=cfg.capture.analysis_height,
+                    hook_target=cfg.capture.hook_target,
                 )
                 cap.start()  # raises if no backend can be opened
                 caps[raw_mi] = cap

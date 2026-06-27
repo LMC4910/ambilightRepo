@@ -178,6 +178,24 @@ def test_open_returns_false_when_exe_missing(monkeypatch):
     assert HookCaptureBackend().open({"index": 0}) is False
 
 
+def test_backend_defaults_mode_hook_and_target_auto():
+    be = HookCaptureBackend()
+    assert be._mode == "hook"
+    assert be._hook_target == "auto"   # empty hook_target -> auto-detect
+
+
+def test_backend_accepts_fake_mode_and_custom_target():
+    be = HookCaptureBackend(mode="fake", hook_target="Witcher3.exe")
+    assert be._mode == "fake"
+    assert be._hook_target == "Witcher3.exe"
+
+
+def test_hook_target_threaded_from_manager():
+    m = ScreenCaptureManager(preferred_method="hook", hook_target="game.exe")
+    hook = next(b for b in m._candidates if b.name == "hook")
+    assert hook._hook_target == "game.exe"
+
+
 # ---------------------------------------------------------------------------
 # Live integration — drives the real capture_host.exe fake frame generator.
 # ---------------------------------------------------------------------------
@@ -190,7 +208,7 @@ _HOST_EXE = CaptureHostProcess.resolve_exe()
     reason="capture_host.exe not built (run cmake in native/)",
 )
 def test_live_host_delivers_animated_frames():
-    be = HookCaptureBackend()
+    be = HookCaptureBackend(mode="fake")  # transport test: drive the host's fake source
     assert be.open({"index": 0, "width": 320, "height": 180},
                    target_size=(80, 45), fps_target=30)
     try:

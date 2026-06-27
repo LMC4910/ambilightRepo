@@ -755,6 +755,7 @@ class ScreenCaptureManager:
         analysis_width: int = 80,
         analysis_height: int = 45,
         target=None,
+        hook_target: str = "",
     ) -> None:
         self._target = _as_target(target if target is not None else monitor_index)
         self._monitor_index = int(self._target.get("index", 0))
@@ -792,7 +793,8 @@ class ScreenCaptureManager:
         if preferred_method == "hook":
             try:
                 from .hook_capture import HookCaptureBackend
-                all_backends = {"hook": HookCaptureBackend(), **all_backends}
+                all_backends = {"hook": HookCaptureBackend(hook_target=hook_target),
+                                **all_backends}
             except Exception as exc:  # noqa: BLE001 — never let opt-in break defaults
                 logger.warning("[Capture] hook backend unavailable: %s", exc)
         order = [preferred_method] + [k for k in all_backends if k != preferred_method]

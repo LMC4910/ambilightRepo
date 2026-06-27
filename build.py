@@ -36,6 +36,7 @@ NATIVE_BUILD = NATIVE_DIR / "build"
 
 SERVICE_NAME = "ambilight-service"
 CAPTURE_HOST_EXE = "capture_host.exe"
+GRAPHICS_HOOK_DLL = "graphics_hook.dll"
 SYSTEM = platform.system()  # Windows | Darwin | Linux
 
 
@@ -121,19 +122,26 @@ def _check_version_sync() -> str:
     return canonical_version
 
 
-def _find_capture_host() -> Path | None:
-    """Locate the built native helper across the generator layouts CMake may use
-    (Visual Studio multi-config puts it under a ``Release/`` subdir; Ninja does
-    not). Returns *None* if it has not been built."""
+def _find_native_artifact(filename: str) -> Path | None:
+    """Locate a built native artifact under native/build/bin across the generator
+    layouts CMake may use (Visual Studio multi-config adds a ``Release/`` subdir;
+    Ninja does not). Returns *None* if it has not been built."""
     for rel in (
-        Path("capture_host") / "Release" / CAPTURE_HOST_EXE,  # Visual Studio gen
-        Path("capture_host") / CAPTURE_HOST_EXE,              # Ninja / single-config
-        Path("Release") / CAPTURE_HOST_EXE,
+        Path("bin") / "Release" / filename,  # Visual Studio gen
+        Path("bin") / filename,              # Ninja / single-config
     ):
         p = NATIVE_BUILD / rel
         if p.is_file():
             return p
     return None
+
+
+def _find_capture_host() -> Path | None:
+    return _find_native_artifact(CAPTURE_HOST_EXE)
+
+
+def _find_graphics_hook() -> Path | None:
+    return _find_native_artifact(GRAPHICS_HOOK_DLL)
 
 
 def _vs_generator() -> str | None:
@@ -299,16 +307,24 @@ def build_service(gpu: bool = False) -> None:
 
     sep = os.pathsep  # ; on Windows, : elsewhere
 
-    # Bundle the native DX11 capture helper under `native/` in the onedir so the
-    # opt-in "hook" backend can launch it via resource_path('native/capture_host.exe').
-    # Opt-in and non-essential: a missing helper only disables the hook backend
-    # (it falls back to WGC/DXGI/MSS), so warn rather than fail the build.
+    # Bundle the native capture helper + injected hook DLL together under `native/`
+    # in the onedir, so the opt-in "hook" backend launches capture_host.exe via
+    # resource_path('native/capture_host.exe') and the host finds graphics_hook.dll
+    # right next to itself. Opt-in and non-essential: a missing helper only disables
+    # the hook backend (it falls back to WGC/DXGI/MSS), so warn rather than fail.
     add_binary_args: list[str] = []
     if SYSTEM == "Windows":
         host = _find_capture_host()
+        hook_dll = _find_graphics_hook()
         if host is not None:
             add_binary_args += ["--add-binary", f"{host}{sep}native"]
             print(f"[OK] Bundling native capture helper: {host}")
+            if hook_dll is not None:
+                add_binary_args += ["--add-binary", f"{hook_dll}{sep}native"]
+                print(f"[OK] Bundling graphics hook DLL: {hook_dll}")
+            else:
+                print("[WARN] graphics_hook.dll not built; game capture (the 'hook' "
+                      "backend's real source) will be unavailable.")
         else:
             print("[WARN] capture_host.exe not built; the 'hook' capture backend "
                   "will be unavailable in this bundle (run build_native first).")

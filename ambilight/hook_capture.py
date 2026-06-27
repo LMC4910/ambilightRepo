@@ -194,27 +194,34 @@ class CaptureHostProcess:
 
     @classmethod
     def resolve_exe(cls) -> Optional[str]:
-        """First existing path to the host binary, or *None* if not built."""
+        """First existing path to the host binary, or *None* if not built.
+
+        graphics_hook.dll is built into the same directory, so capture_host can
+        always find it next to itself (dev and frozen alike)."""
         candidates: "list[str]" = []
         if is_frozen():
             candidates.append(resource_path(os.path.join("native", cls._EXE_NAME)))
         # Dev: two levels up from this file is the repo root.
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        native = os.path.join(repo_root, "native")
+        bin_dir = os.path.join(repo_root, "native", "build", "bin")
         candidates += [
-            os.path.join(native, "build", "capture_host", cls._EXE_NAME),         # Ninja
-            os.path.join(native, "build", "capture_host", "Release", cls._EXE_NAME),  # VS gen
-            os.path.join(native, "build", "Release", cls._EXE_NAME),               # legacy
-            os.path.join(native, cls._EXE_NAME),                                   # prebuilt
+            os.path.join(bin_dir, "Release", cls._EXE_NAME),  # VS multi-config
+            os.path.join(bin_dir, cls._EXE_NAME),             # Ninja single-config
+            os.path.join(repo_root, "native", cls._EXE_NAME),  # prebuilt
         ]
         for path in candidates:
             if os.path.isfile(path):
                 return path
         return None
 
-    def launch(self, shm_name: str, fps: int) -> bool:
+    def launch(self, shm_name: str, fps: int, mode: str = "hook",
+               target: str = "auto") -> bool:
         """(Re)launch the host attached to *shm_name*. Returns False if the
-        binary is missing or the spawn fails."""
+        binary is missing or the spawn fails.
+
+        ``mode`` is ``"hook"`` (real game capture) or ``"fake"`` (animated test
+        source). ``target`` is the game exe filter for hook mode (``"auto"`` =
+        auto-detect any fullscreen game)."""
         self.stop()
         exe = self.resolve_exe()
         if exe is None:
@@ -225,9 +232,11 @@ class CaptureHostProcess:
             exe,
             "--shm-name", shm_name,
             "--fps", str(int(fps)),
-            "--mode", "fake",
+            "--mode", mode,
             "--parent-pid", str(os.getpid()),
         ]
+        if mode == "hook":
+            args += ["--target", target or "auto"]
         creationflags = 0
         if sys.platform == "win32":
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -280,9 +289,18 @@ class CaptureHostProcess:
 
 
 class HookCaptureBackend(CaptureBackend):
-    """Opt-in capture backend that sources frames from a DX11 game via the native
-    host over shared memory. Matches the :class:`CaptureBackend` contract so the
-    rest of the pipeline is unchanged.
+    """Opt-in capture backend that sources frames from a Direct3D game via the
+    native host + injected hook over shared memory. Matches the
+    :class:`CaptureBackend` contract so the rest of the pipeline is unchanged.
+
+    ``mode="hook"`` (default) captures a real game; ``mode="fake"`` drives the
+    host's animated test source (used by the transport tests). ``hook_target``
+    is the game exe filter ("" / "auto" = auto-detect any fullscreen game).
+
+    Handover: when no game is foreground there are no frames, so ``grab()``
+    returns *None* and the manager falls back to WGC/DXGI/MSS (desktop); when a
+    game goes fullscreen the host injects and the manager re-promotes hook on its
+    next recovery cycle.
     """
 
     name = "hook"
@@ -292,7 +310,9 @@ class HookCaptureBackend(CaptureBackend):
     _STALE_S = 1.0        # frame_id stuck longer than this => treat as failure
     _RELAUNCH_MAX_S = 5.0
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "hook", hook_target: str = "") -> None:
+        self._mode = mode if mode in ("hook", "fake") else "hook"
+        self._hook_target = (hook_target or "").strip() or "auto"
         self._buffer: Optional[SharedFrameBuffer] = None
         self._host: Optional[CaptureHostProcess] = None
         self._target_size: Optional["tuple[int, int]"] = None
@@ -318,9 +338,13 @@ class HookCaptureBackend(CaptureBackend):
             )
             return False
 
+        # Size the buffer to the LARGEST monitor so an auto-detected game on any
+        # display fits, regardless of which monitor `target` points at. Fall back
+        # to the target monitor's dims, then a 1080p default.
         t = _as_target(target)
-        max_w = int(t.get("width") or 0) or self._DEFAULT_MAX[0]
-        max_h = int(t.get("height") or 0) or self._DEFAULT_MAX[1]
+        max_w, max_h = _max_monitor_size()
+        max_w = max_w or int(t.get("width") or 0) or self._DEFAULT_MAX[0]
+        max_h = max_h or int(t.get("height") or 0) or self._DEFAULT_MAX[1]
 
         try:
             self._buffer = SharedFrameBuffer(max_w, max_h)
@@ -330,7 +354,8 @@ class HookCaptureBackend(CaptureBackend):
             return False
 
         self._host = CaptureHostProcess()
-        if not self._host.launch(self._buffer.name, fps_target):
+        if not self._host.launch(self._buffer.name, fps_target,
+                                 mode=self._mode, target=self._hook_target):
             logger.info("[Capture] hook: capture_host failed to launch")
             self._cleanup()
             return False
@@ -398,7 +423,8 @@ class HookCaptureBackend(CaptureBackend):
         self._relaunch_attempts += 1
         logger.info("[Capture] hook: relaunching capture_host (attempt %d)",
                     self._relaunch_attempts)
-        self._host.launch(self._buffer.name, self._fps)
+        self._host.launch(self._buffer.name, self._fps,
+                          mode=self._mode, target=self._hook_target)
         self._last_advance_t = now  # give the new host time before judging it again
 
     def _cleanup(self) -> None:
@@ -437,3 +463,19 @@ def _logs_dir() -> str:
     d = os.path.join(str(user_data_dir()), "logs")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _max_monitor_size() -> "tuple[int, int]":
+    """Largest (width, height) across all monitors, or (0, 0) if unavailable.
+
+    The hook auto-detects a fullscreen game on any display, so the shared buffer
+    is sized to the biggest monitor — any game then fits regardless of which
+    screen it is on. Best-effort; never raises."""
+    try:
+        from .monitors import list_monitors
+        mons = list_monitors() or []
+        w = max((int(m.get("width") or 0) for m in mons), default=0)
+        h = max((int(m.get("height") or 0) for m in mons), default=0)
+        return w, h
+    except Exception:  # noqa: BLE001 — sizing is best-effort
+        return 0, 0

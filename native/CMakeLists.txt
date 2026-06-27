@@ -31,6 +31,12 @@ if(NOT WIN32)
     message(FATAL_ERROR "ambilight_native targets Windows only.")
 endif()
 
-# Phase 1: the fake-frame capture host. Phase 2 will add:
-#   add_subdirectory(graphics_hook)
-add_subdirectory(capture_host)
+# Land capture_host.exe and graphics_hook.dll in one directory so the host can
+# resolve the DLL next to itself (matches the frozen bundle, where PyInstaller
+# places both under native/). Multi-config generators (VS) add a per-config
+# subdir (bin/Release); single-config (Ninja) use bin/ directly.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_subdirectory(shared_memory)   # ambshm static lib (shared by both targets)
+add_subdirectory(capture_host)    # capture_host.exe
+add_subdirectory(graphics_hook)   # graphics_hook.dll (injected into games)
