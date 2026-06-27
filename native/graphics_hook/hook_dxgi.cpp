@@ -12,9 +12,12 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d10.h>
+#include <d3d12.h>
 #include <dxgi.h>
+#include <dxgi1_4.h>
 
 #include <chrono>
+#include <utility>
 #include <vector>
 
 #include "hook_dxgi.h"
@@ -23,6 +26,8 @@
 #include "vmt_hook.h"
 #include "capture_util.h"
 #include "hooklog.h"
+
+#include <MinHook.h>
 
 namespace ambilight {
 
@@ -51,6 +56,22 @@ std::chrono::steady_clock::time_point g_last_capture{};
 DXGI_FORMAT g_warned_fmt = DXGI_FORMAT_UNKNOWN;
 bool g_logged_first_frame = false;
 bool g_logged_oversize = false;
+
+// --- DX12 capture state (command-queue path) ---
+using ExecuteCommandLists_t =
+    void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
+constexpr unsigned kExecuteCommandListsSlot = 10;
+ExecuteCommandLists_t g_orig_execute = nullptr;
+ID3D12CommandQueue* g_d12_queue = nullptr;   // a captured DIRECT queue (AddRef'd)
+ID3D12Device* g_d12_device = nullptr;        // owner of our cached copy resources
+ID3D12CommandAllocator* g_d12_alloc = nullptr;
+ID3D12GraphicsCommandList* g_d12_list = nullptr;
+ID3D12Fence* g_d12_fence = nullptr;
+HANDLE g_d12_event = nullptr;
+UINT64 g_d12_fence_val = 0;
+ID3D12Resource* g_d12_readback = nullptr;
+UINT64 g_d12_readback_size = 0;
+bool g_logged_no_queue = false;
 
 long long now_us() {
     using namespace std::chrono;
@@ -179,6 +200,201 @@ void capture_d10(IDXGISwapChain* sc, ID3D10Device* dev,
     }
 }
 
+// --- DX12 ---------------------------------------------------------------
+// DX12 needs a command queue to copy the backbuffer. The swapchain is created
+// with the queue (not the device), so we capture a DIRECT queue by hooking
+// ID3D12CommandQueue::ExecuteCommandLists.
+
+void STDMETHODCALLTYPE Execute_detour(ID3D12CommandQueue* self, UINT num,
+                                      ID3D12CommandList* const* lists) {
+    if (g_d12_queue == nullptr && self != nullptr) {
+        const D3D12_COMMAND_QUEUE_DESC d = self->GetDesc();
+        if (d.Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+            self->AddRef();
+            g_d12_queue = self;
+            hook_log("captured D3D12 direct command queue");
+        }
+    }
+    g_orig_execute(self, num, lists);
+}
+
+void release_d12_resources() {
+    if (g_d12_readback) { g_d12_readback->Release(); g_d12_readback = nullptr; }
+    if (g_d12_list) { g_d12_list->Release(); g_d12_list = nullptr; }
+    if (g_d12_alloc) { g_d12_alloc->Release(); g_d12_alloc = nullptr; }
+    if (g_d12_fence) { g_d12_fence->Release(); g_d12_fence = nullptr; }
+    if (g_d12_event) { CloseHandle(g_d12_event); g_d12_event = nullptr; }
+    g_d12_device = nullptr;
+    g_d12_readback_size = 0;
+    g_d12_fence_val = 0;
+}
+
+bool ensure_d12_resources(ID3D12Device* dev, UINT64 readback_size) {
+    if (g_d12_device == dev && g_d12_alloc && g_d12_list && g_d12_fence &&
+        g_d12_readback && g_d12_readback_size >= readback_size) {
+        return true;
+    }
+    if (g_d12_device != dev) release_d12_resources();
+
+    if (g_d12_alloc == nullptr &&
+        FAILED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                           __uuidof(ID3D12CommandAllocator),
+                                           reinterpret_cast<void**>(&g_d12_alloc)))) {
+        return false;
+    }
+    if (g_d12_list == nullptr) {
+        if (FAILED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_d12_alloc, nullptr,
+                                          __uuidof(ID3D12GraphicsCommandList),
+                                          reinterpret_cast<void**>(&g_d12_list)))) {
+            return false;
+        }
+        g_d12_list->Close();  // start closed; we Reset() each frame
+    }
+    if (g_d12_fence == nullptr) {
+        if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence),
+                                    reinterpret_cast<void**>(&g_d12_fence)))) {
+            return false;
+        }
+        g_d12_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    }
+    if (g_d12_readback == nullptr || g_d12_readback_size < readback_size) {
+        if (g_d12_readback) { g_d12_readback->Release(); g_d12_readback = nullptr; }
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = readback_size;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(dev->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rd,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                __uuidof(ID3D12Resource),
+                                                reinterpret_cast<void**>(&g_d12_readback)))) {
+            return false;
+        }
+        g_d12_readback_size = readback_size;
+    }
+    g_d12_device = dev;
+    return true;
+}
+
+void capture_d12(IDXGISwapChain* sc, ID3D12Device* dev,
+                 const std::chrono::steady_clock::time_point& now) {
+    if (g_d12_queue == nullptr) {
+        if (!g_logged_no_queue) {
+            hook_log("DX12: waiting for a command queue (ExecuteCommandLists)");
+            g_logged_no_queue = true;
+        }
+        return;
+    }
+
+    IDXGISwapChain3* sc3 = nullptr;
+    if (FAILED(sc->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&sc3))) ||
+        sc3 == nullptr) {
+        return;
+    }
+    const UINT idx = sc3->GetCurrentBackBufferIndex();
+    sc3->Release();
+
+    ID3D12Resource* back = nullptr;
+    if (FAILED(sc->GetBuffer(idx, __uuidof(ID3D12Resource), reinterpret_cast<void**>(&back))) ||
+        back == nullptr) {
+        return;
+    }
+    const D3D12_RESOURCE_DESC rd = back->GetDesc();
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT rows = 0;
+    UINT64 row_bytes = 0, total = 0;
+    dev->GetCopyableFootprints(&rd, 0, 1, 0, &fp, &rows, &row_bytes, &total);
+
+    if (ensure_d12_resources(dev, total)) {
+        g_d12_alloc->Reset();
+        g_d12_list->Reset(g_d12_alloc, nullptr);
+
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = back;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        g_d12_list->ResourceBarrier(1, &b);
+
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = g_d12_readback;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = fp;
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = back;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+        g_d12_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        std::swap(b.Transition.StateBefore, b.Transition.StateAfter);  // back to PRESENT
+        g_d12_list->ResourceBarrier(1, &b);
+        g_d12_list->Close();
+
+        ID3D12CommandList* lists[] = {g_d12_list};
+        g_orig_execute(g_d12_queue, 1, lists);  // original, to avoid re-entering our detour
+
+        const UINT64 v = ++g_d12_fence_val;
+        if (SUCCEEDED(g_d12_queue->Signal(g_d12_fence, v))) {
+            if (g_d12_fence->GetCompletedValue() < v && g_d12_event != nullptr) {
+                g_d12_fence->SetEventOnCompletion(v, g_d12_event);
+                WaitForSingleObject(g_d12_event, 1000);
+            }
+            void* mapped = nullptr;
+            D3D12_RANGE read_range{0, static_cast<SIZE_T>(total)};
+            if (SUCCEEDED(g_d12_readback->Map(0, &read_range, &mapped)) && mapped) {
+                publish_bgr(static_cast<const uint8_t*>(mapped),
+                            static_cast<int>(fp.Footprint.RowPitch),
+                            static_cast<UINT>(rd.Width), rd.Height, rd.Format, now);
+                D3D12_RANGE no_write{0, 0};
+                g_d12_readback->Unmap(0, &no_write);
+            }
+        }
+    }
+    back->Release();
+}
+
+bool install_d3d12_queue_hook() {
+    HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
+    if (d3d12 == nullptr) return false;
+    using D3D12CreateDevice_t = HRESULT(WINAPI*)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
+    auto create = reinterpret_cast<D3D12CreateDevice_t>(GetProcAddress(d3d12, "D3D12CreateDevice"));
+    if (create == nullptr) return false;
+
+    ID3D12Device* dev = nullptr;
+    if (FAILED(create(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
+                      reinterpret_cast<void**>(&dev))) || dev == nullptr) {
+        hook_log("DX12: dummy device creation failed (no DX12 adapter?)");
+        return false;
+    }
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ID3D12CommandQueue* q = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(dev->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue),
+                                          reinterpret_cast<void**>(&q))) && q != nullptr) {
+        void** vt = *reinterpret_cast<void***>(q);
+        void* el_addr = vt[kExecuteCommandListsSlot];
+        q->Release();
+        if (MH_CreateHook(el_addr, reinterpret_cast<LPVOID>(&Execute_detour),
+                          reinterpret_cast<LPVOID*>(&g_orig_execute)) == MH_OK &&
+            MH_EnableHook(el_addr) == MH_OK) {
+            ok = true;
+        }
+    }
+    dev->Release();
+    hook_log(ok ? "DX12 queue hook installed (ExecuteCommandLists)"
+               : "DX12 queue hook failed");
+    return ok;
+}
+
 // The actual capture (separate from the SEH-guarded detour so its C++ objects
 // are legal). Best-effort: any failure simply skips this frame.
 void capture_dxgi(IDXGISwapChain* sc) {
@@ -216,6 +432,13 @@ void capture_dxgi(IDXGISwapChain* sc) {
         d10 != nullptr) {
         capture_d10(sc, d10, now);
         d10->Release();
+        return;
+    }
+    ID3D12Device* d12 = nullptr;
+    if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&d12))) &&
+        d12 != nullptr) {
+        capture_d12(sc, d12, now);
+        d12->Release();
         return;
     }
 }
@@ -315,6 +538,11 @@ bool install_dxgi_hook(ShmWriter* writer, const HookControl* control) {
         return false;
     }
     hook_log("DXGI hook installed (Present + ResizeBuffers), fps=%u", fps);
+
+    // For DX12 games we also need a command queue to copy the backbuffer.
+    if (GetModuleHandleW(L"d3d12.dll") != nullptr) {
+        install_d3d12_queue_hook();
+    }
     return true;
 }
 
