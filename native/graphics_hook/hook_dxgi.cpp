@@ -235,9 +235,23 @@ HRESULT STDMETHODCALLTYPE ResizeBuffers_detour(IDXGISwapChain* self, UINT count,
     return g_orig_resize(self, count, w, h, fmt, flags);
 }
 
-// Create a throwaway device+swapchain just to read the DXGI vtable.
+// Create a throwaway device+swapchain just to read the DXGI vtable. D3D11 is
+// resolved dynamically (and loaded on demand) so graphics_hook.dll has no
+// link-time DirectX dependency — injecting into any game stays clean.
+using D3D11CreateDeviceAndSwapChain_t = HRESULT(WINAPI*)(
+    IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL*, UINT, UINT,
+    const DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, ID3D11Device**, D3D_FEATURE_LEVEL*,
+    ID3D11DeviceContext**);
+
 IDXGISwapChain* make_dummy_swapchain(HWND hwnd, ID3D11Device** out_dev,
                                      ID3D11DeviceContext** out_ctx) {
+    HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
+    if (d3d11 == nullptr) d3d11 = LoadLibraryW(L"d3d11.dll");
+    if (d3d11 == nullptr) return nullptr;
+    auto create = reinterpret_cast<D3D11CreateDeviceAndSwapChain_t>(
+        GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain"));
+    if (create == nullptr) return nullptr;
+
     DXGI_SWAP_CHAIN_DESC scd{};
     scd.BufferCount = 1;
     scd.BufferDesc.Width = 8;
@@ -253,9 +267,8 @@ IDXGISwapChain* make_dummy_swapchain(HWND hwnd, ID3D11Device** out_dev,
     for (D3D_DRIVER_TYPE dt : drivers) {
         IDXGISwapChain* sc = nullptr;
         D3D_FEATURE_LEVEL fl{};
-        const HRESULT hr = D3D11CreateDeviceAndSwapChain(
-            nullptr, dt, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &scd, &sc,
-            out_dev, &fl, out_ctx);
+        const HRESULT hr = create(nullptr, dt, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
+                                  &scd, &sc, out_dev, &fl, out_ctx);
         if (SUCCEEDED(hr) && sc != nullptr) return sc;
     }
     return nullptr;

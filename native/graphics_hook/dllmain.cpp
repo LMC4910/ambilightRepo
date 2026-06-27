@@ -16,7 +16,10 @@
 #include "shm_writer.h"
 #include "hook_control.h"
 #include "hook_dxgi.h"
+#include "hook_d3d9.h"
 #include "hooklog.h"
+
+#include <MinHook.h>
 
 namespace {
 
@@ -70,9 +73,26 @@ DWORD WINAPI InitThread(LPVOID) {
     }
     ambilight::hook_log("shared buffer attached: %ux%u", g_writer.max_width(), g_writer.max_height());
 
-    // Install the capture hooks. Present detours start publishing frames once the
+    // Install only the hooks the target actually needs, based on which Direct3D
+    // runtimes it has loaded. The Present detours start publishing frames once the
     // game's window is foreground.
-    ambilight::install_dxgi_hook(&g_writer, g_control);
+    const bool has_dxgi = GetModuleHandleW(L"d3d11.dll") || GetModuleHandleW(L"d3d12.dll") ||
+                          GetModuleHandleW(L"d3d10.dll");
+    const bool has_d3d9 = GetModuleHandleW(L"d3d9.dll") != nullptr;
+    if (!has_dxgi && !has_d3d9) {
+        ambilight::hook_log("no Direct3D runtime detected in this process; no hooks installed");
+        return 0;
+    }
+
+    // MinHook backs the inline hooks (D3D9 / D3D12). DXGI uses VMT and needs no
+    // init, but initializing here is harmless and centralizes it.
+    const MH_STATUS mh = MH_Initialize();
+    if (mh != MH_OK && mh != MH_ERROR_ALREADY_INITIALIZED) {
+        ambilight::hook_log("MH_Initialize failed (%d)", mh);
+    }
+
+    if (has_dxgi) ambilight::install_dxgi_hook(&g_writer, g_control);
+    if (has_d3d9) ambilight::install_d3d9_hook(&g_writer, g_control);
     return 0;
 }
 
