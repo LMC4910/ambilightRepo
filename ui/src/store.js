@@ -191,6 +191,21 @@ export const useStore = create((set, get) => ({
     }
   },
 
+  // --- Game capture (hook) re-inject ---
+  retargetCapture: async (target) => {
+    try {
+      await window.api.capture.retarget(target, true);
+      await get().fetchSettings();
+      get().toast(target ? `Injecting into ${target}…` : 'Re-injecting game capture…');
+      return true;
+    } catch (e) {
+      console.error(e);
+      const reason = (e?.message || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+      get().toast(reason || 'Could not re-trigger game capture');
+      return false;
+    }
+  },
+
   // --- Notification flash ---
   notifPermission: async () => {
     try {

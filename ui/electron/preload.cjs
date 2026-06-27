@@ -84,6 +84,10 @@ contextBridge.exposeInMainWorld('api', {
     openFolder: () => ipcRenderer.invoke('api:logs:openFolder'),
     clear: () => ipcRenderer.invoke('api:logs:clear')
   },
+  capture: {
+    // Point game capture at a specific .exe (or "" for auto) and (re)inject now.
+    retarget: (target, enabled) => ipcRenderer.invoke('api:capture:retarget', { target, enabled })
+  },
   updater: {
     check: () => ipcRenderer.invoke('app:update:check'),
     install: () => ipcRenderer.invoke('app:update:install'),

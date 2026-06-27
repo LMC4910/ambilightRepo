@@ -53,6 +53,21 @@ function captureSource(m) {
   return { label: raw.toUpperCase(), color: 'var(--faint)', sub: 'unknown backend' }
 }
 
+// Game-capture (hook) status for the dashboard indicator. The capture manager
+// only makes "hook" the active backend when a game is actually being captured,
+// so capture_backend === "hook" == injection working; otherwise it's searching.
+function gameCapture(m) {
+  const backend = (m.capture_backend || '').toLowerCase()
+  if (!m.hook_enabled)
+    return { tone: 'faint', label: 'Off',
+      sub: 'Game capture is off. Enter a game .exe (or leave blank for any fullscreen game) and Re-inject to enable it.' }
+  if (backend === 'hook')
+    return { tone: 'good', label: 'Capturing',
+      sub: `Injection working${m.hook_target ? ` · ${m.hook_target}` : ' · auto-detecting fullscreen games'}.` }
+  return { tone: 'warn', label: 'Searching',
+    sub: `Waiting for a fullscreen game${m.hook_target ? ` matching “${m.hook_target}”` : ''}. Launch it (DirectX 9/10/11/12), or set its .exe and Re-inject.` }
+}
+
 function MCard({ lbl, icon, children, foot, spark }) {
   return (
     <div className="card mcard">
@@ -84,8 +99,15 @@ export default function Dashboard() {
   const togglePower = () => useStore.getState().setMode(isOff ? 'screen_sync' : 'off')
   const setNotifEnabled = (v) => useStore.getState().updateSettings({ notifications: { enabled: v } })
 
+  // Game-capture re-inject control. Seed the exe field from the live status and
+  // re-sync only when the applied target actually changes (so typing isn't lost).
+  const [exe, setExe] = useState(m.hook_target || '')
+  useEffect(() => { setExe(m.hook_target || '') }, [m.hook_target])
+  const onReinject = () => useStore.getState().retargetCapture(exe.trim())
+
   const health = captureHealth(m)
   const src = captureSource(m)
+  const gc = gameCapture(m)
   const modeLabel = MODES.find((x) => x[1] === m.mode)?.[0] || 'Off'
 
   return (
@@ -158,12 +180,29 @@ export default function Dashboard() {
                       {settings?.devices?.[0]?.name || settings?.device?.name || '—'}
                     </div>
                   </div>
-                  <div className="card card-pad" style={{ flex: 1 }}>
+                  <div className="card card-pad">
                     <div className="card-title" style={{ marginBottom: 14 }}>Quick toggle</div>
                     <div className="quick-row"><span>Lights {isOff ? 'off' : 'on'}</span><Toggle checked={!isOff} onChange={togglePower} disabled={!online} /></div>
                     <div className="quick-row" style={{ marginTop: 10 }}>
                       <span>Notification flash</span>
                       <Toggle checked={!!settings?.notifications?.enabled} onChange={setNotifEnabled} disabled={!settings} />
+                    </div>
+                  </div>
+
+                  {/* Game capture (hook): status indicator + re-inject control */}
+                  <div className="card card-pad" style={{ flex: 1 }}>
+                    <div className="quick-row" style={{ marginBottom: 10 }}>
+                      <span className="card-title">Game capture</span>
+                      <span className="tag" style={{ color: `var(--${gc.tone})`, background: `color-mix(in srgb,var(--${gc.tone}) 14%,transparent)` }}>
+                        <span className="d" style={{ background: 'currentColor' }} />{gc.label}
+                      </span>
+                    </div>
+                    <div className="subtle" style={{ fontSize: 11.5, lineHeight: 1.45, marginBottom: 10 }}>{gc.sub}</div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <input className="field mono" style={{ flex: 1, minWidth: 0 }} placeholder="auto (any fullscreen game)"
+                        value={exe} onChange={(e) => setExe(e.target.value)} disabled={!online}
+                        onKeyDown={(e) => { if (e.key === 'Enter') onReinject() }} />
+                      <button className="btn" onClick={onReinject} disabled={!online}><Icon n="syringe" />Re-inject</button>
                     </div>
                   </div>
                 </div>

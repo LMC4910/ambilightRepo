@@ -509,6 +509,12 @@ function createWindow() {
     body: JSON.stringify({ mode, params })
   }))
 
+  // --- Game capture (hook) re-inject ---
+  ipcMain.handle('api:capture:retarget', async (e, body) => fetchApi('/api/capture/retarget', {
+    method: 'POST',
+    body: JSON.stringify(body || {})
+  }))
+
   // --- Diagnostics / Effects ---
   ipcMain.handle('api:diagnostics:get', async () => fetchApi('/api/diagnostics'))
   ipcMain.handle('api:effects:list', async () => fetchApi('/api/effects'))
