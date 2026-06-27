@@ -156,6 +156,38 @@ def test_fixed_mode_skips_brand(monkeypatch):
     assert svc.resolve_color(_event(app_name="Discord", icon=None)) == (5, 6, 7)
 
 
+def test_forwarded_notification_uses_source_brand(monkeypatch):
+    # Phone Link mirrors an Instagram DM: the flash uses Instagram's colour
+    # (#FF0069), NOT the bridge's. The source app is named in the title.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_id="Microsoft.YourPhone_8wekyb3d8bbwe!App", app_name="Phone Link",
+                title="Instagram", body="someone liked your photo", icon=None)
+    assert svc.resolve_color(ev) == (255, 0, 105)
+
+
+def test_forwarded_keyword_rule_still_wins(monkeypatch):
+    # An explicit keyword rule takes priority over auto source detection.
+    svc, _, _ = _service(monkeypatch, keyword_rules=[{"keyword": "instagram", "color": [1, 2, 3]}])
+    ev = _event(app_name="Phone Link", app_id="phonelink", title="Instagram", body="hi", icon=None)
+    assert svc.resolve_color(ev) == (1, 2, 3)
+
+
+def test_forwarded_without_known_source_falls_through(monkeypatch):
+    # A forwarder whose text names no known app → no false colour; falls back to
+    # the default (the bridge id here carries no brand token).
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_name="Phone Link", app_id="phonelink", title="Mom", body="call me", icon=None)
+    assert svc.resolve_color(ev) == (7, 7, 7)
+
+
+def test_non_forwarder_does_not_text_scan(monkeypatch):
+    # A normal app whose message mentions another brand must NOT borrow its colour:
+    # a Discord message referencing Spotify still flashes Discord's brand colour.
+    svc, _, _ = _service(monkeypatch)
+    ev = _event(app_id="discord", app_name="Discord", title="friend", body="listen on Spotify", icon=None)
+    assert svc.resolve_color(ev) == (88, 101, 242)
+
+
 def test_corrupt_cache_resets_to_empty(monkeypatch, tmp_path):
     # A non-dict cache file must be ignored (not crash _on_notification later).
     cache = tmp_path / "notification_colors.json"

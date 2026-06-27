@@ -2,7 +2,12 @@
 
 import pytest
 
-from ambilight.notifications.brand_colors import BRAND_COLORS, brand_color
+from ambilight.notifications.brand_colors import (
+    BRAND_COLORS,
+    brand_color,
+    brand_color_from_text,
+    is_forwarder,
+)
 
 
 def test_table_is_substantial():
@@ -70,3 +75,39 @@ def test_matched_via_app_id_tokens(app_id, expected_name):
 def test_app_name_takes_priority_over_app_id():
     # A known display name wins even if the app_id mentions a different brand.
     assert brand_color("Spotify", "com.squirrel.Discord.Discord") == brand_color("Spotify")
+
+
+# --- forwarded / mirrored notifications -------------------------------------
+
+@pytest.mark.parametrize(
+    "name,app_id,expected",
+    [
+        ("Phone Link", "Microsoft.YourPhone_8wekyb3d8bbwe!App", True),
+        ("Link to Windows", None, True),
+        ("Your Phone", None, True),
+        ("Discord", "com.discord", False),
+        ("Instagram", None, False),
+        ("", None, False),
+    ],
+)
+def test_is_forwarder(name, app_id, expected):
+    assert is_forwarder(name, app_id) is expected
+
+
+def test_brand_color_from_text_detects_source():
+    assert brand_color_from_text("Instagram: liked your photo") == brand_color("Instagram")
+    assert brand_color_from_text("New message from WhatsApp") == brand_color("WhatsApp")
+    assert brand_color_from_text("Microsoft Teams meeting now") == brand_color("Microsoft Teams")
+
+
+def test_source_text_prefers_longer_brand_name():
+    # "Uber Eats" must win over the substring "Uber".
+    assert brand_color_from_text("Your Uber Eats order is here") == brand_color("Uber Eats")
+
+
+def test_brand_color_from_text_ignores_ordinary_words():
+    # Word-boundary + curated set → ordinary message wording must not trigger.
+    assert brand_color_from_text("let us meet at the office") is None
+    assert brand_color_from_text("call me back when you can") is None
+    assert brand_color_from_text("") is None
+    assert brand_color_from_text(None) is None
