@@ -3,6 +3,9 @@
 add_library(graphics_hook SHARED
     dllmain.cpp
     hooklog.cpp
+    vmt_hook.cpp
+    capture_util.cpp
+    hook_dxgi.cpp
 )
 
 # No "lib" prefix on MinGW so the artifact is always graphics_hook.dll.

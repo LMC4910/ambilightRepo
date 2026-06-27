@@ -40,3 +40,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_subdirectory(shared_memory)   # ambshm static lib (shared by both targets)
 add_subdirectory(capture_host)    # capture_host.exe
 add_subdirectory(graphics_hook)   # graphics_hook.dll (injected into games)
+
+# Dev/test utility (not bundled): a minimal DX11 app for exercising the hook.
+option(AMBILIGHT_BUILD_TEST_TOOLS "Build native test tools (dx11_probe)" ON)
+if(AMBILIGHT_BUILD_TEST_TOOLS)
+    add_subdirectory(test_dx11)
+endif()
