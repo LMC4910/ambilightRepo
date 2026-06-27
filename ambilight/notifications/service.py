@@ -24,6 +24,7 @@ from typing import Callable, Optional, Tuple
 
 from ..config import AppConfig
 from .base import NotificationEvent, get_notification_listener
+from .brand_colors import brand_color
 from .icon_color import icon_dominant_color
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,11 @@ class NotificationFlashService:
 
     # --- colour resolution ------------------------------------------------
     def resolve_color(self, ev: NotificationEvent) -> RGB:
-        """Resolve a flash colour for *ev* (override → keyword → icon → default)."""
+        """Resolve a flash colour for *ev*.
+
+        Priority: override → keyword → brand colour → live icon → default. Brand
+        and icon are both "logo colour" sources and are skipped in ``fixed`` mode.
+        """
         # 1. Per-app override (by stable id or display name).
         ov = self.app_overrides.get(ev.app_id) or self.app_overrides.get(ev.app_name)
         if ov:
@@ -151,8 +156,16 @@ class NotificationFlashService:
             if kw and kw in haystack:
                 return _as_rgb(rule.get("color"), self.default_color)
 
-        # 3. Icon dominant colour (cached), unless forced to a fixed colour.
         if self.color_mode != "fixed":
+            # 3. Curated brand/logo colour. Preferred over live icon extraction: it
+            #    is the official brand colour and works even when the notification
+            #    carries no icon bytes (e.g. Phone Link forwards). Only used when the
+            #    user has set no override for this app (guaranteed by the order above).
+            brand = brand_color(ev.app_name, ev.app_id)
+            if brand is not None:
+                return _as_rgb(brand, self.default_color)
+
+            # 4. Live icon dominant colour (cached) for apps not in the brand table.
             cached = self._color_cache.get(ev.app_id)
             if cached is None:
                 extracted = icon_dominant_color(ev.icon_bytes) if ev.icon_bytes else None
@@ -173,7 +186,7 @@ class NotificationFlashService:
             if cached != _NO_ICON:
                 return _as_rgb(cached, self.default_color)
 
-        # 4. Fallback.
+        # 5. Fallback.
         return _as_rgb(self.default_color, [255, 255, 255])
 
     def _pattern(self) -> dict:
