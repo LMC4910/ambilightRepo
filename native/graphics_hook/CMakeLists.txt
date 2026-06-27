@@ -2,6 +2,7 @@
 # frames into the Python-owned shared memory via the shared ambshm writer.
 add_library(graphics_hook SHARED
     dllmain.cpp
+    hooklog.cpp
 )
 
 # No "lib" prefix on MinGW so the artifact is always graphics_hook.dll.

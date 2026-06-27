@@ -1,5 +1,7 @@
 add_executable(capture_host
     main.cpp
+    inject.cpp
+    detect.cpp
 )
 
 target_include_directories(capture_host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
