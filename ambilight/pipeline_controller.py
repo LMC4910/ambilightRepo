@@ -240,6 +240,10 @@ class PipelineController:
             "params": params
         })
 
+    def recapture(self) -> None:
+        """Force the pipeline to rebuild capture (manual game-capture re-inject)."""
+        self._command_queue.put({"action": "recapture"})
+
     def flash(self, color, pattern: Optional[dict] = None) -> None:
         """Enqueue a transient notification flash for the pipeline process.
 

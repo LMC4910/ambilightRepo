@@ -216,6 +216,7 @@ class AmbilightPipeline:
         self._resolved_index: dict[int, int] = {}
         self._channels: list[_Channel] = []
         self._topology: Optional[tuple] = None
+        self._capture_cfg_sig: Optional[tuple] = None
         self._effects: EffectsManager = EffectsManager()
         self._scheduler: Optional[EffectScheduler] = None
         self._scheduled_active: bool = False
@@ -556,6 +557,12 @@ class AmbilightPipeline:
                     "capture_backend": capture_backend,
                     "capture_reason": capture_reason,
                     "degraded": degraded,
+                    # Game-capture (hook) status for the dashboard indicator.
+                    # hook_enabled = configured; capture_backend == "hook" means a
+                    # game is being captured (injection working); otherwise the
+                    # hook is "searching" and the manager fell back to the desktop.
+                    "hook_enabled": self._cfg.capture.method == "hook",
+                    "hook_target": (self._cfg.capture.hook_target or ""),
                     # True when any captured monitor currently has HDR enabled —
                     # lets the UI badge "HDR" and confirm tone-mapping is active.
                     "hdr_active": bool(
@@ -608,6 +615,14 @@ class AmbilightPipeline:
         if action == "reload":
             self._cfg = cmd["config"]
             self._apply_config_hot()
+        elif action == "recapture":
+            # Manual "re-inject" from the dashboard: force a fresh capture build so
+            # the native host relaunches and retries injection (resets the per-pid
+            # give-up state). Same safe path as a topology change.
+            logger.info("[Pipeline] Manual capture re-trigger requested.")
+            self._teardown_io()
+            self._build_io()
+            self._reeval_ownership()
         elif action == "set_owned_devices":
             self._apply_owned(set(cmd.get("owned_keys") or []))
         elif action == "flash":
@@ -909,6 +924,16 @@ class AmbilightPipeline:
             self._reeval_ownership()
             return
 
+        # Capture backend/target changed (e.g. method wgc→hook, or a new game exe
+        # for the hook backend): rebuild capture so the new ScreenCaptureManager
+        # (and, for hook, the native host with the new --target) takes effect live.
+        if self._capture_sig() != self._capture_cfg_sig:
+            logger.info("[Pipeline] Capture method/target changed; rebuilding capture.")
+            self._teardown_io()
+            self._build_io()
+            self._reeval_ownership()
+            return
+
         z = self._cfg.zones
         c = self._cfg.color
         s = self._cfg.smoothing
@@ -946,6 +971,16 @@ class AmbilightPipeline:
     # ------------------------------------------------------------------
     # Multi-device I/O construction
     # ------------------------------------------------------------------
+
+    def _capture_sig(self) -> tuple:
+        """Signature of the capture-backend config; a change rebuilds capture.
+
+        Covers the screen-capture method and (for the hook backend) the target
+        game exe, so switching to ``hook`` or pointing it at a different game
+        re-creates the ScreenCaptureManager (relaunching the native host with the
+        new ``--target``) on hot-reload."""
+        cap = self._cfg.capture
+        return (cap.method, getattr(cap, "hook_target", ""))
 
     def _topology_sig(self) -> tuple:
         """Signature of the device/monitor layout; changes trigger a rebuild.
@@ -1022,6 +1057,7 @@ class AmbilightPipeline:
             ))
 
         self._topology = self._topology_sig()
+        self._capture_cfg_sig = self._capture_sig()
         logger.info("[Pipeline] Built %d device channel(s).", len(self._channels))
         # Acquire capture now only if we're in screen-sync and powered.
         self._set_capture_active(self._power and self._effects.current_mode == "screen_sync")

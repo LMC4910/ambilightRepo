@@ -392,6 +392,30 @@ class ModeRequest(pydantic.BaseModel):
     mode: str
     params: Dict[str, Any] = {}
 
+
+class RetargetRequest(pydantic.BaseModel):
+    # Game-capture re-inject. `target` is a game exe filter ("" / "auto" = any
+    # fullscreen game). `enabled` switches capture.method to "hook".
+    target: str = ""
+    enabled: bool = True
+
+
+@app.post("/api/capture/retarget", dependencies=[Depends(verify_token)])
+async def capture_retarget(req: RetargetRequest) -> Dict[str, str]:
+    """Point game capture at a specific application and (re)trigger injection.
+
+    Persists capture.method=hook + capture.hook_target, then forces a fresh
+    capture build so the native host relaunches and retries injection now."""
+    capture_override: Dict[str, Any] = {"hook_target": req.target.strip()}
+    if req.enabled:
+        capture_override["method"] = "hook"
+    ConfigManager.update({"capture": capture_override})
+    profile_manager.active_profile = None
+    cfg = ConfigManager.get()
+    await bus.publish("CONFIG_UPDATE", cfg)
+    controller.recapture()
+    return {"message": "Re-targeting game capture", "target": req.target.strip() or "auto"}
+
 @app.put("/api/mode", dependencies=[Depends(verify_token)])
 async def set_mode(request: ModeRequest) -> Dict[str, str]:
     controller.set_mode(request.mode, request.params)
