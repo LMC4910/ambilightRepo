@@ -1,86 +1,115 @@
-# native/ — game capture host (DirectX 11 hook)
+# native/ — game capture (DirectX 9 / 10 / 11 / 12 hook)
 
 Native components that let the Python colour pipeline receive frames from a game
-running in **exclusive fullscreen DirectX 11**, which the compositor-based
+running in **exclusive/borderless fullscreen Direct3D**, which the compositor-based
 backends (WGC / DXGI / MSS) cannot reach.
 
 The Python side is `ambilight/hook_capture.py` (`HookCaptureBackend`). It is
 **opt-in only** — selected via `capture.method: hook` in `configuration.yaml` —
-and never joins the automatic WGC→DXGI→MSS fallback chain.
+and never joins the automatic WGC→DXGI→MSS fallback chain. When no game is
+foreground the hook delivers no frames, so the manager falls back to desktop
+capture; when a game goes fullscreen the hook takes over.
 
 ## Layout
 
 ```
 native/
-  shared_memory/shm_protocol.h   Canonical shared-memory wire format (single
-                                 source of truth; mirrored in hook_capture.py).
-  capture_host/                  capture_host.exe — attaches to the Python-owned
-                                 shared mapping and writes frames into it.
-    main.cpp                       CLI + Phase-1 fake animated frame generator.
-    shm_writer.{h,cpp}             Ring-buffer slot writer (seqlock protocol).
-  graphics_hook/                 (Phase 2) injected DLL that hooks
-                                 IDXGISwapChain::Present and copies the backbuffer.
+  shared_memory/
+    shm_protocol.h     Canonical frame ring-buffer wire format (mirrored in hook_capture.py).
+    shm_writer.{h,cpp} Ring-buffer slot writer (seqlock); shared lib `ambshm`.
+    hook_control.h     Fixed-name control mapping (frame-buffer name + fps + stop).
+  capture_host/        capture_host.exe — detects the foreground game, injects the DLL.
+    main.cpp             CLI + fake-frame source + hook-mode detect/inject loop.
+    detect.{h,cpp}       Foreground + fullscreen + Direct3D-module "is it a game" gate.
+    inject.{h,cpp}       SeDebugPrivilege + CreateRemoteThread(LoadLibraryW) injection.
+  graphics_hook/       graphics_hook.dll — injected into the game; hooks Present.
+    dllmain.cpp          Bootstrap: control mapping → ShmWriter → install hooks.
+    hook_dxgi.{h,cpp}    DXGI Present hook → DX10 / DX11 / DX12 capture.
+    hook_d3d9.{h,cpp}    Direct3D 9 Present hook.
+    capture_util.{h,cpp} Backbuffer format → BGR conversion.
+    vmt_hook.{h,cpp}     Vtable hooking (DXGI).
+  third_party/minhook/ Vendored MinHook (BSD-2) — inline hooks for DX9/DX12.
+  test_dx11/           dx9/dx11/dx12 probe apps (not shipped) for headless tests.
 ```
 
 ## Architecture
 
 ```
-Python (owns shared memory)            capture_host.exe
-  HookCaptureBackend.open()
-    create SharedMemory   ──┐
-    launch capture_host  ───┼──► OpenFileMapping, validate, write frames
-  grab()  ← read newest ◄───┘      (ring buffer, newest-frame-wins)
+capture_host.exe --mode hook --target <auto|exe>
+  detect foreground fullscreen Direct3D game → inject graphics_hook.dll
+  control mapping hands the DLL the frame-buffer name + fps
+
+graphics_hook.dll (inside the game)
+  hook Present → copy backbuffer → BGR → ShmWriter → Python-owned ring buffer
 ```
 
-Python **owns** the mapping, so a host crash never tears it down or crashes
-Python — `grab()` just returns the last/None frame and the backend relaunches
-the host. The host is a child process; it self-exits when stdin closes (Python
-gone) or its `--parent-pid` dies.
+Python **owns** the frame buffer, so a host/DLL crash never crashes Python. The
+DLL only writes when its window is foreground (so multiple injected games never
+fight), throttles to `fps`, and always calls the original `Present` (SEH-guarded)
+— it never breaks the game.
+
+### Hooking mechanism
+
+- **DXGI** (DX10/11/12): the `IDXGISwapChain` vtable is shared across instances,
+  so a **VMT hook** (vtable-slot swap) on a dummy swapchain intercepts the game's
+  swapchain too — dependency-free.
+- **D3D9 / D3D12**: device/queue vtables are **per-instance**, so VMT can't reach
+  the game's object. We read the shared function *code address* and **inline-hook**
+  it with [MinHook](https://github.com/TsudaKageyu/minhook) (BSD-2, vendored under
+  `third_party/minhook`). DX12 also needs a command queue, captured by hooking
+  `ID3D12CommandQueue::ExecuteCommandLists`.
+
+`graphics_hook.dll` resolves every DirectX `Create*` function at runtime
+(GetProcAddress), so it imports only KERNEL32 + USER32 — injecting into any game
+forces no extra D3D DLLs to load.
 
 ## Building
 
-Requires CMake ≥ 3.20, a Windows C++ toolchain (MSVC or clang-cl), and the
-Windows SDK. From this directory:
+Requires CMake ≥ 3.20, a Windows C++ toolchain (MSVC recommended), and the
+Windows SDK. From the repo root, `python build.py --native` builds everything and
+prefers the MSVC/Visual Studio toolchain automatically. Or directly:
 
 ```bash
-cmake -S . -B build
-cmake --build build --config Release
+cmake -S native -B native/build -G "Visual Studio 16 2019" -A x64
+cmake --build native/build --config Release
 ```
 
-The host lands at `native/build/capture_host/capture_host.exe` (Ninja) or
-`native/build/capture_host/Release/capture_host.exe` (Visual Studio generator).
-`ambilight/hook_capture.py` searches both locations in dev; the release build
-bundles the exe via PyInstaller (`build.py`).
+Both `capture_host.exe` and `graphics_hook.dll` land in `native/build/bin[/Release]`
+(co-located so the host finds the DLL next to itself). `build.py` bundles both into
+the PyInstaller service onedir via `--add-binary`.
 
-### Manual smoke test (fake frames)
+## CLI (`capture_host.exe`)
 
-```bash
-capture_host.exe --shm-name <name> --fps 30 --mode fake
-```
+| Flag             | Meaning                                                          |
+|------------------|-----------------------------------------------------------------|
+| `--shm-name N`   | Name of the Python-created frame mapping (required).            |
+| `--fps N`        | Target capture frame rate (1–240, default 30).                  |
+| `--mode fake`    | Animated test source (used by the transport tests).            |
+| `--mode hook`    | Real game capture: detect + inject.                            |
+| `--target auto`  | Any fullscreen game (default), or a substring exe filter.      |
+| `--inject-pid N` | Force-inject a specific pid (manual testing / detection misses).|
+| `--parent-pid N` | Exit when this process exits (orphan safety).                  |
 
-You normally don't run this by hand — `HookCaptureBackend.open()` launches it
-with a freshly created shared-memory name. See `tests/test_hook_capture.py`.
+## Diagnostics
 
-## CLI
+- `capture_host` logs detection/injection decisions to `~/.ambilight/logs/capture_host.log`.
+- `graphics_hook.dll` logs which API it hooked + capture status to
+  `~/.ambilight/logs/graphics_hook.log` (and OutputDebugString).
+- `AMBILIGHT_HOOK_CAPTURE_ALL=1` (env in the *game*) disables the foreground gate
+  — useful for the probes or a game that renders on a non-foreground child window.
 
-| Flag            | Meaning                                                    |
-|-----------------|------------------------------------------------------------|
-| `--shm-name N`  | Name of the Python-created shared mapping (required).      |
-| `--fps N`       | Target frame rate (1–240, default 30).                     |
-| `--mode fake`   | Frame source. Phase 1 supports only `fake`.                |
-| `--parent-pid N`| Exit when this process exits (orphan safety).              |
+## Caveats
 
-## Phase 2 — real DX11 hook (not yet implemented)
-
-`graphics_hook.dll` will hook `IDXGISwapChain::Present()`, copy the backbuffer,
-and publish frames through the **same** `ShmWriter` and protocol. `capture_host`
-gains `--mode hook --target <exe>` to inject the DLL. None of the Phase-1
-transport changes — only the frame *source* swaps from fake to real.
-
-> ⚠️ **Anti-cheat warning (Phase 2 only).** Injecting a DLL into a game process
-> can be detected by anti-cheat systems (BattlEye, EAC, Riot Vanguard) and may
-> result in an account ban. This is intended for the user's own SDR DX11 titles;
-> test only on games **without** kernel-level anti-cheat. Phase 1 (fake frames)
-> performs no injection and carries no such risk. If anti-cheat compatibility
-> matters, the OBS Game Capture + Spout route (see `prototype/obs_spout/`) is
+> ⚠️ **Anti-cheat.** Injecting a DLL into a game can be detected by anti-cheat
+> (BattlEye, EAC, Riot Vanguard) and may result in an account **ban**. Test only
+> on games **without** kernel-level anti-cheat. If anti-cheat compatibility
+> matters, the OBS Game Capture + Spout route (`prototype/obs_spout/`) is
 > whitelisted and never touches the game process.
+
+- **Elevation:** injecting into an elevated game (admin / launcher) requires the
+  Ambilight service to run elevated; otherwise injection fails with access-denied
+  (logged).
+- **Bitness:** x64 host injects an x64 DLL into x64 games (the norm). 32-bit games
+  are skipped (logged).
+- **SDR only:** 10-bit / HDR (`R10G10B10A2`) and multisampled backbuffers are
+  skipped with a one-time warning.

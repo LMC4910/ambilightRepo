@@ -28,12 +28,15 @@ std::wstring basename_lower(const std::wstring& path) {
 // game we want — exclude them up front (also keeps us from injecting into the
 // desktop shell). The Direct3D-module gate below catches most non-games anyway.
 bool on_denylist(const std::wstring& exe) {
-    static const std::array<const wchar_t*, 16> kDeny = {
+    static const std::array<const wchar_t*, 22> kDeny = {
         L"explorer.exe", L"dwm.exe", L"applicationframehost.exe",
         L"searchhost.exe", L"startmenuexperiencehost.exe",
         L"shellexperiencehost.exe", L"textinputhost.exe", L"sihost.exe",
         L"chrome.exe", L"firefox.exe", L"msedge.exe", L"brave.exe",
         L"opera.exe", L"obs64.exe", L"obs32.exe", L"capture_host.exe",
+        // GPU-accelerated apps that are fullscreen + Direct3D but not games.
+        L"windowsterminal.exe", L"conhost.exe", L"code.exe", L"devenv.exe",
+        L"ambilight-service.exe", L"electron.exe",
     };
     for (const wchar_t* d : kDeny) {
         if (exe == d) return true;
