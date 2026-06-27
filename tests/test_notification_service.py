@@ -188,6 +188,47 @@ def test_non_forwarder_does_not_text_scan(monkeypatch):
     assert svc.resolve_color(ev) == (88, 101, 242)
 
 
+def test_forwarded_uses_source_icon_when_text_unknown(monkeypatch):
+    # A Discord alert forwarded by Phone Link with no "discord" in the text: the
+    # toast carries Discord's icon, so the icon colour is used — NOT the bridge's
+    # Microsoft-blue (which the old code produced via the AUMID "Microsoft" token).
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color",
+                        lambda *a, **k: (10, 20, 30))
+    ev = _event(app_id="Microsoft.YourPhone_8wekyb3d8bbwe!App", app_name="Phone Link",
+                title="A friend", body="sent a message", icon=b"PNG")
+    assert svc.resolve_color(ev) == (10, 20, 30)
+
+
+def test_forwarded_icon_not_shared_across_sources(monkeypatch):
+    # The bridge app_id is identical for every forwarded app, so forwarded icons
+    # must be extracted fresh — never cached under the bridge id, or the 2nd app
+    # would reuse the 1st app's colour.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    colours = iter([(10, 10, 10), (20, 20, 20)])
+    monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color",
+                        lambda *a, **k: next(colours))
+    bridge = "Microsoft.YourPhone_8wekyb3d8bbwe!App"
+    a = svc.resolve_color(_event(app_id=bridge, app_name="Phone Link", title="x", body="y", icon=b"A"))
+    b = svc.resolve_color(_event(app_id=bridge, app_name="Phone Link", title="x", body="y", icon=b"B"))
+    assert a == (10, 10, 10) and b == (20, 20, 20)
+    assert bridge not in svc._color_cache
+
+
+def test_forwarded_never_flashes_bridge_brand(monkeypatch):
+    # No source text and no icon → default, never the bridge publisher's colour.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_id="Microsoft.YourPhone_8wekyb3d8bbwe!App", app_name="Phone Link",
+                title="Mom", body="call me", icon=None)
+    assert svc.resolve_color(ev) == (7, 7, 7)
+
+
+def test_override_is_case_insensitive(monkeypatch):
+    # "compare app names in small case": an override keyed "DISCORD" matches "Discord".
+    svc, _, _ = _service(monkeypatch, app_overrides={"DISCORD": [5, 5, 5]})
+    assert svc.resolve_color(_event(app_id="discord", app_name="Discord")) == (5, 5, 5)
+
+
 def test_corrupt_cache_resets_to_empty(monkeypatch, tmp_path):
     # A non-dict cache file must be ignored (not crash _on_notification later).
     cache = tmp_path / "notification_colors.json"

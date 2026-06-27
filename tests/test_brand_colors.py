@@ -77,6 +77,15 @@ def test_app_name_takes_priority_over_app_id():
     assert brand_color("Spotify", "com.squirrel.Discord.Discord") == brand_color("Spotify")
 
 
+def test_bare_publisher_token_in_app_id_not_matched():
+    # The bare "Microsoft" token in a Phone Link AUMID must NOT colour it Microsoft
+    # blue — otherwise every Microsoft-published app borrows the parent brand.
+    assert brand_color("Link to Windows", "Microsoft.YourPhone_8wekyb3d8bbwe!App") is None
+    assert brand_color("Phone Link") is None
+    # A specific multi-word token (MicrosoftTeams) still resolves, though.
+    assert brand_color("", "MicrosoftTeams_8wekyb3d8bbwe!App") == brand_color("Microsoft Teams")
+
+
 # --- forwarded / mirrored notifications -------------------------------------
 
 @pytest.mark.parametrize(
