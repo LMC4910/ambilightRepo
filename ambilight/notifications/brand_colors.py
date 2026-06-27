@@ -629,6 +629,11 @@ def brand_color(app_name: Optional[str], app_id: Optional[str] = None) -> Option
         tokens = [t for t in re.split(r"[^a-zA-Z0-9]+", app_id) if len(t) >= 3]
         for tok in sorted(tokens, key=len, reverse=True):
             t = _norm(tok)
+            # Skip bare publisher tokens (e.g. the "Microsoft" in a Phone Link
+            # AUMID "Microsoft.YourPhone..."); otherwise every app from a big
+            # publisher would borrow the parent brand's colour.
+            if t in _PREFIXES:
+                continue
             if t in BRAND_COLORS:
                 return BRAND_COLORS[t]
     return None
