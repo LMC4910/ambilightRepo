@@ -11,6 +11,26 @@ const N_DEFAULTS = {
 let _rowId = 0
 const nextId = () => (_rowId += 1)
 
+// Brand-colour matching — mirrors ambilight/notifications/brand_colors.py so the UI
+// suggests the same colour the flash will use. Returns [r,g,b] or null.
+const BRAND_PREFIXES = ['microsoft', 'google', 'apple', 'amazon', 'meta']
+const normName = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+const matchBrand = (name, map) => {
+  if (!map) return null
+  const n = normName(name)
+  if (!n) return null
+  if (map[n]) return map[n]
+  for (const p of BRAND_PREFIXES) {
+    if (n.startsWith(p) && n.length > p.length + 2) {
+      const s = n.slice(p.length)
+      if (map[s]) return map[s]
+    }
+  }
+  return null
+}
+const sameRgb = (a, b) => Array.isArray(a) && Array.isArray(b) && a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+const dotStyle = (rgb) => ({ width: 12, height: 12, borderRadius: 3, flex: '0 0 auto', background: `rgb(${rgb.join(',')})`, boxShadow: 'inset 0 0 0 1px rgba(0,0,0,.25)' })
+
 // Convert the persisted config shape ↔ an editable draft (app_overrides dict ↔ rows).
 const toDraft = (n) => {
   const src = { ...N_DEFAULTS, ...(n || {}) }
@@ -80,12 +100,14 @@ function PermissionBanner() {
 }
 
 export default function Notifications() {
-  const { settings, updateSettings, saving, testFlash, toast } = useStore()
+  const { settings, updateSettings, saving, testFlash, toast, fetchBrandColors } = useStore()
+  const brands = useStore((s) => s.brandColors)
   const [draft, setDraft] = useState(null)
   const [newApp, setNewApp] = useState('')
   const [newKw, setNewKw] = useState('')
 
   useEffect(() => { if (!settings) useStore.getState().fetchSettings() }, [])
+  useEffect(() => { fetchBrandColors() }, [])
   useEffect(() => { if (settings) setDraft(toDraft(settings.notifications)) }, [settings])
 
   if (!draft) return <div className="main"><PageHead crumb="Configuration" title="Notifications" sub="Flash your lights on desktop alerts" /><div className="content content-narrow"><div className="card card-pad subtle">Loading…</div></div></div>
@@ -95,7 +117,8 @@ export default function Notifications() {
   const dirty = JSON.stringify(payload) !== JSON.stringify(buildPayload(toDraft(settings?.notifications)))
   const n = draft
 
-  const commitApp = () => { if (!newApp.trim()) return; set({ overrides: [...n.overrides, { _id: nextId(), app: newApp.trim(), color: [120, 140, 255] }] }); setNewApp('') }
+  const newAppBrand = matchBrand(newApp, brands)
+  const commitApp = () => { if (!newApp.trim()) return; set({ overrides: [...n.overrides, { _id: nextId(), app: newApp.trim(), color: newAppBrand || [120, 140, 255] }] }); setNewApp('') }
   const commitKw = () => { if (!newKw.trim()) return; set({ keyword_rules: [...n.keyword_rules, { _id: nextId(), keyword: newKw.trim(), color: [225, 48, 108] }] }); setNewKw('') }
 
   return (
@@ -155,19 +178,27 @@ export default function Notifications() {
 
             <Section title="Per-app colours" count={n.overrides.length} />
             <div className="stack">
-              {n.overrides.length === 0 ? <div className="card"><Empty icon="app-window" title="No app overrides">Pick a colour for specific apps so you know who’s pinging you at a glance.</Empty></div> :
+              <div className="hint">Known apps already flash in their official brand colour automatically — no need to add them. Add an app here only to <em>override</em> its colour. When you type a recognised app below, its brand colour is pre-filled.</div>
+              {n.overrides.length === 0 ? <div className="card"><Empty icon="app-window" title="No app overrides">Add a custom colour for specific apps to override their automatic brand colour.</Empty></div> :
                 <div className="tile-grid">
-                  {n.overrides.map((o, i) => (
+                  {n.overrides.map((o, i) => {
+                    const rowBrand = matchBrand(o.app, brands)
+                    const applied = rowBrand && sameRgb(o.color, rowBrand)
+                    return (
                     <div key={o._id} className="card card-pad" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: 1 }}>
                         <Swatch rgb={o.color} onChange={(c) => set({ overrides: n.overrides.map((x, idx) => (idx === i ? { ...x, color: c } : x)) })} />
                         <input className="field" style={{ flex: 1 }} placeholder="app name or id" value={o.app} onChange={(e) => set({ overrides: n.overrides.map((x, idx) => (idx === i ? { ...x, app: e.target.value } : x)) })} />
                       </div>
+                      {rowBrand && (applied
+                        ? <span className="badge" title="Matches this app’s official brand colour" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, padding: '3px 8px', borderRadius: 999, background: 'var(--bg-2,rgba(127,127,127,.12))', color: 'var(--tx-2)' }}><span style={dotStyle(rowBrand)} />Brand</span>
+                        : <button type="button" className="btn btn-sm" title="Use this app’s official brand colour" onClick={() => set({ overrides: n.overrides.map((x, idx) => (idx === i ? { ...x, color: rowBrand } : x)) })} style={{ display: 'flex', alignItems: 'center', gap: 6 }}><span style={dotStyle(rowBrand)} />Use brand</button>)}
                       <button className="btn btn-sm btn-danger icon-btn" onClick={() => set({ overrides: n.overrides.filter((_, idx) => idx !== i) })}><Icon n="trash-2" /></button>
                     </div>
-                  ))}
+                  )})}
                 </div>}
               <div style={{ display: 'flex', gap: 10 }}><input className="field" placeholder="App name (e.g. Discord)" value={newApp} onChange={(e) => setNewApp(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && commitApp()} /><button className="btn btn-primary" onClick={commitApp}><Icon n="plus" />Add app</button></div>
+              {newAppBrand && <div className="hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span style={dotStyle(newAppBrand)} />Brand colour found — it’ll be applied when you add “{newApp.trim()}”.</div>}
             </div>
 
             <Section title="Keyword rules" count={n.keyword_rules.length} />
