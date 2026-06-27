@@ -224,5 +224,21 @@ export const useStore = create((set, get) => ({
       console.error(e);
       return false;
     }
+  },
+
+  // Curated brand→RGB map (normalised app name → [r,g,b]). Static, so fetch once
+  // and cache; used to suggest a colour when adding a per-app override.
+  brandColors: null,
+  fetchBrandColors: async () => {
+    if (get().brandColors) return get().brandColors;
+    try {
+      const map = await window.api.notifications.brandColors();
+      const safe = map && typeof map === 'object' ? map : {};
+      set({ brandColors: safe });
+      return safe;
+    } catch (e) {
+      set({ brandColors: {} });
+      return {};
+    }
   }
 }))

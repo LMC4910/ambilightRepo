@@ -536,6 +536,7 @@ function createWindow() {
     method: 'POST',
     body: JSON.stringify({ color: color || null })
   }))
+  ipcMain.handle('api:notifications:brandColors', async () => fetchApi('/api/notifications/brand-colors'))
 
   // Open an OS settings deep-link (used to grant notification access). Restricted
   // to a small allowlist of known settings schemes so a compromised/modified

@@ -24,7 +24,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   notifications: {
     permission: () => ipcRenderer.invoke('api:notifications:permission'),
-    test: (color) => ipcRenderer.invoke('api:notifications:test', color)
+    test: (color) => ipcRenderer.invoke('api:notifications:test', color),
+    brandColors: () => ipcRenderer.invoke('api:notifications:brandColors')
   },
   system: {
     // Only known OS settings deep-links are honoured; the main process enforces

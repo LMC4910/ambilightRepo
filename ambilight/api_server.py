@@ -38,6 +38,7 @@ from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
 from .integrations.mqtt_bridge import MqttBridge
 from .notifications import NotificationFlashService
+from .notifications.brand_colors import BRAND_COLORS
 from .ownership import OwnershipCoordinator
 
 logger = logging.getLogger(__name__)
@@ -527,6 +528,17 @@ async def notifications_test(request: NotificationTestRequest) -> Dict[str, str]
         raise HTTPException(status_code=400, detail="color must be [r, g, b] with values 0-255")
     notification_flash.test_flash(color)
     return {"message": "Flash triggered"}
+
+
+@app.get("/api/notifications/brand-colors", dependencies=[Depends(verify_token)])
+async def notifications_brand_colors() -> Dict[str, List[int]]:
+    """Curated official brand → RGB map (normalised app name → [r,g,b]).
+
+    Lets the UI suggest an app's logo colour when the user adds a per-app override,
+    mirroring the brand-colour layer the flash itself uses. Static and small, so the
+    UI fetches it once and matches client-side.
+    """
+    return {k: list(v) for k, v in BRAND_COLORS.items()}
 
 
 # ---------------------------------------------------------------------------
