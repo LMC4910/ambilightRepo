@@ -203,7 +203,7 @@ export default function Notifications() {
 
             <Section title="Keyword rules" count={n.keyword_rules.length} />
             <div className="stack">
-              <div className="hint">Phone notifications forwarded by Phone Link appear as “Phone Link”. Match a word in the text (e.g. <span className="mono" style={{ color: 'var(--tx-2)' }}>instagram</span>) to give it a colour — matched against app name, title and body.</div>
+              <div className="hint">Phone notifications forwarded by Phone Link / Link to Windows appear as “Phone Link”. Recognised apps named in the alert (e.g. Instagram, WhatsApp) now flash in their brand colour automatically. Add a rule only for apps that aren’t recognised, or to override one: match a word in the text (e.g. <span className="mono" style={{ color: 'var(--tx-2)' }}>instagram</span>) — checked against app name, title and body.</div>
               {n.keyword_rules.length > 0 && (
                 <div className="tile-grid">
                   {n.keyword_rules.map((k, i) => (
