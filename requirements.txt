@@ -49,34 +49,30 @@ soundcard>=0.4.3
 # NOTE: WGC does NOT bypass hardware DRM (HDCP/PlayReady stays black).
 windows-capture>=2.0.0 ; sys_platform == "win32"
 
-# ---- Optional — device protocols --------------------------------------------
-#  WLED is supported out of the box (realtime UDP + JSON API over stdlib).
-#  zeroconf is OPTIONAL and only enables _wled._tcp mDNS auto-discovery; without
-#  it WLED devices are still found via an HTTP subnet probe and manual IP entry.
-#  For mDNS in the frozen installer, install this in the build env and add it to
-#  the PyInstaller hidden-imports.
-#    pip install zeroconf
-# zeroconf>=0.131.0
+# ---- Feature dependencies (installed by default; features stay opt-in) ------
+#  These power optional features that are OFF by default — installing the
+#  package does not enable anything, it just means the feature works the moment
+#  the user turns it on (no separate `pip install` step). Kept lightweight and
+#  cross-platform; the heavy GPU stack below stays opt-in. All are added to the
+#  PyInstaller hidden-imports so frozen installers bundle them too.
 
-# ---- Optional — smart-home integration --------------------------------------
-#  MQTT bridge + Home Assistant auto-discovery (Phase C). Off by default; the
-#  bridge is a no-op without paho-mqtt. keyring stores the broker password in the
-#  OS credential store (Windows Credential Manager / macOS Keychain / libsecret);
-#  without it the password falls back to a session-only value. Install both to
-#  use MQTT, and add them to the PyInstaller build env for frozen installers.
-#    pip install paho-mqtt keyring
-# paho-mqtt>=1.6.1
-# keyring>=24.0.0
+# zeroconf — _wled._tcp mDNS auto-discovery for WLED (without it, WLED is still
+# found via HTTP subnet probe + manual IP entry).
+zeroconf>=0.131.0
 
-# ---- Optional — GitHub integration ("Ambient GitHub Awareness") -------------
-#  Polls GitHub and flashes the LEDs on activity (CI runs, PRs, issues, releases,
-#  security alerts). Off by default and a no-op without httpx — the async HTTP
-#  client used for the REST API + OAuth device flow. keyring (above) stores the
-#  OAuth token in the OS credential store; without it the token is session-only.
-#  Install both to use the GitHub integration, and add them to the PyInstaller
-#  build env (hidden-imports) for frozen installers.
-#    pip install httpx keyring
-# httpx>=0.27.0
+# paho-mqtt — MQTT bridge + Home Assistant auto-discovery (Phase C). The bridge
+# is a no-op until enabled in settings.
+paho-mqtt>=1.6.1
+
+# keyring — OS credential store (Windows Credential Manager / macOS Keychain /
+# Linux Secret Service) for secrets: the MQTT broker password and the GitHub
+# OAuth token. Without it those fall back to a session-only value.
+keyring>=24.0.0
+
+# httpx — async HTTP client for the GitHub integration ("Ambient GitHub
+# Awareness"): REST polling + OAuth device flow. The integration is a no-op
+# until enabled and connected in the Integrations tab.
+httpx>=0.27.0
 
 # ---- Development / tests ----------------------------------------------------
 #   pip install pytest    # run the suite with:  pytest

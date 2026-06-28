@@ -262,6 +262,20 @@ def build_service(gpu: bool = False) -> None:
             )
             sys.exit(1)
 
+    # Feature dependencies are hard requirements in requirements.txt now, so the
+    # installer must ship them — the integrations they power are off by default
+    # but have to work the moment a user enables them, with no separate pip step.
+    required_features = ["zeroconf", "paho", "keyring", "httpx"]
+    missing_feat = [p for p in required_features if not _available(p)]
+    if missing_feat:
+        print(
+            f"[FATAL] Required feature dependency(ies) missing from the build "
+            f"environment: {', '.join(missing_feat)}.\n"
+            f"        Install the requirements so the installer ships them:\n"
+            f"          pip install -r requirements.txt"
+        )
+        sys.exit(1)
+
     # Always-bundled optional deps: capture backends + audio + WGC, the
     # smart-home integration stack (paho-mqtt + keyring), and the GitHub
     # integration's HTTP client (httpx) — all bundled when present.
