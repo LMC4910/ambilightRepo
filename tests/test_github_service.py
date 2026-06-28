@@ -4,7 +4,7 @@ event → rule → flash, webhook ingest + dedup, and a full poll cycle.
 
 import asyncio
 
-from ambilight.config import AppConfig, ConfigManager
+from ambilight.config import AppConfig, ConfigManager, DEFAULT_GITHUB_RULES_VERSION
 from ambilight.integrations.github import api as api_mod
 from ambilight.integrations.github.models import GithubEvent
 from ambilight.integrations.github.service import GithubIntegration
@@ -22,8 +22,10 @@ class FakeController:
 def _cfg(**gh):
     cfg = AppConfig()
     cfg.github.enabled = True
-    # Tests control rules explicitly, so suppress the first-run default seeding.
+    # Tests control rules explicitly: mark as already seeded at the current
+    # defaults version so neither first-run seeding nor the version top-up runs.
     cfg.github.rules_seeded = True
+    cfg.github.rules_version = DEFAULT_GITHUB_RULES_VERSION
     for k, v in gh.items():
         setattr(cfg.github, k, v)
     ConfigManager._normalize_and_validate(cfg)
@@ -119,3 +121,63 @@ def test_poller_full_cycle_dedups_across_polls(tmp_path):
     asyncio.run(run_two_cycles())
     assert len(gi._controller.flashes) == 1
     assert gi._controller.flashes[0][0] == (200, 0, 0)
+
+
+def test_ci_activity_notification_suppressed_only_for_watched_repos(tmp_path):
+    from ambilight.integrations.github.poller import GithubPoller
+    from ambilight.integrations.github.health import GithubHealth
+
+    cfg = _cfg(watched_repos=["acme/api"], watch_notifications=True)
+    gi = _integration(cfg, tmp_path / "g.db")
+
+    notifs = [
+        {"id": "n1", "reason": "ci_activity", "updated_at": "2026-06-01T00:00:00Z",
+         "subject": {"type": "CheckSuite", "title": "CI"},
+         "repository": {"full_name": "acme/api", "owner": {"login": "acme"}}},   # watched → skipped
+        {"id": "n2", "reason": "ci_activity", "updated_at": "2026-06-01T00:00:00Z",
+         "subject": {"type": "CheckSuite", "title": "CI"},
+         "repository": {"full_name": "other/repo", "owner": {"login": "other"}}},  # unwatched → kept
+    ]
+
+    class NotifApi(FakeApi):
+        def __init__(self, notifs):
+            super().__init__(runs=[])
+            self._notifs = notifs
+
+        async def get_notifications(self, etag=None, last_modified=None, all_=False):
+            return _resp(self._notifs)
+
+    seen = []
+
+    async def capture(ev):
+        seen.append(ev)
+
+    poller = GithubPoller(NotifApi(notifs), gi._store, GithubHealth(), capture, account="me")
+    poller.configure(base_interval=60, watch_notifications=True,
+                     watched_repos=["acme/api"], watched_orgs=[])
+    asyncio.run(poller._poll_once(suppress=False))
+
+    assert sorted(ev.repository for ev in seen) == ["other/repo"]
+
+
+def test_list_workflows_slims_and_falls_back_to_cache(tmp_path):
+    cfg = _cfg()
+    gi = _integration(cfg, tmp_path / "g.db")
+
+    class WfApi:
+        async def get_repo_workflows(self, repo, per_page=100):
+            return [
+                {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
+                {"id": 2, "name": "", "path": "skip", "state": "active"},   # blank name dropped
+            ]
+
+    gi._api = WfApi()
+    out = asyncio.run(gi.list_workflows("acme/api"))
+    assert out == [{"name": "CI", "path": ".github/workflows/ci.yml", "state": "active"}]
+
+    class BoomApi:
+        async def get_repo_workflows(self, repo, per_page=100):
+            raise RuntimeError("boom")
+
+    gi._api = BoomApi()
+    assert asyncio.run(gi.list_workflows("acme/api")) == out   # served from cache
