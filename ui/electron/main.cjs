@@ -14,6 +14,9 @@ app.setAppUserModelId('com.ambilight.desktop');
 const AMBILIGHT_DIR = path.join(os.homedir(), '.ambilight');
 const LOG_DIR = path.join(AMBILIGHT_DIR, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'ambilight.log');
+// The pipeline worker writes ambilight.log; the API/parent process writes its own
+// ambilight.notify.log (listener + notification-flash logs). The viewer merges both.
+const NOTIFY_LOG = path.join(LOG_DIR, 'ambilight.notify.log');
 const SERVICE_OUT_LOG = path.join(LOG_DIR, 'service.out.log');
 const TOKEN_PATH = path.join(AMBILIGHT_DIR, 'auth_token');
 const ONBOARDED_MARKER = path.join(AMBILIGHT_DIR, 'onboarded');
@@ -604,20 +607,45 @@ function createWindow() {
   ipcMain.handle('api:service:restart', async () => { await restartService(); return true; })
 
   // --- Diagnostics & Logging ---
+  // Read the last ~100KB tail of a log file (avoids loading a 20MB rotated log).
+  const readLogTail = (file) => {
+    try {
+      if (!fs.existsSync(file)) return '';
+      const stats = fs.statSync(file);
+      const start = Math.max(0, stats.size - 100000);
+      const fd = fs.openSync(file, 'r');
+      try {
+        const len = stats.size - start;
+        const buf = Buffer.alloc(len);
+        fs.readSync(fd, buf, 0, len, start);
+        return buf.toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return '';
+    }
+  };
+
+  // Sort merged log lines by their leading "YYYY-MM-DD HH:MM:SS" timestamp so the
+  // pipeline (ambilight.log) and notification (ambilight.notify.log) streams
+  // interleave chronologically. Lines without a timestamp keep their relative order.
+  const TS_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/;
   ipcMain.handle('api:logs:read', async () => {
     try {
-      if (fs.existsSync(LOG_FILE)) {
-        const stats = fs.statSync(LOG_FILE);
-        const start = Math.max(0, stats.size - 100000);
-        return new Promise((resolve, reject) => {
-          const stream = fs.createReadStream(LOG_FILE, { start, encoding: 'utf8' });
-          let data = '';
-          stream.on('data', chunk => data += chunk);
-          stream.on('end', () => resolve(data));
-          stream.on('error', err => reject(err));
-        });
-      }
-      return "Log file not found.";
+      const combined = [readLogTail(LOG_FILE), readLogTail(NOTIFY_LOG)]
+        .filter(Boolean).join('\n');
+      if (!combined.trim()) return "Log file not found.";
+      const lines = combined.split(/\r?\n/);
+      const keyed = lines.map((line, i) => {
+        const m = line.match(TS_RE);
+        return { line, i, ts: m ? m[1] : null };
+      });
+      keyed.sort((a, b) => {
+        if (a.ts && b.ts) return a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.i - b.i;
+        return a.i - b.i;   // stable for untimestamped continuation lines
+      });
+      return keyed.map(k => k.line).join('\n');
     } catch (err) {
       return `Error reading logs: ${err.message}`;
     }
@@ -631,6 +659,7 @@ function createWindow() {
   ipcMain.handle('api:logs:clear', async () => {
     try {
       if (fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, '');
+      if (fs.existsSync(NOTIFY_LOG)) fs.writeFileSync(NOTIFY_LOG, '');
       return true;
     } catch (err) {
       console.error(err);

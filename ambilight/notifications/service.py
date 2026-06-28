@@ -131,7 +131,7 @@ class NotificationFlashService:
             color = self.resolve_color(ev)
             self._controller.flash(color, self._pattern(), label=label)
             logger.info(
-                "[Notify] Queued flash for %s (%s) → %s",
+                "[Notify] Queued flash for %s (%s) -> %s",
                 label, ev.source, color,
             )
         except Exception as exc:  # pragma: no cover - defensive
