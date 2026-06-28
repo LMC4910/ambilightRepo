@@ -27,11 +27,14 @@ optional scoping/match fields::
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .models import GithubEvent
 
 RGB = Tuple[int, int, int]
+
+logger = logging.getLogger(__name__)
 
 # Higher scope score = more specific = wins.
 _SCOPE_SCORE = {"global": 0, "org": 1, "repo": 2, "workflow": 3}
@@ -116,10 +119,23 @@ def resolve(ev: GithubEvent, rules: List[Dict[str, Any]],
         for k in ("blink_count", "on_ms", "off_ms", "brightness"):
             if rule.get(k) is not None:
                 pattern[k] = rule[k]
+        logger.debug(
+            "[GitHub] matched rule scope=%s event=%s action=%s repo=%s org=%s workflow=%s for %s/%s",
+            rule.get("scope", "global"),
+            rule.get("event_type", "*"),
+            rule.get("action", "*"),
+            rule.get("repo", ""),
+            rule.get("org", ""),
+            rule.get("workflow", ""),
+            ev.event_type,
+            ev.action,
+        )
         return rgb, pattern
 
     # No rule matched — fall back to the global default colour if the user kept
     # one. An explicitly-empty default means "don't flash for unmatched events".
     if default_color is None:
+        logger.debug("[GitHub] no rule matched %s/%s and default color disabled", ev.event_type, ev.action)
         return None
+    logger.debug("[GitHub] no rule matched %s/%s; using default color", ev.event_type, ev.action)
     return _as_rgb(default_color, (88, 166, 255)), dict(default_pattern)

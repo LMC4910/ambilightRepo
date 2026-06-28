@@ -212,9 +212,14 @@ class GithubIntegration:
     async def _dispatch(self, ev: GithubEvent) -> None:
         try:
             gh = self._gh
+            if gh is None:
+                logger.warning("[GitHub] dispatch skipped for %s/%s: github config missing", ev.event_type, ev.action)
+                return
+            rules = list(getattr(gh, "rules", []) or [])
             default_color = tuple(getattr(gh, "default_color", [88, 166, 255]))
-            resolved = mapper.resolve(ev, list(getattr(gh, "rules", []) or []),
-                                      default_color, self._default_pattern())
+            if not rules:
+                logger.debug("[GitHub] no rules configured; falling back to default color for %s/%s", ev.event_type, ev.action)
+            resolved = mapper.resolve(ev, rules, default_color, self._default_pattern())
             if resolved is not None:
                 rgb, pattern = resolved
                 self._controller.flash(list(rgb), pattern, label=f"GitHub: {ev.title}")
@@ -301,12 +306,28 @@ class GithubIntegration:
                 self._health.auth_state = AUTH_CONNECTED
                 self._health.user_code = ""
                 logger.info("[GitHub] Authorisation complete.")
+                # Connecting implies intent to use it: turn the integration on and
+                # persist that, so polling also resumes after a service restart
+                # (start() gates on enabled ∧ token).
+                self._enable_in_config()
                 await self._connect()
                 return
             self._health.auth_state = AUTH_DISCONNECTED
             self._health.record_error("device code expired")
         except asyncio.CancelledError:  # pragma: no cover - shutdown/logout
             pass
+
+    def _enable_in_config(self) -> None:
+        """Persist ``github.enabled = True`` so polling survives a restart."""
+        try:
+            from ...config import ConfigManager
+            if not getattr(self._gh, "enabled", False):
+                ConfigManager.update({"github": {"enabled": True}})
+                self._gh = ConfigManager.get().github
+                self._health.enabled = True
+                logger.info("[GitHub] Integration enabled after sign-in.")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[GitHub] could not persist enabled flag: %s", exc)
 
     async def logout(self) -> None:
         secrets_store.clear_github_token()

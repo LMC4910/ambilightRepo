@@ -22,6 +22,8 @@ class FakeController:
 def _cfg(**gh):
     cfg = AppConfig()
     cfg.github.enabled = True
+    # Tests control rules explicitly, so suppress the first-run default seeding.
+    cfg.github.rules_seeded = True
     for k, v in gh.items():
         setattr(cfg.github, k, v)
     ConfigManager._normalize_and_validate(cfg)
@@ -51,7 +53,7 @@ def test_dispatch_maps_event_to_flash(tmp_path):
 def test_dispatch_uses_default_when_no_rule(tmp_path):
     cfg = _cfg(default_color=[10, 20, 30])
     gi = _integration(cfg, tmp_path / "g.db")
-    ev = GithubEvent(id="1", event_type="release", action="published", title="v1")
+    ev = GithubEvent(id="1", event_type="custom_event", action="published", title="v1")
     asyncio.run(gi._dispatch(ev))
     assert gi._controller.flashes[0][0] == (10, 20, 30)
 
