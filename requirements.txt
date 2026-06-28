@@ -84,21 +84,35 @@ httpx>=0.27.0
 #  Linux (logind/screensaver + DRM hotplug):
 #    pip install dbus-python PyGObject pyudev
 
-# ---- Optional — GPU build only (large; `python build.py --service --gpu`) ----
-#  Not needed for normal use: at the 80x45 analysis resolution the CPU path is
-#  effectively instant. Installing these makes the bundle ~300 MB larger.
+# ---- GPU acceleration (installed by default where supported; never breaks) ---
+#  GPU is a bonus, not a requirement: at the 80x45 analysis resolution the CPU
+#  path is already near-instant. These are installed by default ONLY on the
+#  platforms that have prebuilt CUDA wheels (Windows x64 / Linux x86_64) — the
+#  PEP 508 markers below mean pip simply SKIPS them on macOS/ARM (where no wheel
+#  exists), so the install never breaks. At runtime the engine probes each
+#  backend and silently falls back to NumPy/CPU when no CUDA device is present
+#  (see ambilight/gpu.py:_probe_cupy/_probe_torch), so a machine with no NVIDIA
+#  GPU installs these fine and just doesn't use them. The lean frozen installer
+#  still excludes them (build.py --gpu re-includes) to keep the download small.
 
-# OpenCV — faster CPU/CUDA resize (lean build uses Pillow instead).
-# opencv-python>=4.9.0.80
+# CuPy — CUDA-accelerated NumPy replacement; the real GPU speedup when CUDA 12 is
+# present. The cuda12x wheel installs regardless of whether CUDA is present and
+# is skipped at runtime if no GPU/CUDA is found. CUDA 11 machine? swap the two
+# lines for cupy-cuda11x>=12.3.0 (same markers).
+cupy-cuda12x>=13.0.0 ; platform_system == "Windows" and platform_machine == "AMD64"
+cupy-cuda12x>=13.0.0 ; platform_system == "Linux" and platform_machine == "x86_64"
 
-# CuPy — CUDA-accelerated NumPy replacement.
-# Uncomment the line that matches your CUDA version:
-# cupy-cuda12x>=13.0.0
-# cupy-cuda11x>=12.3.0
-
-# PyTorch — optional GPU resize backend.
-# Install from https://pytorch.org/get-started/locally/ to match your CUDA.
+# PyTorch — alternative GPU resize backend, intentionally NOT installed by
+# default. CuPy (above) is the preferred backend and covers GPU acceleration; on
+# Windows the default PyPI torch wheel is CPU-only, so the engine (which only
+# uses torch via CUDA) would never use it — 200 MB+ of dead weight. To use torch
+# instead, install the CUDA build from https://pytorch.org for your CUDA version.
 # torch>=2.2.0
+
+# OpenCV — the CUDA resize backend needs a CUDA-enabled OpenCV build (the PyPI
+# wheel is CPU-only). On Windows opencv-python is already a hard dependency below
+# (the WGC/DXGI backends need it); a CUDA build is a manual, opt-in replacement.
+# opencv-python>=4.9.0.80
 
 # ---- Fast Windows capture backends -------------------------------------------
 # WGC (windows-capture, above) is REQUIRED on Windows to capture fullscreen
