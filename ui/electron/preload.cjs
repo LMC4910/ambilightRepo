@@ -27,6 +27,15 @@ contextBridge.exposeInMainWorld('api', {
     test: (color) => ipcRenderer.invoke('api:notifications:test', color),
     brandColors: () => ipcRenderer.invoke('api:notifications:brandColors')
   },
+  github: {
+    status: () => ipcRenderer.invoke('api:github:status'),
+    authStart: () => ipcRenderer.invoke('api:github:authStart'),
+    logout: () => ipcRenderer.invoke('api:github:logout'),
+    orgs: () => ipcRenderer.invoke('api:github:orgs'),
+    repos: () => ipcRenderer.invoke('api:github:repos'),
+    events: (limit) => ipcRenderer.invoke('api:github:events', limit),
+    test: (color) => ipcRenderer.invoke('api:github:test', color)
+  },
   system: {
     // Only known OS settings deep-links are honoured; the main process enforces
     // an allowlist (see app:openExternal) and ignores anything else.

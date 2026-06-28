@@ -541,12 +541,26 @@ function createWindow() {
   }))
   ipcMain.handle('api:notifications:brandColors', async () => fetchApi('/api/notifications/brand-colors'))
 
-  // Open an OS settings deep-link (used to grant notification access). Restricted
-  // to a small allowlist of known settings schemes so a compromised/modified
-  // renderer can't launch arbitrary protocol handlers via this IPC surface.
+  // --- GitHub integration ---
+  ipcMain.handle('api:github:status', async () => fetchApi('/api/github/status'))
+  ipcMain.handle('api:github:authStart', async () => fetchApi('/api/github/auth/start', { method: 'POST' }))
+  ipcMain.handle('api:github:logout', async () => fetchApi('/api/github/auth/logout', { method: 'POST' }))
+  ipcMain.handle('api:github:orgs', async () => fetchApi('/api/github/orgs'))
+  ipcMain.handle('api:github:repos', async () => fetchApi('/api/github/repos'))
+  ipcMain.handle('api:github:events', async (e, limit) => fetchApi(`/api/github/events?limit=${encodeURIComponent(limit || 50)}`))
+  ipcMain.handle('api:github:test', async (e, color) => fetchApi('/api/github/test', {
+    method: 'POST',
+    body: JSON.stringify({ color: color || null })
+  }))
+
+  // Open an OS settings deep-link (used to grant notification access) or the
+  // GitHub device-authorisation page. Restricted to a small allowlist so a
+  // compromised/modified renderer can't launch arbitrary protocol handlers via
+  // this IPC surface.
   const ALLOWED_EXTERNAL_PREFIXES = [
-    'ms-settings:',                 // Windows Settings deep-links
-    'x-apple.systempreferences:',   // macOS System Settings panes
+    'ms-settings:',                       // Windows Settings deep-links
+    'x-apple.systempreferences:',         // macOS System Settings panes
+    'https://github.com/login/device',    // GitHub OAuth device-flow verification
   ]
   ipcMain.handle('app:openExternal', async (e, url) => {
     if (typeof url !== 'string' || !ALLOWED_EXTERNAL_PREFIXES.some((p) => url.startsWith(p))) {
