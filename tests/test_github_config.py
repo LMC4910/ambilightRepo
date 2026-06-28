@@ -10,7 +10,32 @@ def test_defaults():
     assert g.poll_interval_s == 60.0
     assert g.watch_notifications is True
     assert g.scopes == ["notifications", "read:org", "repo"]
-    assert g.rules == []
+    assert g.rules == []            # raw dataclass default (seeded at normalize time)
+    assert g.rules_seeded is False
+
+
+def test_default_rules_seeded_on_first_normalize():
+    cfg = AppConfig()
+    assert cfg.github.rules == []
+    ConfigManager._normalize_and_validate(cfg)
+    assert cfg.github.rules_seeded is True
+    assert len(cfg.github.rules) > 20
+    # the headline CI-failure rule is present and red
+    fail = [r for r in cfg.github.rules
+            if r["event_type"] == "workflow_run" and r["action"] == "failure"]
+    assert fail and fail[0]["color"] == [220, 38, 38]
+    # non-core event types are also seeded
+    invitation = [r for r in cfg.github.rules if r["event_type"] == "repository_invitation"]
+    assert invitation
+
+
+def test_cleared_rules_are_reseeded():
+    cfg = AppConfig()
+    ConfigManager._normalize_and_validate(cfg)        # seeds + marks seeded
+    cfg.github.rules = []                              # user clears all rules
+    ConfigManager._normalize_and_validate(cfg)        # auto re-seeds
+    assert cfg.github.rules
+    assert cfg.github.rules_seeded is True
 
 
 def test_poll_interval_floored():

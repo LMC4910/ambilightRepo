@@ -12,9 +12,14 @@ const G_DEFAULTS = {
 // Event types the rule editor offers (''/any first). Mirrors the normaliser's taxonomy.
 const EVENT_TYPES = [
   ['', 'Any event'], ['workflow_run', 'Workflow run (CI)'], ['pull_request', 'Pull request'],
-  ['issue', 'Issue'], ['release', 'Release'], ['push', 'Push'], ['security_alert', 'Security alert'],
-  ['review_comment', 'Review comment'], ['discussion', 'Discussion'], ['fork', 'Fork'],
-  ['star', 'Star'], ['deployment_status', 'Deployment status'],
+  ['pull_request_review', 'Pull request review'], ['review_comment', 'Review comment'],
+  ['issue', 'Issue'], ['issue_comment', 'Issue comment'], ['release', 'Release'],
+  ['push', 'Push'], ['branch', 'Branch create/delete'], ['fork', 'Fork'], ['star', 'Star'],
+  ['discussion', 'Discussion'], ['discussion_comment', 'Discussion comment'],
+  ['commit_comment', 'Commit comment'], ['deployment', 'Deployment'],
+  ['deployment_status', 'Deployment status'], ['workflow_job', 'Workflow job'],
+  ['check_run', 'Check run'], ['repository_invitation', 'Repository invitation'],
+  ['security_alert', 'Security alert'],
 ]
 // Common actions, surfaced as a datalist hint (the field is free-text).
 const COMMON_ACTIONS = ['success', 'failure', 'cancelled', 'opened', 'merged', 'closed',
