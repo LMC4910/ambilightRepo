@@ -4,13 +4,15 @@ import queue
 
 import pytest
 
+from ambilight import pipeline as pmod
 from ambilight.config import AppConfig
 from ambilight.pipeline import AmbilightPipeline
 
 
 class FakeLed:
-    def __init__(self, addressable=False):
+    def __init__(self, addressable=False, fail=False):
         self._addressable = addressable
+        self.fail = fail            # simulate an unreachable device (sends return False)
         self.rgb_calls = []
         self.pixel_calls = []
         self.ensure_on_calls = 0
@@ -22,11 +24,11 @@ class FakeLed:
 
     def set_rgb(self, r, g, b):
         self.rgb_calls.append((r, g, b))
-        return True
+        return not self.fail
 
     def set_pixels(self, pixels):
         self.pixel_calls.append(list(pixels))
-        return True
+        return not self.fail
 
     def ensure_on(self):
         self.ensure_on_calls += 1
@@ -159,11 +161,66 @@ def test_addressable_uses_set_pixels():
     assert led.pixel_calls[-1] == [(1, 2, 3)] * 30   # channel led_count
 
 
-def test_queue_coalesces_bursts():
+def test_queue_keeps_all_bursts():
+    # A burst of distinct notifications is queued in full (no coalescing) so each
+    # one flashes in turn — the fix for stacked alerts being silently dropped.
     p, _ = _pipeline()
     for _ in range(5):
         _flash(p)
-    assert len(p._flash_queue) == 3          # deque(maxlen=3)
+    assert len(p._flash_queue) == 5
+
+
+def test_queued_flash_gets_leading_gap():
+    # The first flash starts immediately; a second flash queued behind it gets a
+    # leading dark gap so the two stay visually distinct (vital when they share a
+    # colour). Gap duration comes from notifications.inter_flash_gap_ms.
+    p, _ = _pipeline()
+    p._cfg.notifications.inter_flash_gap_ms = 100
+    _flash(p, blink_count=1, on_ms=100, off_ms=0)
+    _flash(p, blink_count=1, on_ms=100, off_ms=0)
+    first = p._flash_queue[0]["segments"]
+    second = p._flash_queue[1]["segments"]
+    assert [s["on"] for s in first] == [True]                 # no leading gap
+    assert [s["on"] for s in second] == [False, True]         # leading dark gap
+    assert second[0]["dur"] == pytest.approx(0.1)
+
+
+def test_queue_cap_drops_oldest_and_warns():
+    p, _ = _pipeline()
+    for _ in range(pmod._FLASH_QUEUE_MAX + 5):
+        _flash(p)
+    assert len(p._flash_queue) == pmod._FLASH_QUEUE_MAX
+
+
+def test_flash_retries_then_drops_on_persistent_failure():
+    # An unreachable device: the flash is retried up to max_retries, then skipped
+    # so the queue keeps moving instead of stalling on a dead device.
+    p, led = _pipeline()
+    led.fail = True
+    p._cfg.notifications.flash_max_retries = 3
+    p._channels[0].last_output_rgb = (5, 6, 7)
+    _flash(p, color=(40, 41, 42), blink_count=1, on_ms=100, off_ms=0)
+    t = 0.0
+    # Each failed attempt re-queues with a retry back-off; advance time past it.
+    for _ in range(3):
+        assert p._flash_step(t, paused=False) == ("inactive",)
+        t += pmod._FLASH_RETRY_DELAY_S + 0.01
+    # After the 3rd attempt the flash is dropped and the queue is empty.
+    assert len(p._flash_queue) == 0
+    assert p._flash_active is None
+
+
+def test_flash_recovers_after_transient_failure():
+    # First attempt fails, device comes back, second attempt lights the strip.
+    p, led = _pipeline()
+    led.fail = True
+    p._cfg.notifications.flash_max_retries = 3
+    _flash(p, color=(40, 41, 42), blink_count=1, on_ms=100, off_ms=0)
+    assert p._flash_step(0.0, paused=False) == ("inactive",)   # attempt 1 fails → re-queued
+    assert len(p._flash_queue) == 1
+    led.fail = False
+    # Wait out the retry back-off, then it plays.
+    assert p._flash_step(pmod._FLASH_RETRY_DELAY_S + 0.01, paused=False) == ("on", (40, 41, 42))
 
 
 def test_drain_flash_commands_acts_on_flash_defers_others():

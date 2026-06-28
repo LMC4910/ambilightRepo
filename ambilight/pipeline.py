@@ -64,6 +64,15 @@ _BLACK_NOSIGNAL_FRAMES: int = 60
 # genuinely black screen still goes dark within ~this/fps seconds.
 _BLACK_DEBOUNCE_FRAMES: int = 3
 
+# Notification-flash queue safety cap. The queue is unbounded in practice (OS
+# alerts arrive far slower than flashes drain), but a pathological flood must not
+# grow memory without bound — past this depth the OLDEST flash is dropped and the
+# drop is logged (never silent).
+_FLASH_QUEUE_MAX: int = 100
+# Back-off between retries of a flash whose device send failed, so a transient
+# drop gets another chance without stalling the whole queue on a dead device.
+_FLASH_RETRY_DELAY_S: float = 0.3
+
 
 def _nosignal_verdict(consecutive_black: int, backend: Optional[str]) -> tuple[bool, str]:
     """Classify a run of consecutive all-black-but-delivering frames.
@@ -233,8 +242,10 @@ class AmbilightPipeline:
         self._power: bool = True               # strip powered on?
         self._mode: str = "screen_sync"        # reported mode ("off" when powered off)
         # Notification-flash overlay: transient blinks that briefly override the
-        # strip then restore the prior frame. Bounded deque coalesces bursts.
-        self._flash_queue: deque = deque(maxlen=3)
+        # strip then restore the prior frame. An ordered FIFO queue (bounded only
+        # by the safety cap) plays each queued flash one after another so stacked
+        # alerts never get dropped or coalesced.
+        self._flash_queue: deque = deque()
         self._flash_active: Optional[dict] = None
         self._last_output_rgb: tuple = (0, 0, 0)   # last real colour, for restore
 
@@ -626,7 +637,7 @@ class AmbilightPipeline:
         elif action == "set_owned_devices":
             self._apply_owned(set(cmd.get("owned_keys") or []))
         elif action == "flash":
-            self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {})
+            self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {}, cmd.get("label"))
         elif action == "set_mode":
             mode = cmd.get("mode")
             params = cmd.get("params", {})
@@ -717,7 +728,7 @@ class AmbilightPipeline:
                 break
             if cmd.get("action") == "flash":
                 if enqueue:
-                    self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {})
+                    self._enqueue_flash(cmd.get("color"), cmd.get("pattern") or {}, cmd.get("label"))
             else:
                 deferred.append(cmd)
         for cmd in deferred:
@@ -745,11 +756,12 @@ class AmbilightPipeline:
     # Notification flash overlay
     # ------------------------------------------------------------------
 
-    def _enqueue_flash(self, color, pattern: dict) -> None:
+    def _enqueue_flash(self, color, pattern: dict, label: Optional[str] = None) -> None:
         """Build a blink schedule from *color* + *pattern* and queue it.
 
         *pattern* may carry ``blink_count``, ``on_ms``, ``off_ms`` and
-        ``brightness``; missing values fall back to sensible defaults.
+        ``brightness``; missing values fall back to sensible defaults. *label*
+        names the source app and is used only for logging.
         """
         if not color:
             return
@@ -771,12 +783,48 @@ class AmbilightPipeline:
         except (TypeError, ValueError):
             blink_count, on_ms, off_ms = 2, 180, 120
 
+        ncfg = self._cfg.notifications
+        try:
+            gap_ms = max(0, int(getattr(ncfg, "inter_flash_gap_ms", 120)))
+        except (TypeError, ValueError):
+            gap_ms = 120
+        try:
+            max_retries = max(1, int(getattr(ncfg, "flash_max_retries", 3)))
+        except (TypeError, ValueError):
+            max_retries = 3
+
         segments = []
+        # Leading dark gap when this flash follows another in a burst, so two
+        # consecutive flashes stay visually distinct even when they share a
+        # colour (e.g. several alerts from the same app) — without it they would
+        # merge into one continuous glow and the later alert would look skipped.
+        following = bool(self._flash_queue) or self._flash_active is not None
+        if following and gap_ms > 0:
+            segments.append({"on": False, "rgb": (0, 0, 0), "dur": gap_ms / 1000.0})
         for i in range(blink_count):
             segments.append({"on": True, "rgb": (r, g, b), "dur": on_ms / 1000.0})
             if i < blink_count - 1 and off_ms > 0:
                 segments.append({"on": False, "rgb": (0, 0, 0), "dur": off_ms / 1000.0})
-        self._flash_queue.append({"segments": segments})
+
+        flash = {
+            "segments": segments,
+            "label": label or "notification",
+            "rgb": (r, g, b),
+            "attempts": 0,
+            "max_retries": max_retries,
+            "validated": False,
+        }
+        if len(self._flash_queue) >= _FLASH_QUEUE_MAX:
+            dropped = self._flash_queue.popleft()
+            logger.warning(
+                "[Flash] Queue full (%d); dropped oldest flash for %s.",
+                _FLASH_QUEUE_MAX, dropped.get("label", "?"),
+            )
+        self._flash_queue.append(flash)
+        logger.info(
+            "[Flash] Queued flash for %s %s (%d in queue).",
+            flash["label"], flash["rgb"], len(self._flash_queue),
+        )
 
     def _flash_step(self, now: float, paused: bool):
         """Advance the flash state machine. Returns a directive tuple:
@@ -785,10 +833,18 @@ class AmbilightPipeline:
         Side effects only at transitions: ``ensure_on`` on start, and on finish
         either power the strip back off (if it was nominally off) or restore the
         last frame (if it was a paused/locked flash). Painting of segments is
-        left to the caller so the active loop and the idle loop can share this.
+        left to the caller so the active loop and the idle loop can share this —
+        except the first ``on`` segment, which is painted here as a success probe
+        so a flash that never reached the device can be retried (see
+        ``_retry_or_drop``); the caller's repaint of the same colour is a no-op.
         """
         if self._flash_active is None:
             if not self._flash_queue:
+                return ("inactive",)
+            # A flash awaiting its retry back-off blocks the head of the queue
+            # until its delay elapses (preserves order without busy-spinning).
+            head = self._flash_queue[0]
+            if head.get("retry_after", 0.0) > now:
                 return ("inactive",)
             fa = self._flash_queue.popleft()
             fa["i"] = 0
@@ -799,17 +855,72 @@ class AmbilightPipeline:
                 except Exception:  # pragma: no cover - device hiccup
                     pass
             self._flash_active = fa
+            logger.debug("[Flash] Playing flash for %s %s.", fa["label"], fa["rgb"])
 
         fa = self._flash_active
         while now >= fa["seg_end"]:
             fa["i"] += 1
             if fa["i"] >= len(fa["segments"]):
+                logger.debug("[Flash] Completed flash for %s %s.", fa["label"], fa["rgb"])
                 self._finish_flash(paused)
                 return ("inactive",)
             fa["seg_end"] = now + fa["segments"][fa["i"]]["dur"]
 
         seg = fa["segments"][fa["i"]]
+        # Validate the first on-segment: if the device send fails, this flash
+        # never lit, so retry it rather than pretend it played.
+        if seg["on"] and not fa["validated"]:
+            if self._paint_flash(seg["rgb"]) is False:
+                return self._retry_or_drop(fa, now, paused)
+            fa["validated"] = True
         return ("on", seg["rgb"]) if seg["on"] else ("off",)
+
+    def _paint_flash(self, rgb) -> Optional[bool]:
+        """Paint *rgb* across every owned channel.
+
+        Returns True if at least one channel transmitted, False if every send
+        failed (device unreachable → caller should retry), or None when there is
+        nothing to drive (no owned channels — not a failure)."""
+        chans = self._owned_channels()
+        if not chans:
+            return None
+        fr, fg, fb = rgb
+        any_ok = False
+        for ch in chans:
+            try:
+                if ch.led.is_addressable:
+                    ok = ch.led.set_pixels([(fr, fg, fb)] * ch.led_count)
+                else:
+                    ok = ch.led.set_rgb(fr, fg, fb)
+                any_ok = any_ok or bool(ok)
+            except Exception:  # pragma: no cover - device hiccup
+                pass
+        return any_ok
+
+    def _retry_or_drop(self, fa: dict, now: float, paused: bool):
+        """Handle a flash whose first on-segment failed to reach the device.
+
+        Re-queue it (at the front, to preserve order) for another attempt after a
+        short back-off, up to ``max_retries`` attempts; once exhausted, log and
+        move on to the next queued flash. Always returns ``("inactive",)``."""
+        fa["attempts"] += 1
+        self._flash_active = None
+        if fa["attempts"] >= fa["max_retries"]:
+            logger.error(
+                "[Flash] Flash for %s %s failed after %d attempt(s); moving on.",
+                fa["label"], fa["rgb"], fa["attempts"],
+            )
+            self._finish_flash(paused)
+            return ("inactive",)
+        logger.warning(
+            "[Flash] Flash for %s %s send failed; retry %d/%d.",
+            fa["label"], fa["rgb"], fa["attempts"], fa["max_retries"],
+        )
+        fa["validated"] = False
+        fa["i"] = 0
+        fa["retry_after"] = now + _FLASH_RETRY_DELAY_S
+        self._flash_queue.appendleft(fa)
+        return ("inactive",)
 
     def _finish_flash(self, paused: bool) -> None:
         """Terminal restore for a completed flash.
