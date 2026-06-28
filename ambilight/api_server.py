@@ -16,7 +16,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 
 import pydantic
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, status
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__ as APP_VERSION
@@ -39,6 +39,7 @@ from .foreground import get_foreground_app
 from .integrations.mqtt_bridge import MqttBridge
 from .notifications import NotificationFlashService
 from .notifications.brand_colors import BRAND_COLORS
+from .integrations.github import GithubIntegration
 from .ownership import OwnershipCoordinator
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ config_watcher = None
 auto_switcher = None
 mqtt_bridge = None
 notification_flash = None
+github_integration = None
 coordinator = None
 
 # Most recent metrics snapshot (for /health). Updated on every METRICS_UPDATE.
@@ -74,7 +76,7 @@ _last_metrics_persist = 0.0
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    global monitor, config_watcher, auto_switcher, mqtt_bridge, notification_flash, coordinator
+    global monitor, config_watcher, auto_switcher, mqtt_bridge, notification_flash, github_integration, coordinator
 
     # 0. Security: Generate Token
     generate_and_save_token()
@@ -151,6 +153,20 @@ async def startup_event() -> None:
     await bus.subscribe("CONFIG_UPDATE", _refresh_notifications)
     notification_flash.start()
 
+    # 8. GitHub integration ("Ambient GitHub Awareness"): poll GitHub and flash
+    #    the strip on activity, mapped by user rules. Off by default; a no-op
+    #    without httpx. Same lifecycle as the notification flash service.
+    github_integration = GithubIntegration(
+        ConfigManager.get(), controller, asyncio.get_running_loop(),
+    )
+
+    async def _refresh_github(cfg) -> None:
+        if github_integration is not None:
+            github_integration.update_config(cfg)
+
+    await bus.subscribe("CONFIG_UPDATE", _refresh_github)
+    github_integration.start()
+
 
 async def _cache_metrics(metrics: dict) -> None:
     """Keep the latest snapshot + a rolling window; persist to disk ~1 Hz."""
@@ -184,6 +200,8 @@ async def shutdown_event() -> None:
         mqtt_bridge.stop()
     if notification_flash:
         notification_flash.stop()
+    if github_integration:
+        github_integration.stop()
     if monitor:
         monitor.stop()
     if config_watcher:
@@ -539,6 +557,119 @@ async def notifications_brand_colors() -> Dict[str, List[int]]:
     UI fetches it once and matches client-side.
     """
     return {k: list(v) for k, v in BRAND_COLORS.items()}
+
+
+# ---------------------------------------------------------------------------
+# GITHUB INTEGRATION ("Ambient GitHub Awareness")
+# ---------------------------------------------------------------------------
+
+def _require_github():
+    if github_integration is None:
+        raise HTTPException(status_code=503, detail="GitHub integration not ready")
+    return github_integration
+
+
+@app.get("/api/github/status", dependencies=[Depends(verify_token)])
+async def github_status() -> Dict[str, Any]:
+    """Connection + auth + rate-limit + health snapshot for the UI."""
+    if github_integration is None:
+        return {"enabled": False, "httpx_available": False, "auth_state": "disconnected",
+                "connected": False, "client_id_configured": False}
+    info = github_integration.status()
+    from .integrations.github.service import DEFAULT_CLIENT_ID
+    cfg_gh = ConfigManager.get().github
+    info["client_id_configured"] = bool((cfg_gh.client_id or DEFAULT_CLIENT_ID or "").strip())
+    return info
+
+
+@app.post("/api/github/auth/start", dependencies=[Depends(verify_token)])
+async def github_auth_start() -> Dict[str, Any]:
+    """Begin the OAuth device flow; returns the user code + verification URL.
+
+    The UI shows these and polls /api/github/status until auth_state=connected.
+    """
+    gh = _require_github()
+    try:
+        return await gh.begin_auth()
+    except ValueError as exc:               # no client id configured
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:             # httpx missing
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub device flow failed: {exc}")
+
+
+@app.post("/api/github/auth/logout", dependencies=[Depends(verify_token)])
+async def github_logout() -> Dict[str, str]:
+    """Disconnect: clear the stored token and stop polling."""
+    await _require_github().logout()
+    return {"message": "Disconnected"}
+
+
+@app.get("/api/github/orgs", dependencies=[Depends(verify_token)])
+async def github_orgs() -> List[Dict[str, Any]]:
+    return await _require_github().list_orgs()
+
+
+@app.get("/api/github/repos", dependencies=[Depends(verify_token)])
+async def github_repos() -> List[Dict[str, Any]]:
+    return await _require_github().list_repos()
+
+
+@app.get("/api/github/events", dependencies=[Depends(verify_token)])
+async def github_events(limit: int = 50) -> List[Dict[str, Any]]:
+    if github_integration is None:
+        return []
+    return github_integration.recent_events(max(1, min(200, int(limit))))
+
+
+class GithubTestRequest(pydantic.BaseModel):
+    color: Optional[List[int]] = None   # [r,g,b]; defaults to configured default
+
+
+@app.post("/api/github/test", dependencies=[Depends(verify_token)])
+async def github_test(request: GithubTestRequest) -> Dict[str, str]:
+    """Fire a flash now so the user can preview their colour without an event."""
+    gh = _require_github()
+    color = request.color
+    if color is not None and (
+        len(color) != 3 or not all(isinstance(c, int) and 0 <= c <= 255 for c in color)
+    ):
+        raise HTTPException(status_code=400, detail="color must be [r, g, b] with values 0-255")
+    gh.test_flash(color)
+    return {"message": "Flash triggered"}
+
+
+@app.post("/api/github/webhook")
+async def github_webhook(request: Request) -> Dict[str, str]:
+    """Optional/advanced inbound webhook receiver (HMAC-verified, unauthenticated).
+
+    Disabled unless ``github.webhook_enabled`` is set. Verifies GitHub's
+    ``X-Hub-Signature-256`` against the secret stored in the OS keyring, then
+    feeds the delivery through the same normalize → map → flash path as polling.
+    """
+    from .integrations.github import webhook as wh
+    from .integrations import secrets_store
+
+    cfg_gh = ConfigManager.get().github
+    if github_integration is None or not cfg_gh.webhook_enabled:
+        raise HTTPException(status_code=404, detail="Webhook receiver disabled")
+
+    body = await request.body()
+    secret = secrets_store.get_secret(wh.WEBHOOK_SECRET_KEY)
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not wh.verify_signature(secret, body, signature):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    event_name, delivery_id = wh.parse_headers(request.headers)
+    if event_name == "ping":
+        return {"message": "pong"}
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    await github_integration.ingest_webhook(event_name, payload, delivery_id)
+    return {"message": "accepted"}
 
 
 # ---------------------------------------------------------------------------
