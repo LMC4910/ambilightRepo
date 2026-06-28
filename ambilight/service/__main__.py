@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -150,7 +151,6 @@ def main(argv: list[str] | None = None) -> None:
     # this process its OWN rotating file (sibling ambilight.notify.log) that the
     # Electron Logs page merges in; this process is its only writer, so no race.
     try:
-        import logging.handlers
         notify_log = os.path.join(os.path.dirname(cfg.logging.file), "ambilight.notify.log")
         fh = logging.handlers.RotatingFileHandler(
             notify_log,
