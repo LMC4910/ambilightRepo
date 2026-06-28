@@ -262,9 +262,24 @@ def build_service(gpu: bool = False) -> None:
             )
             sys.exit(1)
 
-    # Always-bundled optional deps: capture backends + audio + WGC, and the
-    # smart-home integration stack (paho-mqtt + keyring) when present.
-    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
+    # Feature dependencies are hard requirements in requirements.txt now, so the
+    # installer must ship them — the integrations they power are off by default
+    # but have to work the moment a user enables them, with no separate pip step.
+    required_features = ["zeroconf", "paho", "keyring", "httpx"]
+    missing_feat = [p for p in required_features if not _available(p)]
+    if missing_feat:
+        print(
+            f"[FATAL] Required feature dependency(ies) missing from the build "
+            f"environment: {', '.join(missing_feat)}.\n"
+            f"        Install the requirements so the installer ships them:\n"
+            f"          pip install -r requirements.txt"
+        )
+        sys.exit(1)
+
+    # Always-bundled optional deps: capture backends + audio + WGC, the
+    # smart-home integration stack (paho-mqtt + keyring), and the GitHub
+    # integration's HTTP client (httpx) — all bundled when present.
+    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring", "httpx"]
     collect_all: list[str] = []
     # winsdk is collected in full: its WinRT namespaces (e.g.
     # winsdk.windows.ui.notifications.management for Notification Flash) are
@@ -272,7 +287,9 @@ def build_service(gpu: bool = False) -> None:
     # are collected in full too: dxcam imports dxcam.core.* submodules dynamically
     # and drives the display via comtypes-generated COM wrappers, which a bare
     # --hidden-import leaves out — so the frozen DXGI backend fails to import.
-    for pkg in ("windows_capture", "dxcam", "comtypes", "soundcard", "paho", "keyring", "winsdk"):
+    # httpx pulls in httpcore/h11/anyio/sniffio submodules dynamically, so collect
+    # it in full (a bare --hidden-import misses them and the GitHub client breaks).
+    for pkg in ("windows_capture", "dxcam", "comtypes", "soundcard", "paho", "keyring", "winsdk", "httpx"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 
@@ -328,6 +345,24 @@ def build_service(gpu: bool = False) -> None:
         else:
             print("[WARN] capture_host.exe not built; the 'hook' capture backend "
                   "will be unavailable in this bundle (run build_native first).")
+
+    # Bake the GitHub OAuth App client id into the bundle when provided via the
+    # build environment (CI injects it from a repo secret/variable at release
+    # time). A device-flow client id is NOT a secret — it ships in the app — so
+    # baking it is fine; it's read at runtime via resource_path('github_client_id.txt').
+    client_id_args: list[str] = []
+    gh_client_id = os.environ.get("AMBILIGHT_GITHUB_CLIENT_ID", "").strip()
+    if gh_client_id:
+        cid_dir = DIST / "build_meta"
+        cid_dir.mkdir(parents=True, exist_ok=True)
+        cid_file = cid_dir / "github_client_id.txt"
+        cid_file.write_text(gh_client_id, encoding="utf-8")
+        client_id_args += ["--add-data", f"{cid_file}{sep}."]
+        print("[OK] Baking GitHub OAuth client id into the service bundle.")
+    else:
+        print("[INFO] AMBILIGHT_GITHUB_CLIENT_ID not set; the GitHub integration "
+              "will need a client id at runtime (config or env).")
+
     _run([
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -347,6 +382,7 @@ def build_service(gpu: bool = False) -> None:
         "--add-data", f"{ROOT / 'configuration.yaml'}{sep}.",
         "--add-data", f"{ROOT / 'profiles'}{sep}profiles",
         *add_binary_args,
+        *client_id_args,
         # Collect the whole package so conditionally/dynamically imported
         # submodules (capture backends, api_server referenced via uvicorn) ship.
         "--collect-submodules", "ambilight",

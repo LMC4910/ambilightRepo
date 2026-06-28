@@ -9,13 +9,14 @@ import Zones from './pages/Zones'
 import Profiles from './pages/Profiles'
 import Effects from './pages/Effects'
 import Notifications from './pages/Notifications'
+import Integrations from './pages/Integrations'
 import Settings from './pages/Settings'
 import Logs from './pages/Logs'
 import Diagnostics from './pages/Diagnostics'
 
 const PAGES = {
   dashboard: Dashboard, devices: Devices, zones: Zones, profiles: Profiles, effects: Effects,
-  notifications: Notifications, settings: Settings, logs: Logs, diagnostics: Diagnostics,
+  notifications: Notifications, integrations: Integrations, settings: Settings, logs: Logs, diagnostics: Diagnostics,
 }
 
 // metrics.color → "#rrggbb"

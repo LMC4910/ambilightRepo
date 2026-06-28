@@ -240,5 +240,57 @@ export const useStore = create((set, get) => ({
       set({ brandColors: {} });
       return {};
     }
+  },
+
+  // --- GitHub integration ---
+  githubStatus: null,
+  fetchGithubStatus: async () => {
+    try {
+      const s = await window.api.github.status();
+      set({ githubStatus: s });
+      return s;
+    } catch (e) {
+      set({ githubStatus: null });
+      return null;
+    }
+  },
+  githubAuthStart: async () => {
+    try {
+      const r = await window.api.github.authStart();
+      get().fetchGithubStatus();
+      return r;
+    } catch (e) {
+      const reason = (e?.message || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+      get().toast(reason || 'Could not start GitHub sign-in');
+      return null;
+    }
+  },
+  githubLogout: async () => {
+    try {
+      await window.api.github.logout();
+      await get().fetchGithubStatus();
+      get().toast('Disconnected from GitHub');
+    } catch (e) {
+      console.error(e);
+    }
+  },
+  githubOrgs: async () => {
+    try { return await window.api.github.orgs(); } catch (e) { return []; }
+  },
+  githubRepos: async () => {
+    try { return await window.api.github.repos(); } catch (e) { return []; }
+  },
+  githubEvents: async (limit = 50) => {
+    try { return await window.api.github.events(limit); } catch (e) { return []; }
+  },
+  githubTest: async (color) => {
+    try {
+      await window.api.github.test(color);
+      get().toast('Test flash sent');
+      return true;
+    } catch (e) {
+      console.error(e);
+      return false;
+    }
   }
 }))

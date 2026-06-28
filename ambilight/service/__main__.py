@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -110,6 +111,12 @@ def main(argv: list[str] | None = None) -> None:
     from ambilight import __version__ as app_version
     logger.info("[Service] Ambilight Desktop service v%s", app_version)
 
+    # Load .env (dev convenience / installed-build override) BEFORE anything reads
+    # the environment, so non-secret config like AMBILIGHT_GITHUB_CLIENT_ID is
+    # available to the integration. Never overrides an already-set env var.
+    from ambilight import paths as _paths
+    _paths.load_env_files()
+
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
     # 1. Resolve the config path. In an installed (frozen) build the working
@@ -150,7 +157,6 @@ def main(argv: list[str] | None = None) -> None:
     # this process its OWN rotating file (sibling ambilight.notify.log) that the
     # Electron Logs page merges in; this process is its only writer, so no race.
     try:
-        import logging.handlers
         notify_log = os.path.join(os.path.dirname(cfg.logging.file), "ambilight.notify.log")
         fh = logging.handlers.RotatingFileHandler(
             notify_log,

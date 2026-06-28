@@ -41,3 +41,54 @@ def resource_path(name: str) -> str:
     else:
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, name)
+
+
+def load_env_files() -> None:
+    """Best-effort: load ``KEY=VALUE`` pairs from ``.env`` files into ``os.environ``.
+
+    A developer convenience (so non-secret config like the GitHub OAuth
+    ``client_id`` can live in a gitignored ``.env`` instead of being hard-coded)
+    and an override hook for installed builds (drop ``~/.ambilight/.env``).
+    Values already present in the environment are **never** overwritten, so a
+    real env var or CI injection always wins. Checks, in order: the bundled /
+    repo-root ``.env``, the per-user data dir, and the current working directory.
+    """
+    candidates = []
+    try:
+        candidates.append(Path(resource_path(".env")))
+    except Exception:
+        pass
+    try:
+        candidates.append(user_data_dir() / ".env")
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(os.getcwd()) / ".env")
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            key_path = str(path.resolve())
+        except Exception:
+            key_path = str(path)
+        if key_path in seen:
+            continue
+        seen.add(key_path)
+        try:
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                if s.lower().startswith("export "):
+                    s = s[len("export "):].lstrip()
+                key, _, val = s.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+        except Exception:
+            continue

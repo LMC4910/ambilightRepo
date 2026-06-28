@@ -8,6 +8,7 @@ export const NAV = [
   ['profiles', 'Profiles', 'layers'],
   ['effects', 'Effects', 'wand-2'],
   ['notifications', 'Notifications', 'bell'],
+  ['integrations', 'Integrations', 'plug'],
   ['settings', 'Settings', 'sliders-horizontal'],
   ['logs', 'Logs', 'terminal'],
   ['diagnostics', 'Diagnostics', 'activity'],

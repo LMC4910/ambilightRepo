@@ -211,6 +211,91 @@ class NotificationConfig:
     keyword_rules: list = field(default_factory=list)
 
 
+# Sensible starter colour rules, seeded once so the integration lights up out of
+# the box (workflow → repo → org → global precedence; the user can edit/clear
+# them in the Integrations → GitHub tab). A blank action matches any action.
+DEFAULT_GITHUB_RULES = [
+    # CI / GitHub Actions
+    {"scope": "global", "event_type": "workflow_run", "action": "failure", "color": [220, 38, 38], "blink_count": 4},
+    {"scope": "global", "event_type": "workflow_run", "action": "success", "color": [34, 197, 94]},
+    {"scope": "global", "event_type": "workflow_run", "action": "cancelled", "color": [148, 163, 184]},
+    {"scope": "global", "event_type": "workflow_run", "action": "in_progress", "color": [234, 179, 8]},
+    {"scope": "global", "event_type": "workflow_job", "action": "in_progress", "color": [234, 179, 8]},
+    {"scope": "global", "event_type": "workflow_job", "action": "completed", "color": [148, 163, 184]},
+    {"scope": "global", "event_type": "check_run", "action": "created", "color": [56, 189, 248]},
+    {"scope": "global", "event_type": "check_run", "action": "completed", "color": [148, 163, 184]},
+    # Pull requests
+    {"scope": "global", "event_type": "pull_request", "action": "opened", "color": [59, 130, 246]},
+    {"scope": "global", "event_type": "pull_request", "action": "merged", "color": [168, 85, 247]},
+    {"scope": "global", "event_type": "pull_request", "action": "closed", "color": [148, 163, 184]},
+    {"scope": "global", "event_type": "pull_request", "action": "review_requested", "color": [192, 132, 252]},
+    {"scope": "global", "event_type": "pull_request_review", "action": "", "color": [192, 132, 252]},
+    {"scope": "global", "event_type": "review_comment", "action": "", "color": [129, 140, 248]},
+    # Issues
+    {"scope": "global", "event_type": "issue", "action": "opened", "color": [6, 182, 212]},
+    {"scope": "global", "event_type": "issue", "action": "assigned", "color": [14, 165, 233]},
+    {"scope": "global", "event_type": "issue", "action": "closed", "color": [22, 101, 52]},
+    {"scope": "global", "event_type": "issue_comment", "action": "", "color": [56, 189, 248]},
+    # Mentions / review-requests / assignments (any event type)
+    {"scope": "global", "event_type": "", "action": "mentioned", "color": [249, 115, 22], "blink_count": 3},
+    {"scope": "global", "event_type": "", "action": "review_requested", "color": [192, 132, 252]},
+    {"scope": "global", "event_type": "", "action": "assigned", "color": [14, 165, 233]},
+    # Releases / packages
+    {"scope": "global", "event_type": "release", "action": "", "color": [250, 204, 21]},
+    # Repo activity
+    {"scope": "global", "event_type": "push", "action": "", "color": [100, 116, 139]},
+    {"scope": "global", "event_type": "branch", "action": "created", "color": [52, 211, 153]},
+    {"scope": "global", "event_type": "branch", "action": "deleted", "color": [148, 163, 184]},
+    {"scope": "global", "event_type": "star", "action": "", "color": [250, 204, 21]},
+    {"scope": "global", "event_type": "fork", "action": "", "color": [125, 211, 252]},
+    {"scope": "global", "event_type": "discussion", "action": "", "color": [45, 212, 191]},
+    {"scope": "global", "event_type": "discussion_comment", "action": "", "color": [20, 184, 166]},
+    {"scope": "global", "event_type": "commit_comment", "action": "", "color": [14, 165, 233]},
+    {"scope": "global", "event_type": "deployment", "action": "", "color": [99, 102, 241]},
+    {"scope": "global", "event_type": "deployment_status", "action": "", "color": [79, 70, 229]},
+    {"scope": "global", "event_type": "repository_invitation", "action": "", "color": [251, 191, 36], "blink_count": 3},
+    # Security — urgent flashing red
+    {"scope": "global", "event_type": "security_alert", "action": "", "color": [239, 68, 68], "blink_count": 6, "on_ms": 120, "off_ms": 80},
+]
+
+
+@dataclass
+class GithubConfig:
+    """"Ambient GitHub Awareness" — flash the LEDs in response to GitHub activity.
+
+    The integration polls GitHub (works behind NAT) and maps each event to a
+    colour/effect using a rule hierarchy (workflow → repo → org → global). All
+    colours are user-defined here — there is no brand-colour lookup. Off by
+    default; a no-op without the optional ``httpx`` dependency. The OAuth token
+    is stored in the OS keyring, never in this config.
+    """
+    enabled: bool = False
+    # OAuth App client id for the device flow (public; no secret). May be left
+    # blank and supplied via the AMBILIGHT_GITHUB_CLIENT_ID env var instead.
+    client_id: str = ""
+    scopes: list = field(default_factory=lambda: ["notifications", "read:org", "repo"])
+    # Polling
+    poll_interval_s: float = 60.0        # base interval; clamped, honours X-Poll-Interval
+    watch_notifications: bool = True     # poll the /notifications inbox
+    watched_repos: list = field(default_factory=list)  # ["owner/name", ...] for runs + events
+    watched_orgs: list = field(default_factory=list)    # ["org", ...] for org events
+    # Default lighting (fallback when no rule matches) — GitHub blue.
+    default_color: list = field(default_factory=lambda: [88, 166, 255])  # [r,g,b]
+    brightness: float = 1.0
+    blink_count: int = 2
+    on_ms: int = 180
+    off_ms: int = 120
+    # Rule hierarchy (see integrations/github/mapper.py). Each rule is a dict:
+    #   {scope, repo?, org?, workflow?, event_type, action, color:[r,g,b], <pattern overrides>}
+    rules: list = field(default_factory=list)
+    # Marker that defaults were seeded at least once. Kept for back-compat and
+    # diagnostics; defaults still auto-reseed when rules are empty.
+    rules_seeded: bool = False
+    # Advanced: inbound webhook receiver (optional, off by default).
+    webhook_enabled: bool = False
+    webhook_secret_set: bool = False     # marker only; the secret lives in the keyring
+
+
 @dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
@@ -229,6 +314,7 @@ class AppConfig:
     mqtt: MqttConfig = field(default_factory=MqttConfig)
     ownership: OwnershipConfig = field(default_factory=OwnershipConfig)
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
+    github: GithubConfig = field(default_factory=GithubConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +646,83 @@ class ConfigManager:
             str(k): _norm_color(v, [255, 255, 255], f"notifications.app_overrides[{k}]")
             for k, v in raw_overrides.items()
         }
+
+        # 6b. GitHub integration — clamp flash params, coerce colours, and
+        #     sanitise the watch lists / rules so a malformed value can't crash
+        #     the poller or send garbage to the strip.
+        g = config.github
+        g.enabled = bool(g.enabled)
+        g.client_id = str(g.client_id or "").strip()
+        g.scopes = [str(s).strip() for s in (g.scopes if isinstance(g.scopes, list) else []) if str(s).strip()] \
+            or ["notifications", "read:org", "repo"]
+        try:
+            g.poll_interval_s = max(15.0, float(g.poll_interval_s))
+        except (TypeError, ValueError):
+            g.poll_interval_s = 60.0
+        g.watch_notifications = bool(g.watch_notifications)
+        g.watched_repos = [str(r).strip() for r in (g.watched_repos if isinstance(g.watched_repos, list) else []) if str(r).strip()]
+        g.watched_orgs = [str(o).strip() for o in (g.watched_orgs if isinstance(g.watched_orgs, list) else []) if str(o).strip()]
+        g.default_color = _norm_color(g.default_color, [88, 166, 255], "github.default_color")
+        try:
+            g.brightness = max(0.0, min(1.0, float(g.brightness)))
+        except (TypeError, ValueError):
+            g.brightness = 1.0
+        try:
+            g.blink_count = max(1, int(g.blink_count))
+        except (TypeError, ValueError):
+            g.blink_count = 2
+        try:
+            g.on_ms = max(20, int(g.on_ms))
+        except (TypeError, ValueError):
+            g.on_ms = 180
+        try:
+            g.off_ms = max(0, int(g.off_ms))
+        except (TypeError, ValueError):
+            g.off_ms = 120
+
+        # Seed sensible default colour rules so the integration lights up out
+        # of the box and self-heals if a user clears every rule accidentally.
+        if not (g.rules if isinstance(g.rules, list) else []):
+            g.rules = [dict(r) for r in DEFAULT_GITHUB_RULES]
+            g.rules_seeded = True
+        else:
+            g.rules_seeded = True
+
+        raw_gh_rules = g.rules if isinstance(g.rules, list) else []
+        if not isinstance(g.rules, list) and g.rules:
+            logger.warning("[Config] github.rules is not a list; ignoring.")
+        clean_gh_rules = []
+        for rule in raw_gh_rules:
+            if not isinstance(rule, dict):
+                continue
+            scope = str(rule.get("scope", "global") or "global").strip().lower()
+            if scope not in ("global", "org", "repo", "workflow"):
+                scope = "global"
+            cleaned = {
+                "scope": scope,
+                "repo": str(rule.get("repo", "") or "").strip(),
+                "org": str(rule.get("org", "") or "").strip(),
+                "workflow": str(rule.get("workflow", "") or "").strip(),
+                "event_type": str(rule.get("event_type", "") or "").strip(),
+                "action": str(rule.get("action", "") or "").strip(),
+                "color": _norm_color(rule.get("color"), g.default_color, "github.rules[].color"),
+            }
+            # Optional per-rule pattern overrides (kept only when present + valid).
+            for k, lo in (("blink_count", 1), ("on_ms", 20), ("off_ms", 0)):
+                if rule.get(k) is not None:
+                    try:
+                        cleaned[k] = max(lo, int(rule[k]))
+                    except (TypeError, ValueError):
+                        pass
+            if rule.get("brightness") is not None:
+                try:
+                    cleaned["brightness"] = max(0.0, min(1.0, float(rule["brightness"])))
+                except (TypeError, ValueError):
+                    pass
+            clean_gh_rules.append(cleaned)
+        g.rules = clean_gh_rules
+        g.webhook_enabled = bool(g.webhook_enabled)
+        g.webhook_secret_set = bool(g.webhook_secret_set)
 
         # 7. Ownership — mint a stable per-install instance_id (persisted by
         #    load()/update() so it survives restarts), default the label to the
