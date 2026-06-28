@@ -211,6 +211,13 @@ class NotificationConfig:
     keyword_rules: list = field(default_factory=list)
 
 
+# Bump when DEFAULT_GITHUB_RULES gains entries that existing installs should pick
+# up. On load, configs with an older github.rules_version get the *missing*
+# defaults merged in (by signature) without disturbing the user's custom rules —
+# so upgrades top-up new defaults exactly once and never resurrect a default the
+# user deliberately deleted.
+DEFAULT_GITHUB_RULES_VERSION = 1
+
 # Sensible starter colour rules, seeded once so the integration lights up out of
 # the box (workflow → repo → org → global precedence; the user can edit/clear
 # them in the Integrations → GitHub tab). A blank action matches any action.
@@ -291,6 +298,9 @@ class GithubConfig:
     # Marker that defaults were seeded at least once. Kept for back-compat and
     # diagnostics; defaults still auto-reseed when rules are empty.
     rules_seeded: bool = False
+    # Highest DEFAULT_GITHUB_RULES_VERSION whose defaults have been merged into
+    # `rules`. Lets an upgrade top-up newly-added defaults once (see config load).
+    rules_version: int = 0
     # Advanced: inbound webhook receiver (optional, off by default).
     webhook_enabled: bool = False
     webhook_secret_set: bool = False     # marker only; the secret lives in the keyring
@@ -680,13 +690,48 @@ class ConfigManager:
         except (TypeError, ValueError):
             g.off_ms = 120
 
-        # Seed sensible default colour rules so the integration lights up out
-        # of the box and self-heals if a user clears every rule accidentally.
-        if not (g.rules if isinstance(g.rules, list) else []):
+        try:
+            g.rules_version = max(0, int(g.rules_version))
+        except (TypeError, ValueError):
+            g.rules_version = 0
+
+        # Seed/refresh the default colour rules so the integration lights up out
+        # of the box. Three cases:
+        #   * no rules at all → seed the full default set (also self-heals if a
+        #     user clears every rule accidentally);
+        #   * older rules_version → additively merge in any default the user is
+        #     missing (matched by signature) without touching their custom rules,
+        #     so an upgrade tops-up new defaults exactly once;
+        #   * up-to-date → leave rules as-is.
+        # The mapper's precedence (workflow > repo > org > global) means the
+        # merged global defaults never override a user's more-specific rule.
+        existing_rules = g.rules if isinstance(g.rules, list) else []
+
+        def _rule_sig(r):
+            return (
+                str(r.get("scope", "global") or "global").strip().lower(),
+                str(r.get("event_type", "") or "").strip().lower(),
+                str(r.get("action", "") or "").strip().lower(),
+                str(r.get("repo", "") or "").strip().lower(),
+                str(r.get("org", "") or "").strip().lower(),
+                str(r.get("workflow", "") or "").strip().lower(),
+            )
+
+        if not existing_rules:
             g.rules = [dict(r) for r in DEFAULT_GITHUB_RULES]
-            g.rules_seeded = True
-        else:
-            g.rules_seeded = True
+        elif g.rules_seeded and g.rules_version < DEFAULT_GITHUB_RULES_VERSION:
+            # Existing install (already seeded once) on an older defaults version:
+            # top-up the defaults it's missing. Gating on rules_seeded means a
+            # pristine config that set rules explicitly is left untouched.
+            seen = {_rule_sig(r) for r in existing_rules if isinstance(r, dict)}
+            merged = list(existing_rules)
+            for r in DEFAULT_GITHUB_RULES:
+                if _rule_sig(r) not in seen:
+                    merged.append(dict(r))
+                    seen.add(_rule_sig(r))
+            g.rules = merged
+        g.rules_seeded = True
+        g.rules_version = DEFAULT_GITHUB_RULES_VERSION
 
         raw_gh_rules = g.rules if isinstance(g.rules, list) else []
         if not isinstance(g.rules, list) and g.rules:
