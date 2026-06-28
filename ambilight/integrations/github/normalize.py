@@ -14,6 +14,8 @@ GitHub can tell us about" rather than dropping it.
 from __future__ import annotations
 
 import time
+import uuid
+import logging
 from typing import Any, Dict, Optional
 
 from .models import (
@@ -23,6 +25,8 @@ from .models import (
     PRIORITY_LOW,
     PRIORITY_NORMAL,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_ts(value: Any) -> float:
@@ -80,7 +84,7 @@ def normalize_notification(item: Dict[str, Any], account: str = "") -> GithubEve
     owner = (repo.get("owner") or {}).get("login", "") or (
         full_name.split("/")[0] if "/" in full_name else ""
     )
-    reason = str(item.get("reason", "") or "")
+    reason = str(item.get("reason", "") or "").strip().lower()
     subj_type = str(subject.get("type", "") or "")
     event_type = _SUBJECT_TYPE.get(subj_type, "notification")
     action = _REASON_ACTION.get(reason, reason or "activity")
@@ -124,8 +128,8 @@ def normalize_workflow_run(run: Dict[str, Any], account: str = "",
     owner = (repo.get("owner") or {}).get("login", "") or (
         full_name.split("/")[0] if "/" in full_name else ""
     )
-    status = str(run.get("status", "") or "")          # queued|in_progress|completed
-    conclusion = str(run.get("conclusion", "") or "")  # success|failure|cancelled|...
+    status = str(run.get("status", "") or "").strip().lower()          # queued|in_progress|completed
+    conclusion = str(run.get("conclusion", "") or "").strip().lower()  # success|failure|cancelled|...
     # Action is the conclusion when finished, else the live status.
     action = conclusion or status or "unknown"
     name = str(run.get("name", "") or run.get("display_title", "") or "Workflow")
@@ -188,7 +192,7 @@ def normalize_event(ev: Dict[str, Any], account: str = "") -> GithubEvent:
     payload = ev.get("payload") or {}
 
     event_type, default_action = _EVENT_TYPE.get(raw_type, ("activity", "occurred"))
-    action = str(payload.get("action", "") or default_action)
+    action = str(payload.get("action", "") or default_action).strip().lower()
     # PRs that merged carry action="closed" + pull_request.merged=True.
     if event_type == "pull_request" and action == "closed":
         if (payload.get("pull_request") or {}).get("merged"):
@@ -259,12 +263,16 @@ def normalize_webhook(event_name: str, payload: Dict[str, Any],
     sender = (payload.get("sender") or {}).get("login", "") or ""
 
     event_type = _WEBHOOK_TYPE.get(event_name, event_name or "notification")
-    action = str(payload.get("action", "") or "")
+    action = str(payload.get("action", "") or "").strip().lower()
 
     # workflow_run conclusion is the most useful "action" for CI.
     if event_name in ("workflow_run", "check_suite"):
         run = payload.get(event_name) or payload.get("workflow_run") or {}
-        action = str(run.get("conclusion") or run.get("status") or action or "completed")
+        conclusion = str(run.get("conclusion", "") or "").strip().lower()
+        status = str(run.get("status", "") or "").strip().lower()
+        if not isinstance(run, dict) or not run:
+            logger.warning("[GitHub] webhook %s missing nested run object; using fallback action path", event_name)
+        action = conclusion or status or action or "completed"
     if event_type == "pull_request" and action == "closed":
         if (payload.get("pull_request") or {}).get("merged"):
             action = "merged"
@@ -277,7 +285,10 @@ def normalize_webhook(event_name: str, payload: Dict[str, Any],
     elif event_type == "workflow_run" and action == "failure":
         priority = PRIORITY_HIGH
 
-    delivery = payload.get("_delivery_id") or f"{event_name}-{action}-{int(time.time())}"
+    delivery = str(payload.get("_delivery_id") or "").strip()
+    if not delivery:
+        delivery = f"{event_name}-{uuid.uuid4().hex}"
+        logger.warning("[GitHub] webhook missing delivery id; generated %s", delivery)
     workflow = ""
     if event_name in ("workflow_run", "check_suite"):
         run = payload.get(event_name) or payload.get("workflow_run") or {}

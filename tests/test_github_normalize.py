@@ -63,6 +63,12 @@ def test_workflow_run_in_progress_uses_status():
     assert ev.action == "in_progress"
 
 
+def test_workflow_run_action_normalizes_case_and_whitespace():
+    run = {"id": 2, "name": "CI", "status": " COMPLETED ", "conclusion": " FAILURE "}
+    ev = normalize.normalize_workflow_run(run, repository="a/b")
+    assert ev.action == "failure"
+
+
 def test_event_pull_request_merged():
     ev_raw = {
         "id": "555",
@@ -98,6 +104,27 @@ def test_webhook_workflow_run_failure_critical_priority():
     assert ev.workflow == "Build"
     assert ev.source == "webhook"
     assert ev.id == "hook-abc"
+
+
+def test_webhook_workflow_run_missing_nested_object_uses_action_fallback():
+    payload = {
+        "_delivery_id": "x1",
+        "repository": {"full_name": "acme/api", "owner": {"login": "acme"}},
+        "action": " completed ",
+        "workflow_run": None,
+    }
+    ev = normalize.normalize_webhook("workflow_run", payload)
+    assert ev.event_type == "workflow_run"
+    assert ev.action == "completed"
+
+
+def test_webhook_missing_delivery_id_generates_unique_id():
+    payload = {
+        "repository": {"full_name": "acme/api", "owner": {"login": "acme"}},
+        "action": "opened",
+    }
+    ev = normalize.normalize_webhook("pull_request", payload)
+    assert ev.id.startswith("hook-pull_request-")
 
 
 def test_webhook_dependabot_alert_is_security():
