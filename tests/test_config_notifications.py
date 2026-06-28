@@ -13,6 +13,18 @@ def test_defaults():
     assert n.suppress_during_dnd is False     # flashes during DND by default
     assert n.flash_when_locked is True        # flashes while locked by default
     assert n.blink_count == 2
+    assert n.inter_flash_gap_ms == 120        # dark gap between queued flashes
+    assert n.flash_max_retries == 3           # retry a failed flash 3x before moving on
+
+
+def test_flash_queue_fields_clamped():
+    cfg = AppConfig()
+    n = cfg.notifications
+    n.inter_flash_gap_ms = -50                 # below floor
+    n.flash_max_retries = 0                    # below floor (need at least 1 attempt)
+    ConfigManager._normalize_and_validate(cfg)
+    assert n.inter_flash_gap_ms == 0           # clamped to 0 (no negative gap)
+    assert n.flash_max_retries == 1            # clamped to a minimum of 1
 
 
 def test_normalization_clamps_and_coerces():

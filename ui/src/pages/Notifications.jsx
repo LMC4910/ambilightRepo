@@ -5,7 +5,7 @@ import { Icon, PageHead, ServiceStatus, Section, Empty, Toggle, Stepper, Swatch 
 const N_DEFAULTS = {
   enabled: false, default_color: [255, 255, 255], brightness: 1.0, blink_count: 2, on_ms: 180, off_ms: 120,
   color_mode: 'icon', suppress_during_dnd: false, flash_when_locked: true, dedup_window_s: 5.0,
-  min_flash_interval_s: 1.5, app_overrides: {}, keyword_rules: [],
+  inter_flash_gap_ms: 120, flash_max_retries: 3, app_overrides: {}, keyword_rules: [],
 }
 
 let _rowId = 0
@@ -45,7 +45,8 @@ const toDraft = (n) => {
     suppress_during_dnd: !!src.suppress_during_dnd,
     flash_when_locked: src.flash_when_locked !== false,
     dedup_window_s: Number(src.dedup_window_s ?? 5),
-    min_flash_interval_s: Number(src.min_flash_interval_s ?? 1.5),
+    inter_flash_gap_ms: Number(src.inter_flash_gap_ms ?? 120),
+    flash_max_retries: Number(src.flash_max_retries ?? 3),
     overrides: Object.entries(src.app_overrides || {}).map(([app, color]) => ({ _id: nextId(), app, color })),
     keyword_rules: (src.keyword_rules || []).map((r) => ({ _id: nextId(), keyword: r.keyword || '', color: r.color || [255, 255, 255] })),
   }
@@ -54,7 +55,8 @@ const toDraft = (n) => {
 const buildPayload = (d) => ({
   enabled: d.enabled, default_color: d.default_color, brightness: d.brightness, blink_count: d.blink_count,
   on_ms: d.on_ms, off_ms: d.off_ms, color_mode: d.color_mode, suppress_during_dnd: d.suppress_during_dnd,
-  flash_when_locked: d.flash_when_locked, dedup_window_s: d.dedup_window_s, min_flash_interval_s: d.min_flash_interval_s,
+  flash_when_locked: d.flash_when_locked, dedup_window_s: d.dedup_window_s,
+  inter_flash_gap_ms: d.inter_flash_gap_ms, flash_max_retries: d.flash_max_retries,
   app_overrides: Object.fromEntries(d.overrides.filter((o) => o.app.trim()).map((o) => [o.app.trim(), o.color])),
   keyword_rules: d.keyword_rules.filter((r) => r.keyword.trim()).map((r) => ({ keyword: r.keyword.trim(), color: r.color })),
 })
@@ -172,8 +174,11 @@ export default function Notifications() {
               <div className="field-row"><span className="fr-l">De-dup window<small>Ignore repeat notifications within this window</small></span>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Stepper value={n.dedup_window_s} onChange={(v) => set({ dedup_window_s: v })} min={0} max={60} /><span className="subtle">s</span></span></div>
               <div className="hairline" />
-              <div className="field-row"><span className="fr-l">Min interval between flashes<small>Rate-limit bursts of alerts</small></span>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Stepper value={n.min_flash_interval_s} onChange={(v) => set({ min_flash_interval_s: v })} min={0} max={30} /><span className="subtle">s</span></span></div>
+              <div className="field-row"><span className="fr-l">Gap between flashes<small>Dark pause so stacked alerts flash one-by-one and stay distinct</small></span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><input type="range" className="rng" style={{ maxWidth: 150 }} min="0" max="500" step="10" value={n.inter_flash_gap_ms} onChange={(e) => set({ inter_flash_gap_ms: +e.target.value })} /><span className="subtle" style={{ width: 48 }}>{n.inter_flash_gap_ms}ms</span></span></div>
+              <div className="hairline" />
+              <div className="field-row"><span className="fr-l">Retry attempts<small>Retry a failed flash up to this many times before moving on</small></span>
+                <Stepper value={n.flash_max_retries} onChange={(v) => set({ flash_max_retries: v })} min={1} max={10} /></div>
             </div>
 
             <Section title="Per-app colours" count={n.overrides.length} />
