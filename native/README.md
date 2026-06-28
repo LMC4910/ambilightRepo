@@ -1,8 +1,8 @@
-# native/ — game capture (DirectX 9 / 10 / 11 / 12 hook)
+# native/ — game capture (DirectX 9 / 10 / 11 / 12 + Vulkan hook)
 
 Native components that let the Python colour pipeline receive frames from a game
-running in **exclusive/borderless fullscreen Direct3D**, which the compositor-based
-backends (WGC / DXGI / MSS) cannot reach.
+running in **exclusive/borderless fullscreen Direct3D or Vulkan**, which the
+compositor-based backends (WGC / DXGI / MSS) cannot reach.
 
 The Python side is `ambilight/hook_capture.py` (`HookCaptureBackend`). It is
 **opt-in only** — selected via `capture.method: hook` in `configuration.yaml` —
@@ -26,9 +26,11 @@ native/
     dllmain.cpp          Bootstrap: control mapping → ShmWriter → install hooks.
     hook_dxgi.{h,cpp}    DXGI Present hook → DX10 / DX11 / DX12 capture.
     hook_d3d9.{h,cpp}    Direct3D 9 Present hook.
+    hook_vulkan.{h,cpp}  vkQueuePresentKHR hook → Vulkan swapchain capture.
     capture_util.{h,cpp} Backbuffer format → BGR conversion.
     vmt_hook.{h,cpp}     Vtable hooking (DXGI).
-  third_party/minhook/ Vendored MinHook (BSD-2) — inline hooks for DX9/DX12.
+  third_party/minhook/        Vendored MinHook (BSD-2) — inline hooks for DX9/DX12/Vulkan.
+  third_party/vulkan-headers/ Vendored Khronos Vulkan-Headers (Apache-2.0) — headers only.
   test_dx11/           dx9/dx11/dx12 probe apps (not shipped) for headless tests.
 ```
 
@@ -58,10 +60,18 @@ fight), throttles to `fps`, and always calls the original `Present` (SEH-guarded
   it with [MinHook](https://github.com/TsudaKageyu/minhook) (BSD-2, vendored under
   `third_party/minhook`). DX12 also needs a command queue, captured by hooking
   `ID3D12CommandQueue::ExecuteCommandLists`.
+- **Vulkan**: MinHook the exported `vulkan-1.dll` entry points. `vkCreateSwapchainKHR`
+  is hooked to add `VK_IMAGE_USAGE_TRANSFER_SRC_BIT` (so the swapchain image is
+  copyable) and to record the device/format/extent + images; `vkQueuePresentKHR`
+  records a one-shot copy of the presented image to a host-visible buffer (submitted
+  on the present queue, fenced) → BGR. Memory types come from a throwaway probe
+  instance (correct on single-GPU systems), so we needn't observe `vkCreateDevice`,
+  which runs before injection. A swapchain created **before** injection is captured
+  only once it is recreated (fullscreen entry/resize, or an alt-tab out/in).
 
-`graphics_hook.dll` resolves every DirectX `Create*` function at runtime
-(GetProcAddress), so it imports only KERNEL32 + USER32 — injecting into any game
-forces no extra D3D DLLs to load.
+`graphics_hook.dll` resolves every DirectX `Create*` and Vulkan `vk*` function at
+runtime (GetProcAddress), so it imports only KERNEL32 + USER32 — injecting into any
+game forces no extra D3D / Vulkan DLLs to load.
 
 ## Building
 
@@ -111,5 +121,12 @@ the PyInstaller service onedir via `--add-binary`.
   (logged).
 - **Bitness:** x64 host injects an x64 DLL into x64 games (the norm). 32-bit games
   are skipped (logged).
-- **SDR only:** 10-bit / HDR (`R10G10B10A2`) and multisampled backbuffers are
-  skipped with a one-time warning.
+- **SDR only:** 10-bit / HDR (`R10G10B10A2`, Vulkan `A2B10G10R10`) and multisampled
+  backbuffers are skipped with a one-time warning.
+- **Vulkan specifics:** capture starts on the first swapchain (re)created *after*
+  injection — a game already fullscreen when capture starts may need one fullscreen
+  toggle / alt-tab to recreate it. Hooking the `vulkan-1.dll` loader exports catches
+  games that present through the loader (the vast majority); a game using a custom
+  loader/`volk` dispatch that bypasses the exports won't be caught (a Vulkan layer
+  would be the more-robust route). Host-visible memory types are read from a probe
+  instance, assuming the game runs on the system's primary/discrete GPU.

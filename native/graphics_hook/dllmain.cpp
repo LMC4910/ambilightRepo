@@ -17,6 +17,7 @@
 #include "hook_control.h"
 #include "hook_dxgi.h"
 #include "hook_d3d9.h"
+#include "hook_vulkan.h"
 #include "hooklog.h"
 
 #include <MinHook.h>
@@ -79,8 +80,9 @@ DWORD WINAPI InitThread(LPVOID) {
     const bool has_dxgi = GetModuleHandleW(L"d3d11.dll") || GetModuleHandleW(L"d3d12.dll") ||
                           GetModuleHandleW(L"d3d10.dll");
     const bool has_d3d9 = GetModuleHandleW(L"d3d9.dll") != nullptr;
-    if (!has_dxgi && !has_d3d9) {
-        ambilight::hook_log("no Direct3D runtime detected in this process; no hooks installed");
+    const bool has_vulkan = GetModuleHandleW(L"vulkan-1.dll") != nullptr;
+    if (!has_dxgi && !has_d3d9 && !has_vulkan) {
+        ambilight::hook_log("no Direct3D/Vulkan runtime detected in this process; no hooks installed");
         return 0;
     }
 
@@ -93,6 +95,7 @@ DWORD WINAPI InitThread(LPVOID) {
 
     if (has_dxgi) ambilight::install_dxgi_hook(&g_writer, g_control);
     if (has_d3d9) ambilight::install_d3d9_hook(&g_writer, g_control);
+    if (has_vulkan) ambilight::install_vulkan_hook(&g_writer, g_control);
     return 0;
 }
 

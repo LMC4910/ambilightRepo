@@ -71,8 +71,8 @@ bool is_fullscreen(HWND hwnd) {
            wr.right >= m.right - tol && wr.bottom >= m.bottom - tol;
 }
 
-// True if the process has any Direct3D runtime module loaded — our "is this a
-// game" heuristic (and a precondition for the hook to have anything to hook).
+// True if the process has any Direct3D or Vulkan runtime module loaded — our "is
+// this a game" heuristic (and a precondition for the hook to have anything to hook).
 bool has_direct3d(DWORD pid, std::wstring& which) {
     HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (proc == nullptr) return false;
@@ -84,9 +84,9 @@ bool has_direct3d(DWORD pid, std::wstring& which) {
                              static_cast<DWORD>(mods.size() * sizeof(HMODULE)),
                              &needed, LIST_MODULES_ALL)) {
         const size_t count = std::min<size_t>(mods.size(), needed / sizeof(HMODULE));
-        static const std::array<const wchar_t*, 6> kD3D = {
+        static const std::array<const wchar_t*, 7> kD3D = {
             L"dxgi.dll", L"d3d9.dll", L"d3d10.dll", L"d3d11.dll", L"d3d12.dll",
-            L"d3d10core.dll",
+            L"d3d10core.dll", L"vulkan-1.dll",
         };
         for (size_t i = 0; i < count && !found; ++i) {
             wchar_t name[MAX_PATH];

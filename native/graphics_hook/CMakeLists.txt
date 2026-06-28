@@ -7,12 +7,19 @@ add_library(graphics_hook SHARED
     capture_util.cpp
     hook_dxgi.cpp
     hook_d3d9.cpp
+    hook_vulkan.cpp
 )
 
 # No "lib" prefix on MinGW so the artifact is always graphics_hook.dll.
 set_target_properties(graphics_hook PROPERTIES PREFIX "")
 
-target_include_directories(graphics_hook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(graphics_hook PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    # Vendored Vulkan-Headers (header-only). hook_vulkan.cpp resolves every vk*
+    # function at runtime (VK_NO_PROTOTYPES), so this adds headers only — no
+    # link-time dependency on vulkan-1.lib, matching the DX hooks.
+    ${CMAKE_SOURCE_DIR}/third_party/vulkan-headers/include
+)
 
 target_link_libraries(graphics_hook PRIVATE ambshm minhook)
 
