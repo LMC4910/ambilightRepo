@@ -345,6 +345,24 @@ def build_service(gpu: bool = False) -> None:
         else:
             print("[WARN] capture_host.exe not built; the 'hook' capture backend "
                   "will be unavailable in this bundle (run build_native first).")
+
+    # Bake the GitHub OAuth App client id into the bundle when provided via the
+    # build environment (CI injects it from a repo secret/variable at release
+    # time). A device-flow client id is NOT a secret — it ships in the app — so
+    # baking it is fine; it's read at runtime via resource_path('github_client_id.txt').
+    client_id_args: list[str] = []
+    gh_client_id = os.environ.get("AMBILIGHT_GITHUB_CLIENT_ID", "").strip()
+    if gh_client_id:
+        cid_dir = DIST / "build_meta"
+        cid_dir.mkdir(parents=True, exist_ok=True)
+        cid_file = cid_dir / "github_client_id.txt"
+        cid_file.write_text(gh_client_id, encoding="utf-8")
+        client_id_args += ["--add-data", f"{cid_file}{sep}."]
+        print("[OK] Baking GitHub OAuth client id into the service bundle.")
+    else:
+        print("[INFO] AMBILIGHT_GITHUB_CLIENT_ID not set; the GitHub integration "
+              "will need a client id at runtime (config or env).")
+
     _run([
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -364,6 +382,7 @@ def build_service(gpu: bool = False) -> None:
         "--add-data", f"{ROOT / 'configuration.yaml'}{sep}.",
         "--add-data", f"{ROOT / 'profiles'}{sep}profiles",
         *add_binary_args,
+        *client_id_args,
         # Collect the whole package so conditionally/dynamically imported
         # submodules (capture backends, api_server referenced via uvicorn) ship.
         "--collect-submodules", "ambilight",

@@ -41,6 +41,12 @@ jobs:
 
       - name: Build service (PyInstaller)
         run: python build.py --service
+        env:
+          # GitHub OAuth App client id for the integration's device flow. NOT a
+          # secret (it ships in the app) — store it as a repo secret OR variable;
+          # build.py bakes it into the bundle when present, and skips baking when
+          # absent (the integration then needs a client id from config/env).
+          AMBILIGHT_GITHUB_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

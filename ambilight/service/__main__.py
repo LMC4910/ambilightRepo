@@ -111,6 +111,12 @@ def main(argv: list[str] | None = None) -> None:
     from ambilight import __version__ as app_version
     logger.info("[Service] Ambilight Desktop service v%s", app_version)
 
+    # Load .env (dev convenience / installed-build override) BEFORE anything reads
+    # the environment, so non-secret config like AMBILIGHT_GITHUB_CLIENT_ID is
+    # available to the integration. Never overrides an already-set env var.
+    from ambilight import paths as _paths
+    _paths.load_env_files()
+
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
     # 1. Resolve the config path. In an installed (frozen) build the working

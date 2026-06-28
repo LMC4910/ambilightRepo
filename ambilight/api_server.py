@@ -576,9 +576,9 @@ async def github_status() -> Dict[str, Any]:
         return {"enabled": False, "httpx_available": False, "auth_state": "disconnected",
                 "connected": False, "client_id_configured": False}
     info = github_integration.status()
-    from .integrations.github.service import DEFAULT_CLIENT_ID
+    from .integrations.github.service import resolve_client_id
     cfg_gh = ConfigManager.get().github
-    info["client_id_configured"] = bool((cfg_gh.client_id or DEFAULT_CLIENT_ID or "").strip())
+    info["client_id_configured"] = bool((cfg_gh.client_id or resolve_client_id() or "").strip())
     return info
 
 

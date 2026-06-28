@@ -41,9 +41,34 @@ from .store import GithubStore
 
 logger = logging.getLogger(__name__)
 
-# Public OAuth App client id. Ship one here (or override via config /
-# AMBILIGHT_GITHUB_CLIENT_ID) — device flow needs no client secret.
-DEFAULT_CLIENT_ID = os.environ.get("AMBILIGHT_GITHUB_CLIENT_ID", "")
+def resolve_client_id() -> str:
+    """Resolve the GitHub OAuth App client id.
+
+    A device-flow client id is **not a secret** (it ships in the app), so it
+    just needs to reach the running service. Resolution order:
+
+    1. ``AMBILIGHT_GITHUB_CLIENT_ID`` env var — including values loaded from a
+       ``.env`` file at startup (see ``paths.load_env_files``).
+    2. A build-baked ``github_client_id.txt`` bundled with the frozen app (CI
+       injects it from a repo secret/variable at release time via ``build.py``).
+
+    The per-user config's ``github.client_id`` overrides both (handled by the
+    caller). Returns ``""`` when none is configured.
+    """
+    v = os.environ.get("AMBILIGHT_GITHUB_CLIENT_ID", "").strip()
+    if v:
+        return v
+    try:
+        from ...paths import resource_path
+        p = resource_path("github_client_id.txt")
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as fh:
+                baked = fh.read().strip()
+            if baked:
+                return baked
+    except Exception:
+        pass
+    return ""
 
 
 class GithubIntegration:
@@ -67,7 +92,7 @@ class GithubIntegration:
 
     @property
     def _client_id(self) -> str:
-        return (getattr(self._gh, "client_id", "") or DEFAULT_CLIENT_ID or "").strip()
+        return (getattr(self._gh, "client_id", "") or resolve_client_id() or "").strip()
 
     @property
     def _scopes(self):
