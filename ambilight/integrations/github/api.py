@@ -135,6 +135,15 @@ class GithubApi:
             params={"per_page": per_page, "sort": "updated", "affiliation": "owner,collaborator,organization_member"},
         )).data or []
 
+    async def get_repo_workflows(self, repo: str, per_page: int = 100) -> List[Dict[str, Any]]:
+        """List a repo's Actions workflows. ``name`` matches a run's workflow name
+        (see :func:`normalize.normalize_workflow_run`), so the UI can offer it as a
+        picker instead of having the user type it."""
+        data = (await self._request(
+            "GET", f"/repos/{repo}/actions/workflows", params={"per_page": per_page},
+        )).data or {}
+        return data.get("workflows", []) if isinstance(data, dict) else []
+
     # --- pollable feeds (conditional) -----------------------------------
     async def get_notifications(self, etag: Optional[str] = None,
                                 last_modified: Optional[str] = None,

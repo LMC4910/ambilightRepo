@@ -375,6 +375,28 @@ class GithubIntegration:
             self._health.record_error(str(exc))
             return self._cached("repos")
 
+    async def list_workflows(self, repo: str) -> List[Dict[str, Any]]:
+        repo = str(repo or "").strip()
+        cache_key = f"workflows:{repo.lower()}"
+        if not repo or self._api is None:
+            return self._cached(cache_key)
+        try:
+            workflows = await self._api.get_repo_workflows(repo)
+            slim = [
+                {
+                    "name": w.get("name", ""),
+                    "path": w.get("path", ""),
+                    "state": w.get("state", ""),
+                }
+                for w in workflows
+                if w.get("name")
+            ]
+            self._ensure_store().set_cache(cache_key, slim)
+            return slim
+        except Exception as exc:
+            self._health.record_error(str(exc))
+            return self._cached(cache_key)
+
     def recent_events(self, limit: int = 50) -> List[Dict[str, Any]]:
         try:
             return self._ensure_store().recent(limit)

@@ -280,6 +280,12 @@ export const useStore = create((set, get) => ({
   githubRepos: async () => {
     try { return await window.api.github.repos(); } catch (e) { return []; }
   },
+  githubWorkflows: async (repo) => {
+    try { return await window.api.github.workflows(repo); } catch (e) { return []; }
+  },
+  githubMeta: async () => {
+    try { return await window.api.github.meta(); } catch (e) { return null; }
+  },
   githubEvents: async (limit = 50) => {
     try { return await window.api.github.events(limit); } catch (e) { return []; }
   },

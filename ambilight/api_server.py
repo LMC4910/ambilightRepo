@@ -616,6 +616,22 @@ async def github_repos() -> List[Dict[str, Any]]:
     return await _require_github().list_repos()
 
 
+@app.get("/api/github/workflows", dependencies=[Depends(verify_token)])
+async def github_workflows(repo: str) -> List[Dict[str, Any]]:
+    """List a repo's Actions workflow names so the UI can offer them as a picker."""
+    repo = str(repo or "").strip()
+    if not repo:
+        raise HTTPException(status_code=400, detail="repo query param is required (owner/name)")
+    return await _require_github().list_workflows(repo)
+
+
+@app.get("/api/github/meta", dependencies=[Depends(verify_token)])
+async def github_meta() -> Dict[str, Any]:
+    """Static rule taxonomy (event types + actions per event) for the rule editor."""
+    from .integrations.github import taxonomy
+    return taxonomy.meta()
+
+
 @app.get("/api/github/events", dependencies=[Depends(verify_token)])
 async def github_events(limit: int = 50) -> List[Dict[str, Any]]:
     if github_integration is None:

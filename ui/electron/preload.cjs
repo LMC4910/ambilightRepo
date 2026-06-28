@@ -33,6 +33,8 @@ contextBridge.exposeInMainWorld('api', {
     logout: () => ipcRenderer.invoke('api:github:logout'),
     orgs: () => ipcRenderer.invoke('api:github:orgs'),
     repos: () => ipcRenderer.invoke('api:github:repos'),
+    workflows: (repo) => ipcRenderer.invoke('api:github:workflows', repo),
+    meta: () => ipcRenderer.invoke('api:github:meta'),
     events: (limit) => ipcRenderer.invoke('api:github:events', limit),
     test: (color) => ipcRenderer.invoke('api:github:test', color)
   },
