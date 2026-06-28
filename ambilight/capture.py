@@ -215,6 +215,16 @@ class WGCBackend(CaptureBackend):
 
     Falls back gracefully (``open`` returns False) when not on Windows or when
     ``windows-capture`` is unavailable, so the manager promotes DXGI/MSS.
+
+    Auto-restart on ``on_closed``
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    When a game enters exclusive-fullscreen mode, Windows terminates the WGC
+    capture session and fires ``on_closed``.  The backend schedules a background
+    restart thread that retries with progressive back-off.  As soon as the game
+    drops exclusive mode (alt-tab, loading screen, etc.) the restart succeeds
+    and the session self-heals — without waiting for the manager's recovery
+    cooldown cycle.  ``close()`` (called by the manager) clears the stored
+    session parameters, signalling the worker to stop.
     """
 
     name = "wgc"
@@ -225,6 +235,13 @@ class WGCBackend(CaptureBackend):
         self._latest_frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
         self._target_size: Optional[tuple[int, int]] = None  # (width, height) to pre-downscale to
+        # Session parameters stored so the auto-restart worker can reopen the
+        # same monitor. Cleared by close() so the worker knows to stop.
+        self._session_target: Optional[dict] = None
+        self._session_target_size: Optional[tuple[int, int]] = None
+        self._session_fps: int = 30
+        # Daemon thread reference — only one restart attempt runs at a time.
+        self._restart_thread: Optional[threading.Thread] = None
 
     def _store_frame(self, buffer: np.ndarray) -> None:
         """Callback sink (runs on the capture thread): downscale to the analysis
@@ -243,14 +260,27 @@ class WGCBackend(CaptureBackend):
             if sys.platform != "win32":
                 return False
 
+            # Stop any existing session before starting a new one — prevents
+            # resource leaks when open() is called on an already-running backend
+            # (e.g. the manager's recovery runs while the auto-restart worker
+            # also has an active session).
+            if self._control is not None or self._available:
+                self.close()
+
             # Lazy import — ImportError on non-Windows or if the package/native
             # extension is missing, which the manager handles by failing over.
             from windows_capture import WindowsCapture  # type: ignore[import-untyped]
 
             # WGC follows EnumDisplayMonitors order, the same order the resolved
             # target's index is in, so the index is the correct addressing here.
-            monitor_index = int(_as_target(target).get("index", 0))
+            t = _as_target(target)
+            monitor_index = int(t.get("index", 0))
             self._target_size = target_size
+            # Store session parameters for the auto-restart worker before
+            # starting the capture thread.
+            self._session_target = t
+            self._session_target_size = target_size
+            self._session_fps = fps_target
             # Cap delivery to the target FPS (ms) so a 144 FPS game doesn't flood
             # the callback. Without this the GIL is held copying frames at the
             # game's rate and the pipeline collapses to 1-2 FPS.
@@ -274,6 +304,11 @@ class WGCBackend(CaptureBackend):
             @capture.event
             def on_closed():  # type: ignore[no-untyped-def]
                 self._available = False
+                # A game entering exclusive fullscreen terminates our WGC
+                # session.  Schedule a background restart so we resume as soon
+                # as the game drops exclusive mode — without waiting for the
+                # manager's recovery cooldown.
+                self._schedule_restart()
 
             self._control = capture.start_free_threaded()
             self._available = True
@@ -296,6 +331,74 @@ class WGCBackend(CaptureBackend):
             logger.info("[WGC] Backend unavailable: %s: %s", type(exc).__name__, exc)
             return False
 
+    def _schedule_restart(self) -> None:
+        """Schedule a background restart of the WGC capture session.
+
+        Invoked from the ``on_closed`` event handler, which fires when Windows
+        terminates the session (typically when a game enters exclusive
+        fullscreen).  Idempotent — if a restart thread is already running, a
+        second call is a no-op; the existing worker keeps retrying.
+        """
+        if self._session_target is None:
+            return  # close() was already called by the manager; don't restart
+        if self._restart_thread is not None and self._restart_thread.is_alive():
+            return  # restart already in progress
+        t = threading.Thread(
+            target=self._restart_worker,
+            daemon=True,
+            name="WGCAutoRestart",
+        )
+        self._restart_thread = t
+        t.start()
+
+    def _restart_worker(self) -> None:
+        """Background worker: retry opening the WGC session after ``on_closed``.
+
+        Waits progressively longer between attempts (up to 10 s) so a game
+        holding exclusive control for a long time does not hammer the WGC API.
+        Stops when:
+
+        * The session comes back (``_available`` True *and* a frame delivered).
+        * ``close()`` was called by the manager (``_session_target`` is None).
+        * All retry attempts are exhausted (the manager's own recovery handles
+          the fallback from this point).
+        """
+        import time as _time
+        _time.sleep(1.0)  # brief grace period before the first attempt
+        for attempt in range(15):  # up to ~2 minutes of retry time
+            # Snapshot session params *before* calling close(), which clears them.
+            target = self._session_target
+            target_size = self._session_target_size
+            fps = self._session_fps
+            # Stop if the manager took over (cleared _session_target) or if a
+            # previous attempt already restored the session.
+            if target is None or self._available:
+                return
+            try:
+                self.close()
+                opened = self.open(target, target_size, fps)
+                if opened:
+                    with self._lock:
+                        has_frame = self._latest_frame is not None
+                    if has_frame:
+                        logger.info("[WGC] Session auto-restarted (attempt %d).", attempt + 1)
+                        return
+                    logger.debug(
+                        "[WGC] Auto-restart attempt %d: session opened, awaiting first frame.",
+                        attempt + 1,
+                    )
+                else:
+                    logger.debug(
+                        "[WGC] Auto-restart attempt %d: open() failed.", attempt + 1,
+                    )
+            except Exception as exc:
+                logger.debug("[WGC] Auto-restart attempt %d error: %s", attempt + 1, exc)
+            # Progressive back-off, capped at 10 s.
+            _time.sleep(min(float(attempt + 1), 10.0))
+        logger.debug(
+            "[WGC] Auto-restart exhausted after 15 attempts; manager recovery will continue.",
+        )
+
     def grab(self) -> Optional[np.ndarray]:
         if not self._available:
             return None
@@ -303,6 +406,8 @@ class WGCBackend(CaptureBackend):
             return self._latest_frame  # BGR uint8 (already downscaled), or None until first frame
 
     def close(self) -> None:
+        # Clear session params first so a concurrent _restart_worker exits cleanly.
+        self._session_target = None
         try:
             if self._control is not None:
                 self._control.stop()
@@ -650,6 +755,7 @@ class ScreenCaptureManager:
         analysis_width: int = 80,
         analysis_height: int = 45,
         target=None,
+        hook_target: str = "",
     ) -> None:
         self._target = _as_target(target if target is not None else monitor_index)
         self._monitor_index = int(self._target.get("index", 0))
@@ -663,6 +769,11 @@ class ScreenCaptureManager:
         # delivered again (see grab) — re-opening a still-dead backend doesn't.
         self._next_retry_at: float = 0.0
         self._degraded_logged: bool = False
+        # Non-blocking promotion check: when the active backend is not the
+        # highest-priority candidate (e.g. MSS is running while WGC is
+        # attempting an auto-restart), check every _COOLDOWN_S whether a
+        # better backend has become available without calling open() again.
+        self._next_check_at: float = 0.0
 
         # Ordered backend list, highest priority first. This is the immutable
         # master set: recovery re-probes *all* of these (a backend that failed
@@ -673,7 +784,23 @@ class ScreenCaptureManager:
             "dxgi": DXGIBackend(),
             "mss": MSSBackend(),
         }
+        # The "hook" backend (DX11 game capture via a native helper process) is
+        # opt-in only: it is never auto-promoted into the WGC→DXGI→MSS chain
+        # because it launches a helper that injects into / hooks the game. Register
+        # it solely when explicitly requested, ordered first with the normal
+        # backends as fallback. Imported lazily so a missing module or unbuilt
+        # native binary never affects the default backends.
+        if preferred_method == "hook":
+            try:
+                from .hook_capture import HookCaptureBackend
+                all_backends = {"hook": HookCaptureBackend(hook_target=hook_target),
+                                **all_backends}
+            except Exception as exc:  # noqa: BLE001 — never let opt-in break defaults
+                logger.warning("[Capture] hook backend unavailable: %s", exc)
         order = [preferred_method] + [k for k in all_backends if k != preferred_method]
+        # Drop an unknown/unavailable preferred method (e.g. "hook" when its import
+        # failed, or a typo) so the manager still has a valid candidate list.
+        order = [k for k in order if k in all_backends]
         self._candidates: list[CaptureBackend] = [all_backends[k] for k in order]
         self._active: Optional[CaptureBackend] = None
 
@@ -787,6 +914,23 @@ class ScreenCaptureManager:
             # and re-announce on the next cooldown.
             self._consecutive_failures = 0
             self._degraded_logged = False
+            # Periodically check whether a higher-priority backend has become
+            # available (e.g. WGC auto-restarted after a game dropped exclusive
+            # fullscreen). Non-blocking: calls grab() on candidates without
+            # open() — only the auto-restart worker calls open() in background.
+            now = time.monotonic()
+            if self._active is not self._candidates[0] and now >= self._next_check_at:
+                self._next_check_at = now + self._COOLDOWN_S
+                better = self._find_ready_candidate()
+                if better is not None:
+                    logger.info(
+                        "[Capture] Promoting from %s to %s.",
+                        self._active.name.upper(),
+                        better.name.upper(),
+                    )
+                    with suppress(Exception):
+                        self._active.close()
+                    self._active = better
             return frame
 
         # No frame this round (active backend stalled, or already exhausted).
@@ -848,6 +992,36 @@ class ScreenCaptureManager:
                 "Retrying every %.0fs.", self._COOLDOWN_S,
             )
             self._degraded_logged = True
+
+    def _find_ready_candidate(self) -> Optional[CaptureBackend]:
+        """Non-blocking probe for a higher-priority backend that is already
+        open and delivering frames.
+
+        Does **not** call ``open()`` — it only calls ``grab()`` on each
+        candidate ranked above the current active backend.  Returns the first
+        candidate that delivers a non-None frame, or ``None`` if none do.
+
+        This is the counterpart to :meth:`WGCBackend._restart_worker`: the
+        worker calls ``open()`` in the background; this method notices that
+        WGC is back by observing a non-None ``grab()`` result, and the manager
+        promotes without any blocking call.
+        """
+        if self._active is None:
+            return None
+        try:
+            active_pos = self._candidates.index(self._active)
+        except ValueError:
+            return None
+        if active_pos == 0:
+            return None  # already on the highest-priority backend
+        for candidate in self._candidates[:active_pos]:
+            try:
+                frame = candidate.grab()
+                if frame is not None:
+                    return candidate
+            except Exception:
+                pass
+        return None
 
     # ------------------------------------------------------------------
     # Status

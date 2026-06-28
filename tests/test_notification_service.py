@@ -11,8 +11,8 @@ class FakeController:
     def __init__(self):
         self.flashes = []
 
-    def flash(self, color, pattern):
-        self.flashes.append((tuple(color), pattern))
+    def flash(self, color, pattern, label=None):
+        self.flashes.append((tuple(color), pattern, label))
 
 
 class Clock:
@@ -78,6 +78,11 @@ def test_keyword_is_case_insensitive_substring(monkeypatch):
     assert svc.resolve_color(ev) == (1, 1, 1)
 
 
+# A made-up app that is NOT in the brand table, so the brand layer falls through
+# and the live icon-extraction path is exercised.
+_UNKNOWN = dict(app_id="com.acme.internaltool", app_name="Acme Internal Tool")
+
+
 def test_icon_color_cached_and_not_reextracted(monkeypatch):
     svc, _, _ = _service(monkeypatch)
     calls = {"n": 0}
@@ -87,7 +92,7 @@ def test_icon_color_cached_and_not_reextracted(monkeypatch):
         return (40, 50, 60)
 
     monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color", fake_extract)
-    ev = _event(app_id="slack", icon=b"PNGDATA")
+    ev = _event(icon=b"PNGDATA", **_UNKNOWN)
     assert svc.resolve_color(ev) == (40, 50, 60)
     assert svc.resolve_color(ev) == (40, 50, 60)
     assert calls["n"] == 1            # second lookup hits the cache
@@ -96,15 +101,132 @@ def test_icon_color_cached_and_not_reextracted(monkeypatch):
 def test_no_icon_falls_back_to_default(monkeypatch):
     svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
     monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color", lambda *a, **k: None)
-    assert svc.resolve_color(_event(app_id="noicon", icon=b"x")) == (7, 7, 7)
+    assert svc.resolve_color(_event(icon=b"x", **_UNKNOWN)) == (7, 7, 7)
 
 
 def test_missing_icon_bytes_not_cached(monkeypatch):
     # No icon payload at all → fall back, but DON'T persist the no-icon sentinel,
     # so a later notification that carries an icon can still populate the colour.
     svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
-    assert svc.resolve_color(_event(app_id="later", icon=None)) == (7, 7, 7)
-    assert "later" not in svc._color_cache
+    assert svc.resolve_color(_event(icon=None, **_UNKNOWN)) == (7, 7, 7)
+    assert _UNKNOWN["app_id"] not in svc._color_cache
+
+
+def test_brand_colour_for_known_app(monkeypatch):
+    # Known app, no override / keyword / icon → its official brand colour, not the
+    # white default. Discord's brand colour is #5865F2.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    assert svc.resolve_color(_event(app_id="discord", app_name="Discord", icon=None)) == (88, 101, 242)
+
+
+def test_override_beats_brand(monkeypatch):
+    svc, _, _ = _service(monkeypatch, app_overrides={"Discord": [1, 2, 3]})
+    assert svc.resolve_color(_event(app_name="Discord")) == (1, 2, 3)
+
+
+def test_keyword_beats_brand(monkeypatch):
+    svc, _, _ = _service(monkeypatch, keyword_rules=[{"keyword": "discord", "color": [9, 9, 9]}])
+    assert svc.resolve_color(_event(app_name="Discord")) == (9, 9, 9)
+
+
+def test_brand_beats_icon_and_skips_extraction(monkeypatch):
+    svc, _, _ = _service(monkeypatch)
+    called = {"n": 0}
+
+    def fake_extract(icon_bytes, analyzer=None):
+        called["n"] += 1
+        return (1, 1, 1)
+
+    monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color", fake_extract)
+    # Known app carrying an icon: brand colour wins and the icon is never extracted.
+    assert svc.resolve_color(_event(app_name="Discord", icon=b"PNG")) == (88, 101, 242)
+    assert called["n"] == 0
+
+
+def test_brand_matched_via_app_id(monkeypatch):
+    # Display name unknown, but the AUMID carries the brand token.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_id="com.squirrel.Discord.Discord", app_name="", icon=None)
+    assert svc.resolve_color(ev) == (88, 101, 242)
+
+
+def test_fixed_mode_skips_brand(monkeypatch):
+    # Fixed mode forces the default even for a known brand.
+    svc, _, _ = _service(monkeypatch, color_mode="fixed", default_color=[5, 6, 7])
+    assert svc.resolve_color(_event(app_name="Discord", icon=None)) == (5, 6, 7)
+
+
+def test_forwarded_notification_uses_source_brand(monkeypatch):
+    # Phone Link mirrors an Instagram DM: the flash uses Instagram's colour
+    # (#FF0069), NOT the bridge's. The source app is named in the title.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_id="Microsoft.YourPhone_8wekyb3d8bbwe!App", app_name="Phone Link",
+                title="Instagram", body="someone liked your photo", icon=None)
+    assert svc.resolve_color(ev) == (255, 0, 105)
+
+
+def test_forwarded_keyword_rule_still_wins(monkeypatch):
+    # An explicit keyword rule takes priority over auto source detection.
+    svc, _, _ = _service(monkeypatch, keyword_rules=[{"keyword": "instagram", "color": [1, 2, 3]}])
+    ev = _event(app_name="Phone Link", app_id="phonelink", title="Instagram", body="hi", icon=None)
+    assert svc.resolve_color(ev) == (1, 2, 3)
+
+
+def test_forwarded_without_known_source_falls_through(monkeypatch):
+    # A forwarder whose text names no known app → no false colour; falls back to
+    # the default (the bridge id here carries no brand token).
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_name="Phone Link", app_id="phonelink", title="Mom", body="call me", icon=None)
+    assert svc.resolve_color(ev) == (7, 7, 7)
+
+
+def test_non_forwarder_does_not_text_scan(monkeypatch):
+    # A normal app whose message mentions another brand must NOT borrow its colour:
+    # a Discord message referencing Spotify still flashes Discord's brand colour.
+    svc, _, _ = _service(monkeypatch)
+    ev = _event(app_id="discord", app_name="Discord", title="friend", body="listen on Spotify", icon=None)
+    assert svc.resolve_color(ev) == (88, 101, 242)
+
+
+def test_forwarded_uses_source_icon_when_text_unknown(monkeypatch):
+    # A Discord alert forwarded by Phone Link with no "discord" in the text: the
+    # toast carries Discord's icon, so the icon colour is used — NOT the bridge's
+    # Microsoft-blue (which the old code produced via the AUMID "Microsoft" token).
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color",
+                        lambda *a, **k: (10, 20, 30))
+    ev = _event(app_id="Microsoft.YourPhone_8wekyb3d8bbwe!App", app_name="Phone Link",
+                title="A friend", body="sent a message", icon=b"PNG")
+    assert svc.resolve_color(ev) == (10, 20, 30)
+
+
+def test_forwarded_icon_not_shared_across_sources(monkeypatch):
+    # The bridge app_id is identical for every forwarded app, so forwarded icons
+    # must be extracted fresh — never cached under the bridge id, or the 2nd app
+    # would reuse the 1st app's colour.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    colours = iter([(10, 10, 10), (20, 20, 20)])
+    monkeypatch.setattr("ambilight.notifications.service.icon_dominant_color",
+                        lambda *a, **k: next(colours))
+    bridge = "Microsoft.YourPhone_8wekyb3d8bbwe!App"
+    a = svc.resolve_color(_event(app_id=bridge, app_name="Phone Link", title="x", body="y", icon=b"A"))
+    b = svc.resolve_color(_event(app_id=bridge, app_name="Phone Link", title="x", body="y", icon=b"B"))
+    assert a == (10, 10, 10) and b == (20, 20, 20)
+    assert bridge not in svc._color_cache
+
+
+def test_forwarded_never_flashes_bridge_brand(monkeypatch):
+    # No source text and no icon → default, never the bridge publisher's colour.
+    svc, _, _ = _service(monkeypatch, default_color=[7, 7, 7])
+    ev = _event(app_id="Microsoft.YourPhone_8wekyb3d8bbwe!App", app_name="Phone Link",
+                title="Mom", body="call me", icon=None)
+    assert svc.resolve_color(ev) == (7, 7, 7)
+
+
+def test_override_is_case_insensitive(monkeypatch):
+    # "compare app names in small case": an override keyed "DISCORD" matches "Discord".
+    svc, _, _ = _service(monkeypatch, app_overrides={"DISCORD": [5, 5, 5]})
+    assert svc.resolve_color(_event(app_id="discord", app_name="Discord")) == (5, 5, 5)
 
 
 def test_corrupt_cache_resets_to_empty(monkeypatch, tmp_path):
@@ -145,14 +267,23 @@ def test_dedup_drops_identical_within_window(monkeypatch):
     assert len(ctrl.flashes) == 2
 
 
-def test_throttle_drops_burst(monkeypatch):
-    svc, ctrl, clock = _service(monkeypatch, min_flash_interval_s=2.0, dedup_window_s=0.0)
+def test_burst_all_dispatched(monkeypatch):
+    # Distinct notifications arriving in a burst are ALL dispatched (queued by the
+    # pipeline and flashed one-by-one) — none are silently dropped, which was the
+    # old throttle behaviour that made stacked alerts intermittently disappear.
+    svc, ctrl, clock = _service(monkeypatch, dedup_window_s=0.0)
     svc._on_notification(_event(title="a"))
-    svc._on_notification(_event(title="b"))   # different, but within throttle gap
-    assert len(ctrl.flashes) == 1
-    clock.t = 3.0
+    svc._on_notification(_event(title="b"))
     svc._on_notification(_event(title="c"))
-    assert len(ctrl.flashes) == 2
+    assert len(ctrl.flashes) == 3
+
+
+def test_dispatch_passes_app_label(monkeypatch):
+    # The source app name rides along as a label so the pipeline can log which
+    # app each queued flash belongs to.
+    svc, ctrl, _ = _service(monkeypatch, app_overrides={"discord": [1, 2, 3]})
+    svc._on_notification(_event(app_id="discord", app_name="Discord"))
+    assert ctrl.flashes[0][2] == "Discord"
 
 
 def test_suppress_during_dnd(monkeypatch):
@@ -189,5 +320,5 @@ def test_pattern_carries_config(monkeypatch):
     svc, ctrl, _ = _service(monkeypatch, blink_count=4, on_ms=90, off_ms=40, brightness=0.5,
                             default_color=[10, 10, 10])
     svc._on_notification(_event())
-    _, pattern = ctrl.flashes[0]
+    _, pattern, _ = ctrl.flashes[0]
     assert pattern == {"blink_count": 4, "on_ms": 90, "off_ms": 40, "brightness": 0.5}

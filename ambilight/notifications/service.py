@@ -24,6 +24,7 @@ from typing import Callable, Optional, Tuple
 
 from ..config import AppConfig
 from .base import NotificationEvent, get_notification_listener
+from .brand_colors import brand_color, brand_color_from_text, is_forwarder
 from .icon_color import icon_dominant_color
 
 logger = logging.getLogger(__name__)
@@ -55,8 +56,6 @@ class NotificationFlashService:
         # app_id → [r,g,b] or _NO_ICON sentinel
         self._color_cache: dict = {}
         self._recent: "OrderedDict[str, float]" = OrderedDict()  # dedup hash → ts
-        # -inf so the first notification is never throttled by the startup gap.
-        self._last_dispatch: float = float("-inf")
         self._load_cache()
         self.update_config(cfg)
 
@@ -74,6 +73,9 @@ class NotificationFlashService:
         self.dedup_window_s = float(n.dedup_window_s)
         self.min_flash_interval_s = float(n.min_flash_interval_s)
         self.app_overrides = dict(n.app_overrides or {})
+        # Case-insensitive view so an override keyed "discord" still matches an app
+        # whose display name / id is "Discord" (and vice-versa).
+        self._app_overrides_ci = {str(k).lower(): v for k, v in self.app_overrides.items()}
         self.keyword_rules = list(n.keyword_rules or [])
 
     # --- lifecycle --------------------------------------------------------
@@ -103,44 +105,56 @@ class NotificationFlashService:
 
     # --- event handling (runs on the loop thread) -------------------------
     def _on_notification(self, ev: NotificationEvent) -> None:
+        label = ev.app_name or ev.app_id or "notification"
         try:
             if not self.enabled:
                 return
             if self.suppress_during_dnd and self._dnd_active():
+                logger.info("[Notify] Suppressed (Do Not Disturb): %s", label)
                 return
             now = self._clock()
             key = f"{ev.app_id}|{ev.title}|{ev.body}"
             self._purge_recent(now)
             if key in self._recent:
+                # An identical (app, title, body) within the de-dup window: a genuine
+                # repeat (e.g. the OS re-delivering the same toast), not a new alert.
+                logger.info(
+                    "[Notify] Duplicate within %.0fs; not queued: %s",
+                    self.dedup_window_s, label,
+                )
                 return
             self._recent[key] = now
-            # Throttle bursts: the pipeline deque also coalesces, but dropping
-            # here avoids flooding the command queue.
-            if now - self._last_dispatch < self.min_flash_interval_s:
-                return
-            self._last_dispatch = now
+            # Every distinct notification is dispatched — the pipeline owns an
+            # ordered queue that flashes them one after another (with a short gap
+            # so same-colour alerts stay distinct) and retries failures. No
+            # burst-dropping here, so stacked alerts never silently disappear.
             color = self.resolve_color(ev)
-            self._controller.flash(color, self._pattern())
+            self._controller.flash(color, self._pattern(), label=label)
             logger.info(
-                "[Notify] Flash for %s (%s) → %s",
-                ev.app_name or ev.app_id, ev.source, color,
+                "[Notify] Queued flash for %s (%s) -> %s",
+                label, ev.source, color,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("[Notify] handling failed: %s", exc)
+            logger.debug("[Notify] handling failed for %s: %s", label, exc)
 
     def test_flash(self, color: Optional[list] = None) -> None:
         """Dispatch a flash immediately, bypassing dedup/DND (UI preview)."""
         rgb = color or self.default_color
         try:
-            self._controller.flash(rgb, self._pattern())
+            self._controller.flash(rgb, self._pattern(), label="Test flash")
         except Exception as exc:
             logger.debug("[Notify] test flash failed: %s", exc)
 
     # --- colour resolution ------------------------------------------------
     def resolve_color(self, ev: NotificationEvent) -> RGB:
-        """Resolve a flash colour for *ev* (override → keyword → icon → default)."""
-        # 1. Per-app override (by stable id or display name).
-        ov = self.app_overrides.get(ev.app_id) or self.app_overrides.get(ev.app_name)
+        """Resolve a flash colour for *ev*.
+
+        Priority: override → keyword → forwarded source → brand → live icon →
+        default. The forwarded-source, brand and icon steps are all "logo colour"
+        sources and are skipped in ``fixed`` mode.
+        """
+        # 1. Per-app override (by stable id or display name, case-insensitive).
+        ov = self._override_for(ev)
         if ov:
             return _as_rgb(ov, self.default_color)
 
@@ -151,8 +165,26 @@ class NotificationFlashService:
             if kw and kw in haystack:
                 return _as_rgb(rule.get("color"), self.default_color)
 
-        # 3. Icon dominant colour (cached), unless forced to a fixed colour.
         if self.color_mode != "fixed":
+            # 3. Forwarded / mirrored notifications. A bridge such as Phone Link /
+            #    Link to Windows attributes the alert to *itself*, so resolve the REAL
+            #    source app and NEVER the bridge: try the source named in the text,
+            #    then the source app-name (some bridges report it directly), then the
+            #    forwarded toast's own icon — which is the source app's logo. The
+            #    bridge's app_id is the same for every forwarded app, so it must not
+            #    drive the brand lookup nor key the shared icon cache.
+            if is_forwarder(ev.app_name, ev.app_id):
+                return self._resolve_forwarded(ev, haystack)
+
+            # 4. Curated brand/logo colour. Preferred over live icon extraction: it
+            #    is the official brand colour and works even when the notification
+            #    carries no icon bytes. Only used when the user has set no override
+            #    for this app (guaranteed by the order above).
+            brand = brand_color(ev.app_name, ev.app_id)
+            if brand is not None:
+                return _as_rgb(brand, self.default_color)
+
+            # 5. Live icon dominant colour (cached) for apps not in the brand table.
             cached = self._color_cache.get(ev.app_id)
             if cached is None:
                 extracted = icon_dominant_color(ev.icon_bytes) if ev.icon_bytes else None
@@ -173,7 +205,37 @@ class NotificationFlashService:
             if cached != _NO_ICON:
                 return _as_rgb(cached, self.default_color)
 
-        # 4. Fallback.
+        # 6. Fallback.
+        return _as_rgb(self.default_color, [255, 255, 255])
+
+    def _override_for(self, ev: NotificationEvent) -> Optional[list]:
+        """Per-app override for *ev*, matched on app id or display name, exactly
+        first then case-insensitively."""
+        ov = self.app_overrides.get(ev.app_id) or self.app_overrides.get(ev.app_name)
+        if ov:
+            return ov
+        for key in (ev.app_id, ev.app_name):
+            if key:
+                ov = self._app_overrides_ci.get(str(key).lower())
+                if ov:
+                    return ov
+        return None
+
+    def _resolve_forwarded(self, ev: NotificationEvent, haystack: str) -> RGB:
+        """Resolve a forwarded/mirrored notification to its *source* app's colour.
+
+        Order: source named in the text → source app-name (never the bridge's
+        app_id) → the forwarded toast's own icon (the source app's logo, extracted
+        uncached because the bridge app_id is shared across every source) → default.
+        The bridge's own colour is deliberately never used.
+        """
+        src = brand_color_from_text(haystack) or brand_color(ev.app_name)
+        if src is not None:
+            return _as_rgb(src, self.default_color)
+        if ev.icon_bytes:
+            rgb = icon_dominant_color(ev.icon_bytes)
+            if rgb is not None:
+                return _as_rgb(rgb, self.default_color)
         return _as_rgb(self.default_color, [255, 255, 255])
 
     def _pattern(self) -> dict:

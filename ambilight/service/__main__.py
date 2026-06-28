@@ -50,12 +50,21 @@ def _ensure_std_streams() -> None:
     """
     import os
     for name, fd in (("stdout", 1), ("stderr", 2)):
-        if getattr(sys, name, None) is not None:
+        existing = getattr(sys, name, None)
+        if existing is not None:
+            # A real stream is already wired (e.g. by the Electron supervisor).
+            # Force UTF-8 with replacement so a log line containing a non-cp1252
+            # character (the "->" we just dropped, an emoji/CJK app name, etc.)
+            # can never raise UnicodeEncodeError and corrupt the handler.
+            try:
+                existing.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
             continue
         try:
-            stream = os.fdopen(fd, "w", buffering=1)
+            stream = os.fdopen(fd, "w", buffering=1, encoding="utf-8", errors="replace")
         except OSError:
-            stream = open(os.devnull, "w")
+            stream = open(os.devnull, "w", encoding="utf-8", errors="replace")
         setattr(sys, name, stream)
 
 
@@ -134,6 +143,30 @@ def main(argv: list[str] | None = None) -> None:
     if not os.path.isabs(cfg.logging.file):
         cfg.logging.file = os.path.join(ambilight_dir, cfg.logging.file)
     os.makedirs(os.path.dirname(cfg.logging.file), exist_ok=True)
+
+    # The pipeline worker owns the rotating ambilight.log (single writer — avoids a
+    # multi-process rotation race). But the notification listener + service run in
+    # THIS process, so their [Notify] logs never reached the in-app viewer. Give
+    # this process its OWN rotating file (sibling ambilight.notify.log) that the
+    # Electron Logs page merges in; this process is its only writer, so no race.
+    try:
+        import logging.handlers
+        notify_log = os.path.join(os.path.dirname(cfg.logging.file), "ambilight.notify.log")
+        fh = logging.handlers.RotatingFileHandler(
+            notify_log,
+            maxBytes=getattr(cfg.logging, "max_bytes", 20_971_520),
+            backupCount=getattr(cfg.logging, "backup_count", 10),
+            encoding="utf-8",
+        )
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        logging.getLogger().addHandler(fh)
+        logger.info("[Service] Notification log: %s", notify_log)
+    except Exception as exc:  # pragma: no cover - never block boot on logging
+        logger.warning("[Service] Could not attach notification log file: %s", exc)
 
     # Resolve cache_file to an absolute path for the same reason: the service is
     # installed under Program Files (read-only). A relative "device_cache.json"

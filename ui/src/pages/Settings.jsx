@@ -17,7 +17,7 @@ const SETTINGS_TABS = [
 ]
 
 const ENUMS = {
-  'capture.method': ['wgc', 'dxgi', 'mss'],
+  'capture.method': ['wgc', 'dxgi', 'mss', 'hook'],
   'capture.hdr.mode': ['auto', 'on', 'off'],
   'color.mode': ['average', 'edges', 'dominant', 'kmeans', 'saturation_weighted'],
   'gpu.prefer': ['cupy', 'opencv_cuda', 'torch', 'none'],

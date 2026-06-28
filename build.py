@@ -31,8 +31,12 @@ ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 SERVICE_DIST = DIST / "service"
 UI_DIR = ROOT / "ui"
+NATIVE_DIR = ROOT / "native"
+NATIVE_BUILD = NATIVE_DIR / "build"
 
 SERVICE_NAME = "ambilight-service"
+CAPTURE_HOST_EXE = "capture_host.exe"
+GRAPHICS_HOOK_DLL = "graphics_hook.dll"
 SYSTEM = platform.system()  # Windows | Darwin | Linux
 
 
@@ -116,6 +120,91 @@ def _check_version_sync() -> str:
     
     print(f"[OK] Version in sync: {canonical_version}")
     return canonical_version
+
+
+def _find_native_artifact(filename: str) -> Path | None:
+    """Locate a built native artifact under native/build/bin across the generator
+    layouts CMake may use (Visual Studio multi-config adds a ``Release/`` subdir;
+    Ninja does not). Returns *None* if it has not been built."""
+    for rel in (
+        Path("bin") / "Release" / filename,  # Visual Studio gen
+        Path("bin") / filename,              # Ninja / single-config
+    ):
+        p = NATIVE_BUILD / rel
+        if p.is_file():
+            return p
+    return None
+
+
+def _find_capture_host() -> Path | None:
+    return _find_native_artifact(CAPTURE_HOST_EXE)
+
+
+def _find_graphics_hook() -> Path | None:
+    return _find_native_artifact(GRAPHICS_HOOK_DLL)
+
+
+def _vs_generator() -> str | None:
+    """Return the CMake Visual Studio generator string for the newest installed
+    Visual Studio / Build Tools, or *None* if none is found.
+
+    We pin the VS generator explicitly because CMake's *default* generator
+    depends on what else is on PATH (e.g. Ninja), which without a ``vcvars`` shell
+    picks up MinGW GCC instead of MSVC. The VS generator locates the MSVC toolset
+    itself — no developer command prompt required. ``vswhere -products *`` is
+    required to surface Build Tools installs (the default query hides them).
+    """
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) \
+        / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        return None
+    try:
+        out = subprocess.run(
+            [str(vswhere), "-latest", "-products", "*",
+             "-property", "installationVersion"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    major = out.split(".", 1)[0] if out else ""
+    return {"17": "Visual Studio 17 2022",
+            "16": "Visual Studio 16 2019",
+            "15": "Visual Studio 15 2017"}.get(major)
+
+
+def build_native() -> None:
+    """Build ``capture_host.exe`` (the DX11 hook helper) with CMake.
+
+    Windows-only: the helper exists solely for exclusive-fullscreen DX11 game
+    capture and links Win32. On other platforms this is a no-op. Prefers the
+    MSVC (Visual Studio) toolchain; if no Visual Studio install is detected it
+    falls back to CMake's default generator (the CMakeLists handles MinGW too).
+    """
+    if SYSTEM != "Windows":
+        print("\n[native] Skipping capture_host build (Windows-only helper).")
+        return
+    _check_tool("cmake")
+    print("\n[native] Building capture_host.exe (DX11 game-capture helper)…")
+    # Clean configure: avoids a generator-mismatch error if a previous run used a
+    # different generator, and guarantees a deterministic build.
+    if NATIVE_BUILD.exists():
+        shutil.rmtree(NATIVE_BUILD)
+
+    configure = ["cmake", "-S", str(NATIVE_DIR), "-B", str(NATIVE_BUILD)]
+    gen = _vs_generator()
+    if gen:
+        configure += ["-G", gen, "-A", "x64"]
+        print(f"[native] Using generator: {gen} (x64)")
+    else:
+        configure += ["-DCMAKE_BUILD_TYPE=Release"]
+        print("[native] No Visual Studio found; using CMake default generator.")
+    _run(configure)
+    _run(["cmake", "--build", str(NATIVE_BUILD), "--config", "Release"])
+    exe = _find_capture_host()
+    if exe is None:
+        print("[FATAL] Native build completed but capture_host.exe was not found.")
+        sys.exit(1)
+    print(f"[OK] Native helper built: {exe}")
 
 
 def build_service(gpu: bool = False) -> None:
@@ -217,6 +306,28 @@ def build_service(gpu: bool = False) -> None:
         exclude_args += ["--exclude-module", mod]
 
     sep = os.pathsep  # ; on Windows, : elsewhere
+
+    # Bundle the native capture helper + injected hook DLL together under `native/`
+    # in the onedir, so the opt-in "hook" backend launches capture_host.exe via
+    # resource_path('native/capture_host.exe') and the host finds graphics_hook.dll
+    # right next to itself. Opt-in and non-essential: a missing helper only disables
+    # the hook backend (it falls back to WGC/DXGI/MSS), so warn rather than fail.
+    add_binary_args: list[str] = []
+    if SYSTEM == "Windows":
+        host = _find_capture_host()
+        hook_dll = _find_graphics_hook()
+        if host is not None:
+            add_binary_args += ["--add-binary", f"{host}{sep}native"]
+            print(f"[OK] Bundling native capture helper: {host}")
+            if hook_dll is not None:
+                add_binary_args += ["--add-binary", f"{hook_dll}{sep}native"]
+                print(f"[OK] Bundling graphics hook DLL: {hook_dll}")
+            else:
+                print("[WARN] graphics_hook.dll not built; game capture (the 'hook' "
+                      "backend's real source) will be unavailable.")
+        else:
+            print("[WARN] capture_host.exe not built; the 'hook' capture backend "
+                  "will be unavailable in this bundle (run build_native first).")
     _run([
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -235,6 +346,7 @@ def build_service(gpu: bool = False) -> None:
         "--workpath", str(DIST / "build_work"),
         "--add-data", f"{ROOT / 'configuration.yaml'}{sep}.",
         "--add-data", f"{ROOT / 'profiles'}{sep}profiles",
+        *add_binary_args,
         # Collect the whole package so conditionally/dynamically imported
         # submodules (capture backends, api_server referenced via uvicorn) ship.
         "--collect-submodules", "ambilight",
@@ -313,6 +425,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build Ambilight Desktop (cross-platform)")
     parser.add_argument("--service", action="store_true", help="Build service only")
     parser.add_argument("--ui", action="store_true", help="Build UI only")
+    parser.add_argument("--native", action="store_true",
+                        help="Build the native capture_host helper only (Windows)")
     parser.add_argument("--gpu", action="store_true",
                         help="Bundle CuPy/CUDA + OpenCV (large GPU build). Default is lean CPU-only.")
     args = parser.parse_args()
@@ -321,7 +435,11 @@ def main() -> None:
     # installer/updater feed reporting the same version.
     _check_version_sync()
 
-    build_all = not args.service and not args.ui
+    build_all = not args.service and not args.ui and not args.native
+    # The service bundle embeds the native helper, so build it first whenever the
+    # service (or everything) is being built, as well as on an explicit --native.
+    if build_all or args.service or args.native:
+        build_native()
     if build_all or args.service:
         build_service(gpu=args.gpu)
     if build_all or args.ui:

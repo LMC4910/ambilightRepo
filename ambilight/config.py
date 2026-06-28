@@ -39,13 +39,17 @@ class HdrConfig:
 
 @dataclass
 class CaptureConfig:
-    method: str = "wgc"           # wgc | dxgi | mss
+    method: str = "wgc"           # wgc | dxgi | mss | hook
     monitor_index: int = 0        # 0 = primary (fallback when monitor_id is unset)
     monitor_id: str = ""          # stable monitor identity (EDID/gdi_name/pos); see monitors.py
     fps_target: int = 30
     analysis_width: int = 80
     analysis_height: int = 45
     hdr: HdrConfig = field(default_factory=HdrConfig)
+    # Opt-in "hook" backend only (DX11 game capture via the native helper). Empty
+    # = auto-detect the foreground fullscreen game; otherwise a target exe name
+    # (e.g. "game.exe"). Unused by the other backends; reserved for Phase 2.
+    hook_target: str = ""
 
 
 @dataclass
@@ -197,7 +201,9 @@ class NotificationConfig:
     suppress_during_dnd: bool = False  # default: STILL flash during DND / Focus Assist
     flash_when_locked: bool = True   # default: STILL flash while the screen is locked / asleep
     dedup_window_s: float = 5.0      # drop identical (app,title,body) within this window
-    min_flash_interval_s: float = 1.5  # throttle/coalesce notification bursts
+    min_flash_interval_s: float = 1.5  # DEPRECATED: bursts are now queued, not dropped (retained for back-compat)
+    inter_flash_gap_ms: int = 120    # dark gap between consecutive queued flashes so they stay visually distinct
+    flash_max_retries: int = 3       # retry a failed flash up to N times before moving on to the next
     # Per-app custom colours: {app_id_or_name: [r,g,b]}
     app_overrides: dict = field(default_factory=dict)
     # Keyword→colour rules (Phone Link / forwarded), ordered:
@@ -514,6 +520,14 @@ class ConfigManager:
             n.off_ms = max(0, int(n.off_ms))
         except (TypeError, ValueError):
             n.off_ms = 120
+        try:
+            n.inter_flash_gap_ms = max(0, int(n.inter_flash_gap_ms))
+        except (TypeError, ValueError):
+            n.inter_flash_gap_ms = 120
+        try:
+            n.flash_max_retries = max(1, int(n.flash_max_retries))
+        except (TypeError, ValueError):
+            n.flash_max_retries = 3
         # Canonicalise to lowercase so runtime checks (which compare against
         # "fixed") match regardless of how the value was entered (e.g. "FIXED").
         n.color_mode = str(n.color_mode or "icon").strip().lower()

@@ -395,3 +395,149 @@ def test_manager_promotes_backend_that_can_reach_target():
     mgr.start()
     assert mgr._active is mss
     assert mgr.active_backend == "mss"
+
+
+# ---------------------------------------------------------------------------
+# New tests for game fullscreen capture fix (issue #12)
+# ---------------------------------------------------------------------------
+
+def test_wgc_on_closed_schedules_restart(monkeypatch):
+    """WGCBackend._schedule_restart() must launch a daemon thread exactly once
+    when on_closed fires, and the thread must not start a second time if one is
+    already alive (idempotent guard)."""
+    import threading
+
+    b = WGCBackend()
+    b._session_target = {"index": 0}   # simulate an open session
+
+    threads_started: list[threading.Thread] = []
+    original_thread_init = threading.Thread.__init__
+
+    # Patch _restart_worker so it does nothing (no actual sleep/open calls).
+    b._restart_worker = lambda: None
+
+    b._schedule_restart()
+
+    # A restart thread should have been created and started.
+    assert b._restart_thread is not None, "_restart_thread must be set after _schedule_restart()"
+    # Give the thread a moment to start (it's daemon so won't block test exit).
+    b._restart_thread.join(timeout=2.0)
+
+    first_thread = b._restart_thread
+
+    # Calling _schedule_restart again while the thread has finished is fine (a
+    # new one would start), but calling it while still alive must be idempotent.
+    b._restart_worker = lambda: None  # ensure any new thread also returns quickly
+    alive_before = first_thread.is_alive()
+    # Override the thread reference to look alive so the guard triggers.
+    import unittest.mock as mock
+    with mock.patch.object(first_thread, "is_alive", return_value=True):
+        b._schedule_restart()
+    # The thread reference must not have changed — idempotent guard worked.
+    assert b._restart_thread is first_thread, "must not replace a still-alive restart thread"
+
+
+def test_wgc_schedule_restart_noop_when_session_target_is_none():
+    """If close() has cleared _session_target, _schedule_restart() must be a
+    no-op — we don't want the worker trying to reopen an intentionally closed
+    backend."""
+    b = WGCBackend()
+    b._session_target = None   # already closed by manager
+    b._schedule_restart()
+    assert b._restart_thread is None, "no thread should start after manager closed the backend"
+
+
+def test_manager_promotes_when_preferred_backend_becomes_available(monkeypatch):
+    """After a game drops exclusive fullscreen, WGC's auto-restart delivers
+    frames again.  The manager must detect this via the non-blocking
+    _find_ready_candidate() check and promote back to WGC — without waiting
+    for MSS to fail (MSS keeps delivering black frames forever).
+
+    Timeline:
+      1. WGC starts unavailable (game owns the GPU).
+      2. Manager falls back to MSS which delivers non-None (black) frames.
+      3. Time advances past _COOLDOWN_S.
+      4. WGC's restart worker succeeds: _available = True, _latest_frame set.
+      5. On the next grab(), the manager must detect WGC is ready and promote.
+    """
+    clock = {"now": 100.0}
+    monkeypatch.setattr("ambilight.capture.time.monotonic", lambda: clock["now"])
+
+    mgr = ScreenCaptureManager(preferred_method="wgc", monitor_index=0)
+    mgr._frame_interval = 0.0  # no rate-limit sleep
+
+    # WGC starts closed (simulates game holding exclusive fullscreen).
+    wgc = _ControllableBackend("wgc")
+    wgc.deliver = False     # grab() returns None — not yet restarted
+    wgc.can_open = False    # open() would fail too (game still has GPU)
+
+    mss = _ControllableBackend("mss")
+    mss.deliver = True      # MSS delivers (black) frames
+
+    mgr._candidates = [wgc, mss]
+    mgr.start()
+    # WGC can't open → manager falls back to MSS.
+    assert mgr._active is mss, "manager should have fallen back to MSS"
+
+    # Deliver a few MSS frames; WGC still not available.
+    for _ in range(5):
+        f = mgr.grab()
+        assert f is not None, "MSS should deliver frames"
+    assert mgr._active is mss, "should still be on MSS before WGC restart"
+
+    # Simulate game dropping exclusive fullscreen: WGC auto-restart succeeds.
+    wgc.deliver = True
+
+    # Advance clock past _COOLDOWN_S to allow the promotion check.
+    clock["now"] += mgr._COOLDOWN_S + 1.0
+
+    # Next grab delivers an MSS frame AND triggers the non-blocking promotion
+    # check — which sees wgc.grab() returning non-None and promotes.
+    frame = mgr.grab()
+    assert frame is not None
+    assert mgr._active is wgc, (
+        "manager should have promoted back to WGC once it started delivering frames"
+    )
+    assert mgr.active_backend == "wgc"
+
+
+def test_find_ready_candidate_skips_non_delivering_backends():
+    """_find_ready_candidate() must return None when all higher-priority
+    candidates still deliver None (game still in exclusive fullscreen)."""
+    mgr = ScreenCaptureManager(preferred_method="wgc", monitor_index=0)
+
+    wgc = _ControllableBackend("wgc")
+    wgc.deliver = False   # not ready yet
+
+    dxgi = _ControllableBackend("dxgi")
+    dxgi.deliver = False  # not ready either
+
+    mss = _ControllableBackend("mss")
+    mss.deliver = True
+
+    mgr._candidates = [wgc, dxgi, mss]
+    mgr._active = mss  # already on lowest-priority fallback
+
+    result = mgr._find_ready_candidate()
+    assert result is None, "_find_ready_candidate() should return None when all higher backends deliver None"
+
+
+def test_find_ready_candidate_returns_first_delivering_backend():
+    """_find_ready_candidate() must return the highest-priority backend that
+    delivers a non-None frame, skipping those that don't."""
+    mgr = ScreenCaptureManager(preferred_method="wgc", monitor_index=0)
+
+    wgc = _ControllableBackend("wgc")
+    wgc.deliver = False   # still not ready (exclusive fullscreen ongoing)
+
+    dxgi = _ControllableBackend("dxgi")
+    dxgi.deliver = True   # DXGI recovered (e.g. game uses borderless windowed)
+
+    mss = _ControllableBackend("mss")
+    mss.deliver = True
+
+    mgr._candidates = [wgc, dxgi, mss]
+    mgr._active = mss  # currently on lowest priority
+
+    result = mgr._find_ready_candidate()
+    assert result is dxgi, "_find_ready_candidate() should return dxgi (first delivering candidate above mss)"

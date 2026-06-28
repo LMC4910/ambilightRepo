@@ -24,7 +24,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   notifications: {
     permission: () => ipcRenderer.invoke('api:notifications:permission'),
-    test: (color) => ipcRenderer.invoke('api:notifications:test', color)
+    test: (color) => ipcRenderer.invoke('api:notifications:test', color),
+    brandColors: () => ipcRenderer.invoke('api:notifications:brandColors')
   },
   system: {
     // Only known OS settings deep-links are honoured; the main process enforces
@@ -83,6 +84,10 @@ contextBridge.exposeInMainWorld('api', {
     read: () => ipcRenderer.invoke('api:logs:read'),
     openFolder: () => ipcRenderer.invoke('api:logs:openFolder'),
     clear: () => ipcRenderer.invoke('api:logs:clear')
+  },
+  capture: {
+    // Point game capture at a specific .exe (or "" for auto) and (re)inject now.
+    retarget: (target, enabled) => ipcRenderer.invoke('api:capture:retarget', { target, enabled })
   },
   updater: {
     check: () => ipcRenderer.invoke('app:update:check'),

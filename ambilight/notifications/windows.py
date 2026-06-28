@@ -44,6 +44,12 @@ class WindowsNotificationListener(NotificationListener):
         super().__init__(on_notification, loop)
         self._seen: set[int] = set()
         self._access: Optional[str] = None
+        # Diagnostics: the distinct app names currently in the Action Center, only
+        # re-logged when the set changes (so the in-app log shows what the OS is
+        # actually surfacing without spamming every poll), plus a per-id label
+        # cache so we don't re-read app_info over COM every second.
+        self._last_present: set[str] = set()
+        self._label_cache: dict[int, str] = {}
 
     # --- availability / permission ---------------------------------------
     @staticmethod
@@ -98,10 +104,19 @@ class WindowsNotificationListener(NotificationListener):
         # notifications on startup.
         try:
             existing = _await(listener.get_notifications_async(NotificationKinds.TOAST))
+            seeded_labels: set[str] = set()
             for n in existing:
                 self._seen.add(n.id)
+                lbl = self._label_for(n)
+                if lbl:
+                    seeded_labels.add(lbl)
+            logger.info(
+                "[Notify] Seeded %d existing toast(s) at startup%s.",
+                len(self._seen),
+                f" from: {', '.join(sorted(seeded_labels))}" if seeded_labels else "",
+            )
         except Exception as exc:
-            logger.debug("[Notify] initial backlog read failed: %s", exc)
+            logger.warning("[Notify] initial backlog read failed: %s", exc)
 
         while not self._stop.wait(_POLL_INTERVAL):
             try:
@@ -112,18 +127,55 @@ class WindowsNotificationListener(NotificationListener):
     def _poll_once(self, listener, toast_kind) -> None:
         notifications = _await(listener.get_notifications_async(toast_kind))
         current_ids = set()
+        present_labels: set[str] = set()
         for n in notifications:
             current_ids.add(n.id)
+            label = self._label_for(n)
+            if label:
+                present_labels.add(label)
             if n.id in self._seen:
                 continue
             self._seen.add(n.id)
             event = self._to_event(n)
             if event is not None:
+                logger.info(
+                    "[Notify] Toast detected: app=%s id=%s -> emitting.",
+                    event.app_name or event.app_id, n.id,
+                )
                 self._emit(event)
+            else:
+                logger.warning(
+                    "[Notify] Toast id=%s from %s dropped (no usable app name or text).",
+                    n.id, label or "<unknown>",
+                )
+        # Visibility into what the OS actually surfaces — the decisive signal for
+        # "why doesn't app X flash". Only logged when the set changes.
+        if present_labels != self._last_present:
+            logger.info(
+                "[Notify] Toasts currently in Action Center: %s",
+                ", ".join(sorted(present_labels)) or "<none>",
+            )
+            self._last_present = present_labels
         # Drop ids that are no longer present so the set can't grow unbounded.
         # Intersect unconditionally: when the active list is empty we must clear
         # stale ids too, otherwise a reused WinRT id could be suppressed later.
         self._seen &= current_ids
+        # Keep the label cache bounded to live ids for the same reason.
+        if self._label_cache:
+            self._label_cache = {k: v for k, v in self._label_cache.items() if k in current_ids}
+
+    def _label_for(self, n) -> str:
+        """Best-effort app display name for *n*, cached by id to avoid re-reading
+        app_info over COM on every poll. Empty string when unavailable."""
+        nid = n.id
+        lbl = self._label_cache.get(nid)
+        if lbl is None:
+            try:
+                lbl = n.app_info.display_info.display_name or ""
+            except Exception:
+                lbl = ""
+            self._label_cache[nid] = lbl
+        return lbl
 
     def _to_event(self, n) -> Optional[NotificationEvent]:
         import time
@@ -142,7 +194,7 @@ class WindowsNotificationListener(NotificationListener):
                 app_id = ""
             icon_bytes = _read_logo(display)
         except Exception as exc:
-            logger.debug("[Notify] app_info read failed: %s", exc)
+            logger.info("[Notify] app_info read failed (id=%s): %s", getattr(n, "id", "?"), exc)
 
         try:
             texts = []
@@ -155,7 +207,7 @@ class WindowsNotificationListener(NotificationListener):
                 title = texts[0]
                 body = " ".join(texts[1:])
         except Exception as exc:
-            logger.debug("[Notify] visual text read failed: %s", exc)
+            logger.info("[Notify] visual text read failed (id=%s): %s", getattr(n, "id", "?"), exc)
 
         if not app_id:
             app_id = app_name.lower()

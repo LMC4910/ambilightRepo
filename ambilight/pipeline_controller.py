@@ -240,10 +240,15 @@ class PipelineController:
             "params": params
         })
 
-    def flash(self, color, pattern: Optional[dict] = None) -> None:
+    def recapture(self) -> None:
+        """Force the pipeline to rebuild capture (manual game-capture re-inject)."""
+        self._command_queue.put({"action": "recapture"})
+
+    def flash(self, color, pattern: Optional[dict] = None, label: Optional[str] = None) -> None:
         """Enqueue a transient notification flash for the pipeline process.
 
-        Only the final RGB + blink pattern crosses the process boundary; the
+        Only the final RGB + blink pattern (and an optional *label* naming the
+        source app, used purely for logging) crosses the process boundary; the
         pipeline owns the device socket and runs the blink as an overlay that
         restores the prior frame (even while paused for lock/suspend).
         """
@@ -255,6 +260,7 @@ class PipelineController:
             "action": "flash",
             "color": rgb,
             "pattern": pattern or {},
+            "label": label,
         })
 
     async def _poll_metrics(self) -> None:

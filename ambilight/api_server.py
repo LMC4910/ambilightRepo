@@ -38,6 +38,7 @@ from .auto_profile import AutoProfileSwitcher
 from .foreground import get_foreground_app
 from .integrations.mqtt_bridge import MqttBridge
 from .notifications import NotificationFlashService
+from .notifications.brand_colors import BRAND_COLORS
 from .ownership import OwnershipCoordinator
 
 logger = logging.getLogger(__name__)
@@ -392,6 +393,30 @@ class ModeRequest(pydantic.BaseModel):
     mode: str
     params: Dict[str, Any] = {}
 
+
+class RetargetRequest(pydantic.BaseModel):
+    # Game-capture re-inject. `target` is a game exe filter ("" / "auto" = any
+    # fullscreen game). `enabled` switches capture.method to "hook".
+    target: str = ""
+    enabled: bool = True
+
+
+@app.post("/api/capture/retarget", dependencies=[Depends(verify_token)])
+async def capture_retarget(req: RetargetRequest) -> Dict[str, str]:
+    """Point game capture at a specific application and (re)trigger injection.
+
+    Persists capture.method=hook + capture.hook_target, then forces a fresh
+    capture build so the native host relaunches and retries injection now."""
+    capture_override: Dict[str, Any] = {"hook_target": req.target.strip()}
+    if req.enabled:
+        capture_override["method"] = "hook"
+    ConfigManager.update({"capture": capture_override})
+    profile_manager.active_profile = None
+    cfg = ConfigManager.get()
+    await bus.publish("CONFIG_UPDATE", cfg)
+    controller.recapture()
+    return {"message": "Re-targeting game capture", "target": req.target.strip() or "auto"}
+
 @app.put("/api/mode", dependencies=[Depends(verify_token)])
 async def set_mode(request: ModeRequest) -> Dict[str, str]:
     controller.set_mode(request.mode, request.params)
@@ -503,6 +528,17 @@ async def notifications_test(request: NotificationTestRequest) -> Dict[str, str]
         raise HTTPException(status_code=400, detail="color must be [r, g, b] with values 0-255")
     notification_flash.test_flash(color)
     return {"message": "Flash triggered"}
+
+
+@app.get("/api/notifications/brand-colors", dependencies=[Depends(verify_token)])
+async def notifications_brand_colors() -> Dict[str, List[int]]:
+    """Curated official brand → RGB map (normalised app name → [r,g,b]).
+
+    Lets the UI suggest an app's logo colour when the user adds a per-app override,
+    mirroring the brand-colour layer the flash itself uses. Static and small, so the
+    UI fetches it once and matches client-side.
+    """
+    return {k: list(v) for k, v in BRAND_COLORS.items()}
 
 
 # ---------------------------------------------------------------------------

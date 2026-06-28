@@ -191,6 +191,21 @@ export const useStore = create((set, get) => ({
     }
   },
 
+  // --- Game capture (hook) re-inject ---
+  retargetCapture: async (target) => {
+    try {
+      await window.api.capture.retarget(target, true);
+      await get().fetchSettings();
+      get().toast(target ? `Injecting into ${target}…` : 'Re-injecting game capture…');
+      return true;
+    } catch (e) {
+      console.error(e);
+      const reason = (e?.message || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+      get().toast(reason || 'Could not re-trigger game capture');
+      return false;
+    }
+  },
+
   // --- Notification flash ---
   notifPermission: async () => {
     try {
@@ -208,6 +223,22 @@ export const useStore = create((set, get) => ({
     } catch (e) {
       console.error(e);
       return false;
+    }
+  },
+
+  // Curated brand→RGB map (normalised app name → [r,g,b]). Static, so fetch once
+  // and cache; used to suggest a colour when adding a per-app override.
+  brandColors: null,
+  fetchBrandColors: async () => {
+    if (get().brandColors) return get().brandColors;
+    try {
+      const map = await window.api.notifications.brandColors();
+      const safe = map && typeof map === 'object' ? map : {};
+      set({ brandColors: safe });
+      return safe;
+    } catch (e) {
+      set({ brandColors: {} });
+      return {};
     }
   }
 }))
