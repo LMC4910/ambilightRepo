@@ -11,8 +11,8 @@ class FakeController:
     def __init__(self):
         self.flashes = []
 
-    def flash(self, color, pattern):
-        self.flashes.append((tuple(color), pattern))
+    def flash(self, color, pattern, label=None):
+        self.flashes.append((tuple(color), pattern, label))
 
 
 class Clock:
@@ -267,14 +267,23 @@ def test_dedup_drops_identical_within_window(monkeypatch):
     assert len(ctrl.flashes) == 2
 
 
-def test_throttle_drops_burst(monkeypatch):
-    svc, ctrl, clock = _service(monkeypatch, min_flash_interval_s=2.0, dedup_window_s=0.0)
+def test_burst_all_dispatched(monkeypatch):
+    # Distinct notifications arriving in a burst are ALL dispatched (queued by the
+    # pipeline and flashed one-by-one) — none are silently dropped, which was the
+    # old throttle behaviour that made stacked alerts intermittently disappear.
+    svc, ctrl, clock = _service(monkeypatch, dedup_window_s=0.0)
     svc._on_notification(_event(title="a"))
-    svc._on_notification(_event(title="b"))   # different, but within throttle gap
-    assert len(ctrl.flashes) == 1
-    clock.t = 3.0
+    svc._on_notification(_event(title="b"))
     svc._on_notification(_event(title="c"))
-    assert len(ctrl.flashes) == 2
+    assert len(ctrl.flashes) == 3
+
+
+def test_dispatch_passes_app_label(monkeypatch):
+    # The source app name rides along as a label so the pipeline can log which
+    # app each queued flash belongs to.
+    svc, ctrl, _ = _service(monkeypatch, app_overrides={"discord": [1, 2, 3]})
+    svc._on_notification(_event(app_id="discord", app_name="Discord"))
+    assert ctrl.flashes[0][2] == "Discord"
 
 
 def test_suppress_during_dnd(monkeypatch):
@@ -311,5 +320,5 @@ def test_pattern_carries_config(monkeypatch):
     svc, ctrl, _ = _service(monkeypatch, blink_count=4, on_ms=90, off_ms=40, brightness=0.5,
                             default_color=[10, 10, 10])
     svc._on_notification(_event())
-    _, pattern = ctrl.flashes[0]
+    _, pattern, _ = ctrl.flashes[0]
     assert pattern == {"blink_count": 4, "on_ms": 90, "off_ms": 40, "brightness": 0.5}

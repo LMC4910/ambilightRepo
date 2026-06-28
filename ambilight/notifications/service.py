@@ -56,8 +56,6 @@ class NotificationFlashService:
         # app_id → [r,g,b] or _NO_ICON sentinel
         self._color_cache: dict = {}
         self._recent: "OrderedDict[str, float]" = OrderedDict()  # dedup hash → ts
-        # -inf so the first notification is never throttled by the startup gap.
-        self._last_dispatch: float = float("-inf")
         self._load_cache()
         self.update_config(cfg)
 
@@ -107,36 +105,43 @@ class NotificationFlashService:
 
     # --- event handling (runs on the loop thread) -------------------------
     def _on_notification(self, ev: NotificationEvent) -> None:
+        label = ev.app_name or ev.app_id or "notification"
         try:
             if not self.enabled:
                 return
             if self.suppress_during_dnd and self._dnd_active():
+                logger.info("[Notify] Suppressed (Do Not Disturb): %s", label)
                 return
             now = self._clock()
             key = f"{ev.app_id}|{ev.title}|{ev.body}"
             self._purge_recent(now)
             if key in self._recent:
+                # An identical (app, title, body) within the de-dup window: a genuine
+                # repeat (e.g. the OS re-delivering the same toast), not a new alert.
+                logger.info(
+                    "[Notify] Duplicate within %.0fs; not queued: %s",
+                    self.dedup_window_s, label,
+                )
                 return
             self._recent[key] = now
-            # Throttle bursts: the pipeline deque also coalesces, but dropping
-            # here avoids flooding the command queue.
-            if now - self._last_dispatch < self.min_flash_interval_s:
-                return
-            self._last_dispatch = now
+            # Every distinct notification is dispatched — the pipeline owns an
+            # ordered queue that flashes them one after another (with a short gap
+            # so same-colour alerts stay distinct) and retries failures. No
+            # burst-dropping here, so stacked alerts never silently disappear.
             color = self.resolve_color(ev)
-            self._controller.flash(color, self._pattern())
+            self._controller.flash(color, self._pattern(), label=label)
             logger.info(
-                "[Notify] Flash for %s (%s) → %s",
-                ev.app_name or ev.app_id, ev.source, color,
+                "[Notify] Queued flash for %s (%s) → %s",
+                label, ev.source, color,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("[Notify] handling failed: %s", exc)
+            logger.debug("[Notify] handling failed for %s: %s", label, exc)
 
     def test_flash(self, color: Optional[list] = None) -> None:
         """Dispatch a flash immediately, bypassing dedup/DND (UI preview)."""
         rgb = color or self.default_color
         try:
-            self._controller.flash(rgb, self._pattern())
+            self._controller.flash(rgb, self._pattern(), label="Test flash")
         except Exception as exc:
             logger.debug("[Notify] test flash failed: %s", exc)
 
