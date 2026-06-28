@@ -151,7 +151,16 @@ class GithubPoller:
         if resp.not_modified:
             return float(resp.poll_interval)
         self._store.set_poll_state(key, etag=resp.etag, last_modified=resp.last_modified)
+        watched = {r.lower() for r in self._watched_repos}
         for item in (resp.data or []):
+            # CI-activity inbox items can't tell success from failure and carry no
+            # workflow name, so they'd only ever flash the default colour. When the
+            # repo is watched, its /actions/runs poll already covers CI with the
+            # real conclusion + workflow name — skip the lossy duplicate.
+            if watched and str((item or {}).get("reason", "") or "").strip().lower() == "ci_activity":
+                full_name = str(((item or {}).get("repository") or {}).get("full_name", "") or "").lower()
+                if full_name in watched:
+                    continue
             out.append(normalize.normalize_notification(item, self.account))
         return float(resp.poll_interval)
 
