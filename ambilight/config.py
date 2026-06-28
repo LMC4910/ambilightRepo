@@ -212,6 +212,40 @@ class NotificationConfig:
 
 
 @dataclass
+class GithubConfig:
+    """"Ambient GitHub Awareness" — flash the LEDs in response to GitHub activity.
+
+    The integration polls GitHub (works behind NAT) and maps each event to a
+    colour/effect using a rule hierarchy (workflow → repo → org → global). All
+    colours are user-defined here — there is no brand-colour lookup. Off by
+    default; a no-op without the optional ``httpx`` dependency. The OAuth token
+    is stored in the OS keyring, never in this config.
+    """
+    enabled: bool = False
+    # OAuth App client id for the device flow (public; no secret). May be left
+    # blank and supplied via the AMBILIGHT_GITHUB_CLIENT_ID env var instead.
+    client_id: str = ""
+    scopes: list = field(default_factory=lambda: ["notifications", "read:org", "repo"])
+    # Polling
+    poll_interval_s: float = 60.0        # base interval; clamped, honours X-Poll-Interval
+    watch_notifications: bool = True     # poll the /notifications inbox
+    watched_repos: list = field(default_factory=list)  # ["owner/name", ...] for runs + events
+    watched_orgs: list = field(default_factory=list)    # ["org", ...] for org events
+    # Default lighting (fallback when no rule matches) — GitHub blue.
+    default_color: list = field(default_factory=lambda: [88, 166, 255])  # [r,g,b]
+    brightness: float = 1.0
+    blink_count: int = 2
+    on_ms: int = 180
+    off_ms: int = 120
+    # Rule hierarchy (see integrations/github/mapper.py). Each rule is a dict:
+    #   {scope, repo?, org?, workflow?, event_type, action, color:[r,g,b], <pattern overrides>}
+    rules: list = field(default_factory=list)
+    # Advanced: inbound webhook receiver (optional, off by default).
+    webhook_enabled: bool = False
+    webhook_secret_set: bool = False     # marker only; the secret lives in the keyring
+
+
+@dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
@@ -229,6 +263,7 @@ class AppConfig:
     mqtt: MqttConfig = field(default_factory=MqttConfig)
     ownership: OwnershipConfig = field(default_factory=OwnershipConfig)
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
+    github: GithubConfig = field(default_factory=GithubConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +595,74 @@ class ConfigManager:
             str(k): _norm_color(v, [255, 255, 255], f"notifications.app_overrides[{k}]")
             for k, v in raw_overrides.items()
         }
+
+        # 6b. GitHub integration — clamp flash params, coerce colours, and
+        #     sanitise the watch lists / rules so a malformed value can't crash
+        #     the poller or send garbage to the strip.
+        g = config.github
+        g.enabled = bool(g.enabled)
+        g.client_id = str(g.client_id or "").strip()
+        g.scopes = [str(s).strip() for s in (g.scopes if isinstance(g.scopes, list) else []) if str(s).strip()] \
+            or ["notifications", "read:org", "repo"]
+        try:
+            g.poll_interval_s = max(15.0, float(g.poll_interval_s))
+        except (TypeError, ValueError):
+            g.poll_interval_s = 60.0
+        g.watch_notifications = bool(g.watch_notifications)
+        g.watched_repos = [str(r).strip() for r in (g.watched_repos if isinstance(g.watched_repos, list) else []) if str(r).strip()]
+        g.watched_orgs = [str(o).strip() for o in (g.watched_orgs if isinstance(g.watched_orgs, list) else []) if str(o).strip()]
+        g.default_color = _norm_color(g.default_color, [88, 166, 255], "github.default_color")
+        try:
+            g.brightness = max(0.0, min(1.0, float(g.brightness)))
+        except (TypeError, ValueError):
+            g.brightness = 1.0
+        try:
+            g.blink_count = max(1, int(g.blink_count))
+        except (TypeError, ValueError):
+            g.blink_count = 2
+        try:
+            g.on_ms = max(20, int(g.on_ms))
+        except (TypeError, ValueError):
+            g.on_ms = 180
+        try:
+            g.off_ms = max(0, int(g.off_ms))
+        except (TypeError, ValueError):
+            g.off_ms = 120
+        raw_gh_rules = g.rules if isinstance(g.rules, list) else []
+        if not isinstance(g.rules, list) and g.rules:
+            logger.warning("[Config] github.rules is not a list; ignoring.")
+        clean_gh_rules = []
+        for rule in raw_gh_rules:
+            if not isinstance(rule, dict):
+                continue
+            scope = str(rule.get("scope", "global") or "global").strip().lower()
+            if scope not in ("global", "org", "repo", "workflow"):
+                scope = "global"
+            cleaned = {
+                "scope": scope,
+                "repo": str(rule.get("repo", "") or "").strip(),
+                "org": str(rule.get("org", "") or "").strip(),
+                "workflow": str(rule.get("workflow", "") or "").strip(),
+                "event_type": str(rule.get("event_type", "") or "").strip(),
+                "action": str(rule.get("action", "") or "").strip(),
+                "color": _norm_color(rule.get("color"), g.default_color, "github.rules[].color"),
+            }
+            # Optional per-rule pattern overrides (kept only when present + valid).
+            for k, lo in (("blink_count", 1), ("on_ms", 20), ("off_ms", 0)):
+                if rule.get(k) is not None:
+                    try:
+                        cleaned[k] = max(lo, int(rule[k]))
+                    except (TypeError, ValueError):
+                        pass
+            if rule.get("brightness") is not None:
+                try:
+                    cleaned["brightness"] = max(0.0, min(1.0, float(rule["brightness"])))
+                except (TypeError, ValueError):
+                    pass
+            clean_gh_rules.append(cleaned)
+        g.rules = clean_gh_rules
+        g.webhook_enabled = bool(g.webhook_enabled)
+        g.webhook_secret_set = bool(g.webhook_secret_set)
 
         # 7. Ownership — mint a stable per-install instance_id (persisted by
         #    load()/update() so it survives restarts), default the label to the

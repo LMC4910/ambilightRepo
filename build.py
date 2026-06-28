@@ -262,9 +262,10 @@ def build_service(gpu: bool = False) -> None:
             )
             sys.exit(1)
 
-    # Always-bundled optional deps: capture backends + audio + WGC, and the
-    # smart-home integration stack (paho-mqtt + keyring) when present.
-    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring"]
+    # Always-bundled optional deps: capture backends + audio + WGC, the
+    # smart-home integration stack (paho-mqtt + keyring), and the GitHub
+    # integration's HTTP client (httpx) — all bundled when present.
+    optional = ["dxcam", "winsdk", "comtypes", "soundcard", "windows_capture", "paho", "keyring", "httpx"]
     collect_all: list[str] = []
     # winsdk is collected in full: its WinRT namespaces (e.g.
     # winsdk.windows.ui.notifications.management for Notification Flash) are
@@ -272,7 +273,9 @@ def build_service(gpu: bool = False) -> None:
     # are collected in full too: dxcam imports dxcam.core.* submodules dynamically
     # and drives the display via comtypes-generated COM wrappers, which a bare
     # --hidden-import leaves out — so the frozen DXGI backend fails to import.
-    for pkg in ("windows_capture", "dxcam", "comtypes", "soundcard", "paho", "keyring", "winsdk"):
+    # httpx pulls in httpcore/h11/anyio/sniffio submodules dynamically, so collect
+    # it in full (a bare --hidden-import misses them and the GitHub client breaks).
+    for pkg in ("windows_capture", "dxcam", "comtypes", "soundcard", "paho", "keyring", "winsdk", "httpx"):
         if _available(pkg):
             collect_all += ["--collect-all", pkg]
 

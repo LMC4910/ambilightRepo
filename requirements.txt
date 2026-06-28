@@ -68,6 +68,16 @@ windows-capture>=2.0.0 ; sys_platform == "win32"
 # paho-mqtt>=1.6.1
 # keyring>=24.0.0
 
+# ---- Optional — GitHub integration ("Ambient GitHub Awareness") -------------
+#  Polls GitHub and flashes the LEDs on activity (CI runs, PRs, issues, releases,
+#  security alerts). Off by default and a no-op without httpx — the async HTTP
+#  client used for the REST API + OAuth device flow. keyring (above) stores the
+#  OAuth token in the OS credential store; without it the token is session-only.
+#  Install both to use the GitHub integration, and add them to the PyInstaller
+#  build env (hidden-imports) for frozen installers.
+#    pip install httpx keyring
+# httpx>=0.27.0
+
 # ---- Development / tests ----------------------------------------------------
 #   pip install pytest    # run the suite with:  pytest
 #   (CI installs pytest + flake8 separately; see .github/workflows/build.yml)
