@@ -132,7 +132,8 @@ def normalize_workflow_run(run: Dict[str, Any], account: str = "",
     conclusion = str(run.get("conclusion", "") or "").strip().lower()  # success|failure|cancelled|...
     # Action is the conclusion when finished, else the live status.
     action = conclusion or status or "unknown"
-    name = str(run.get("name", "") or run.get("display_title", "") or "Workflow")
+    # Strip so a workflow-scoped rule still matches if GitHub pads the name.
+    name = str(run.get("name", "") or run.get("display_title", "") or "Workflow").strip()
     actor = (run.get("actor") or {}).get("login", "") or ""
 
     if conclusion == "failure":
@@ -292,7 +293,7 @@ def normalize_webhook(event_name: str, payload: Dict[str, Any],
     workflow = ""
     if event_name in ("workflow_run", "check_suite"):
         run = payload.get(event_name) or payload.get("workflow_run") or {}
-        workflow = str(run.get("name", "") or "")
+        workflow = str(run.get("name", "") or "").strip()
     return GithubEvent(
         id=f"hook-{delivery}",
         event_type=event_type,
