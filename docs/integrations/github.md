@@ -340,6 +340,9 @@ signing out all converge to the right poller state.
 | 3 | UI: Integrations tab + GitHub page (connect, watch, **user colour rules**, recent events) | ✅ |
 | 4 | Advanced: enable webhook mode in UI; broaden normalization; pulse/rainbow effects via `effects_engine`; per-job rules | ⏳ |
 
-**Prerequisites to activate:** install `httpx` (+ `keyring`); register one GitHub
-OAuth App and set its `client_id` (`github.client_id` or
-`AMBILIGHT_GITHUB_CLIENT_ID`).
+**Activation:** works out of the box — `httpx` and `keyring` are installed by
+default and the app ships a built-in OAuth client id
+(`service.BUILTIN_CLIENT_ID`). Override it with your own OAuth App via
+`github.client_id`, the `AMBILIGHT_GITHUB_CLIENT_ID` env var, a `.env` file, or a
+build-baked `github_client_id.txt` (CI injects `GH_OAUTH_CLIENT_ID`). The user
+just clicks **Connect** and signs in.

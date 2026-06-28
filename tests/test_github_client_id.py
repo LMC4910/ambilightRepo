@@ -4,7 +4,11 @@ import os
 
 from ambilight import paths
 from ambilight.config import AppConfig
-from ambilight.integrations.github.service import GithubIntegration, resolve_client_id
+from ambilight.integrations.github.service import (
+    BUILTIN_CLIENT_ID,
+    GithubIntegration,
+    resolve_client_id,
+)
 
 
 ENV_KEY = "AMBILIGHT_GITHUB_CLIENT_ID"
@@ -20,13 +24,13 @@ def test_env_var_takes_precedence(monkeypatch):
     assert resolve_client_id() == "Iv1.envvalue"
 
 
-def test_returns_empty_when_unset(monkeypatch, tmp_path):
+def test_falls_back_to_builtin_default(monkeypatch, tmp_path):
     monkeypatch.delenv(ENV_KEY, raising=False)
-    # Run from an empty dir so no stray repo-root/cwd .env interferes.
-    monkeypatch.chdir(tmp_path)
+    # No env, no baked file → the shipped built-in default is used so the
+    # integration works out of the box.
     monkeypatch.setattr(paths, "resource_path", lambda name: str(tmp_path / name))
-    monkeypatch.setattr(paths, "user_data_dir", lambda: tmp_path)
-    assert resolve_client_id() == ""
+    assert BUILTIN_CLIENT_ID
+    assert resolve_client_id() == BUILTIN_CLIENT_ID
 
 
 def test_dotenv_is_loaded_into_environ(monkeypatch, tmp_path):

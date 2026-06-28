@@ -41,19 +41,30 @@ from .store import GithubStore
 
 logger = logging.getLogger(__name__)
 
+# The app's own GitHub OAuth App client id, shipped as the built-in default so
+# "Connect" works out of the box with no setup. A device-flow client id is NOT a
+# secret — it ships in the app and the flow uses no client secret — so baking it
+# in is the standard practice for desktop OAuth apps. Override it (e.g. to test
+# against your own OAuth App) via config, the AMBILIGHT_GITHUB_CLIENT_ID env var,
+# a .env file, or a build-baked github_client_id.txt — see resolve_client_id().
+BUILTIN_CLIENT_ID = "Ov23liaWLuf6hK0eJIIE"
+
+
 def resolve_client_id() -> str:
     """Resolve the GitHub OAuth App client id.
 
-    A device-flow client id is **not a secret** (it ships in the app), so it
-    just needs to reach the running service. Resolution order:
+    A device-flow client id is **not a secret** (it ships in the app). Resolution
+    order, first match wins:
 
     1. ``AMBILIGHT_GITHUB_CLIENT_ID`` env var — including values loaded from a
        ``.env`` file at startup (see ``paths.load_env_files``).
-    2. A build-baked ``github_client_id.txt`` bundled with the frozen app (CI
-       injects it from a repo secret/variable at release time via ``build.py``).
+    2. A build-baked ``github_client_id.txt`` bundled with the frozen app (CI can
+       inject it from a repo secret/variable at release time via ``build.py``).
+    3. The built-in :data:`BUILTIN_CLIENT_ID` default, so the integration works
+       without any configuration.
 
-    The per-user config's ``github.client_id`` overrides both (handled by the
-    caller). Returns ``""`` when none is configured.
+    The per-user config's ``github.client_id`` overrides all of these (handled by
+    the caller).
     """
     v = os.environ.get("AMBILIGHT_GITHUB_CLIENT_ID", "").strip()
     if v:
@@ -68,7 +79,7 @@ def resolve_client_id() -> str:
                 return baked
     except Exception:
         pass
-    return ""
+    return BUILTIN_CLIENT_ID
 
 
 class GithubIntegration:
