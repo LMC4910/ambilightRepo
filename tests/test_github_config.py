@@ -78,6 +78,33 @@ def test_topup_is_idempotent_and_skips_duplicates():
     assert len(g.rules) == first                              # version now current → no re-append
 
 
+def test_topup_only_adds_newer_version_defaults(monkeypatch):
+    """A version bump tops up only the new version's defaults; a default the user
+    deleted under an earlier version is not resurrected."""
+    from ambilight import config as cfgmod
+
+    new_rule = {"scope": "global", "event_type": "sponsorship", "action": "", "color": [1, 2, 3]}
+    monkeypatch.setattr(
+        cfgmod, "DEFAULT_GITHUB_RULES_BY_VERSION",
+        {**cfgmod.DEFAULT_GITHUB_RULES_BY_VERSION, 2: [new_rule]},
+    )
+    monkeypatch.setattr(cfgmod, "DEFAULT_GITHUB_RULES_VERSION", 2)
+
+    cfg = AppConfig()
+    g = cfg.github
+    g.rules_seeded = True
+    g.rules_version = 1          # was current under v1...
+    # ...but the user deleted the built-in global "push" default before upgrading.
+    g.rules = [{"scope": "global", "event_type": "issue", "action": "opened", "color": [5, 5, 5]}]
+    ConfigManager._normalize_and_validate(cfg)
+
+    # the v2 default is merged in
+    assert any(r["event_type"] == "sponsorship" for r in g.rules)
+    # the deleted v1 default ("push") is NOT resurrected by the v1→v2 top-up
+    assert not any(r["event_type"] == "push" for r in g.rules)
+    assert g.rules_version == 2
+
+
 def test_deleted_default_not_resurrected_when_version_current():
     cfg = AppConfig()
     g = cfg.github

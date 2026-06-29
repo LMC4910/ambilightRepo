@@ -211,58 +211,72 @@ class NotificationConfig:
     keyword_rules: list = field(default_factory=list)
 
 
-# Bump when DEFAULT_GITHUB_RULES gains entries that existing installs should pick
-# up. On load, configs with an older github.rules_version get the *missing*
-# defaults merged in (by signature) without disturbing the user's custom rules —
-# so upgrades top-up new defaults exactly once and never resurrect a default the
-# user deliberately deleted.
-DEFAULT_GITHUB_RULES_VERSION = 1
+# Default colour rules, grouped by the DEFAULT_GITHUB_RULES_VERSION that first
+# shipped them. They are seeded once so the integration lights up out of the box
+# (workflow → repo → org → global precedence; the user can edit/clear them in the
+# Integrations → GitHub tab). A blank action matches any action.
+#
+# On load, an install on an older github.rules_version is topped-up with only the
+# buckets *newer* than its stored version (matched by signature). Because the
+# top-up scans those deltas — not the full current list — a version bump adds only
+# its own new defaults and never resurrects a default the user deleted under an
+# earlier version. To add new defaults: bump DEFAULT_GITHUB_RULES_VERSION and add
+# a new bucket here keyed by that version (don't append to an existing bucket).
+DEFAULT_GITHUB_RULES_BY_VERSION = {
+    1: [
+        # CI / GitHub Actions
+        {"scope": "global", "event_type": "workflow_run", "action": "failure", "color": [220, 38, 38], "blink_count": 4},
+        {"scope": "global", "event_type": "workflow_run", "action": "success", "color": [34, 197, 94]},
+        {"scope": "global", "event_type": "workflow_run", "action": "cancelled", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "workflow_run", "action": "in_progress", "color": [234, 179, 8]},
+        {"scope": "global", "event_type": "workflow_job", "action": "in_progress", "color": [234, 179, 8]},
+        {"scope": "global", "event_type": "workflow_job", "action": "completed", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "check_run", "action": "created", "color": [56, 189, 248]},
+        {"scope": "global", "event_type": "check_run", "action": "completed", "color": [148, 163, 184]},
+        # Pull requests
+        {"scope": "global", "event_type": "pull_request", "action": "opened", "color": [59, 130, 246]},
+        {"scope": "global", "event_type": "pull_request", "action": "merged", "color": [168, 85, 247]},
+        {"scope": "global", "event_type": "pull_request", "action": "closed", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "pull_request", "action": "review_requested", "color": [192, 132, 252]},
+        {"scope": "global", "event_type": "pull_request_review", "action": "", "color": [192, 132, 252]},
+        {"scope": "global", "event_type": "review_comment", "action": "", "color": [129, 140, 248]},
+        # Issues
+        {"scope": "global", "event_type": "issue", "action": "opened", "color": [6, 182, 212]},
+        {"scope": "global", "event_type": "issue", "action": "assigned", "color": [14, 165, 233]},
+        {"scope": "global", "event_type": "issue", "action": "closed", "color": [22, 101, 52]},
+        {"scope": "global", "event_type": "issue_comment", "action": "", "color": [56, 189, 248]},
+        # Mentions / review-requests / assignments (any event type)
+        {"scope": "global", "event_type": "", "action": "mentioned", "color": [249, 115, 22], "blink_count": 3},
+        {"scope": "global", "event_type": "", "action": "review_requested", "color": [192, 132, 252]},
+        {"scope": "global", "event_type": "", "action": "assigned", "color": [14, 165, 233]},
+        # Releases / packages
+        {"scope": "global", "event_type": "release", "action": "", "color": [250, 204, 21]},
+        # Repo activity
+        {"scope": "global", "event_type": "push", "action": "", "color": [100, 116, 139]},
+        {"scope": "global", "event_type": "branch", "action": "created", "color": [52, 211, 153]},
+        {"scope": "global", "event_type": "branch", "action": "deleted", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "star", "action": "", "color": [250, 204, 21]},
+        {"scope": "global", "event_type": "fork", "action": "", "color": [125, 211, 252]},
+        {"scope": "global", "event_type": "discussion", "action": "", "color": [45, 212, 191]},
+        {"scope": "global", "event_type": "discussion_comment", "action": "", "color": [20, 184, 166]},
+        {"scope": "global", "event_type": "commit_comment", "action": "", "color": [14, 165, 233]},
+        {"scope": "global", "event_type": "deployment", "action": "", "color": [99, 102, 241]},
+        {"scope": "global", "event_type": "deployment_status", "action": "", "color": [79, 70, 229]},
+        {"scope": "global", "event_type": "repository_invitation", "action": "", "color": [251, 191, 36], "blink_count": 3},
+        # Security — urgent flashing red
+        {"scope": "global", "event_type": "security_alert", "action": "", "color": [239, 68, 68], "blink_count": 6, "on_ms": 120, "off_ms": 80},
+    ],
+}
 
-# Sensible starter colour rules, seeded once so the integration lights up out of
-# the box (workflow → repo → org → global precedence; the user can edit/clear
-# them in the Integrations → GitHub tab). A blank action matches any action.
+# Highest shipped defaults version (the newest bucket above).
+DEFAULT_GITHUB_RULES_VERSION = max(DEFAULT_GITHUB_RULES_BY_VERSION)
+
+# Flattened seed set, in version order. Single source of truth derived from the
+# per-version buckets; used for first-run seeding and the UI's "Restore defaults".
 DEFAULT_GITHUB_RULES = [
-    # CI / GitHub Actions
-    {"scope": "global", "event_type": "workflow_run", "action": "failure", "color": [220, 38, 38], "blink_count": 4},
-    {"scope": "global", "event_type": "workflow_run", "action": "success", "color": [34, 197, 94]},
-    {"scope": "global", "event_type": "workflow_run", "action": "cancelled", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "workflow_run", "action": "in_progress", "color": [234, 179, 8]},
-    {"scope": "global", "event_type": "workflow_job", "action": "in_progress", "color": [234, 179, 8]},
-    {"scope": "global", "event_type": "workflow_job", "action": "completed", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "check_run", "action": "created", "color": [56, 189, 248]},
-    {"scope": "global", "event_type": "check_run", "action": "completed", "color": [148, 163, 184]},
-    # Pull requests
-    {"scope": "global", "event_type": "pull_request", "action": "opened", "color": [59, 130, 246]},
-    {"scope": "global", "event_type": "pull_request", "action": "merged", "color": [168, 85, 247]},
-    {"scope": "global", "event_type": "pull_request", "action": "closed", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "pull_request", "action": "review_requested", "color": [192, 132, 252]},
-    {"scope": "global", "event_type": "pull_request_review", "action": "", "color": [192, 132, 252]},
-    {"scope": "global", "event_type": "review_comment", "action": "", "color": [129, 140, 248]},
-    # Issues
-    {"scope": "global", "event_type": "issue", "action": "opened", "color": [6, 182, 212]},
-    {"scope": "global", "event_type": "issue", "action": "assigned", "color": [14, 165, 233]},
-    {"scope": "global", "event_type": "issue", "action": "closed", "color": [22, 101, 52]},
-    {"scope": "global", "event_type": "issue_comment", "action": "", "color": [56, 189, 248]},
-    # Mentions / review-requests / assignments (any event type)
-    {"scope": "global", "event_type": "", "action": "mentioned", "color": [249, 115, 22], "blink_count": 3},
-    {"scope": "global", "event_type": "", "action": "review_requested", "color": [192, 132, 252]},
-    {"scope": "global", "event_type": "", "action": "assigned", "color": [14, 165, 233]},
-    # Releases / packages
-    {"scope": "global", "event_type": "release", "action": "", "color": [250, 204, 21]},
-    # Repo activity
-    {"scope": "global", "event_type": "push", "action": "", "color": [100, 116, 139]},
-    {"scope": "global", "event_type": "branch", "action": "created", "color": [52, 211, 153]},
-    {"scope": "global", "event_type": "branch", "action": "deleted", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "star", "action": "", "color": [250, 204, 21]},
-    {"scope": "global", "event_type": "fork", "action": "", "color": [125, 211, 252]},
-    {"scope": "global", "event_type": "discussion", "action": "", "color": [45, 212, 191]},
-    {"scope": "global", "event_type": "discussion_comment", "action": "", "color": [20, 184, 166]},
-    {"scope": "global", "event_type": "commit_comment", "action": "", "color": [14, 165, 233]},
-    {"scope": "global", "event_type": "deployment", "action": "", "color": [99, 102, 241]},
-    {"scope": "global", "event_type": "deployment_status", "action": "", "color": [79, 70, 229]},
-    {"scope": "global", "event_type": "repository_invitation", "action": "", "color": [251, 191, 36], "blink_count": 3},
-    # Security — urgent flashing red
-    {"scope": "global", "event_type": "security_alert", "action": "", "color": [239, 68, 68], "blink_count": 6, "on_ms": 120, "off_ms": 80},
+    rule
+    for version in sorted(DEFAULT_GITHUB_RULES_BY_VERSION)
+    for rule in DEFAULT_GITHUB_RULES_BY_VERSION[version]
 ]
 
 
@@ -708,9 +722,11 @@ class ConfigManager:
         # of the box. Three cases:
         #   * no rules at all → seed the full default set (also self-heals if a
         #     user clears every rule accidentally);
-        #   * older rules_version → additively merge in any default the user is
-        #     missing (matched by signature) without touching their custom rules,
-        #     so an upgrade tops-up new defaults exactly once;
+        #   * older rules_version → additively merge in the defaults introduced
+        #     *after* that version (per-version deltas, matched by signature)
+        #     without touching their custom rules, so an upgrade tops-up only the
+        #     genuinely-new defaults and never resurrects an older default the
+        #     user deleted;
         #   * up-to-date → leave rules as-is.
         # The mapper's precedence (workflow > repo > org > global) means the
         # merged global defaults never override a user's more-specific rule.
@@ -730,14 +746,19 @@ class ConfigManager:
             g.rules = [dict(r) for r in DEFAULT_GITHUB_RULES]
         elif g.rules_seeded and g.rules_version < DEFAULT_GITHUB_RULES_VERSION:
             # Existing install (already seeded once) on an older defaults version:
-            # top-up the defaults it's missing. Gating on rules_seeded means a
-            # pristine config that set rules explicitly is left untouched.
+            # top-up only the defaults introduced *after* its stored version,
+            # matched by signature. Iterating the per-version buckets (not the
+            # full current list) means a default the user deleted under an earlier
+            # version is never resurrected by a later bump. Gating on rules_seeded
+            # means a pristine config that set rules explicitly is left untouched.
             seen = {_rule_sig(r) for r in existing_rules if isinstance(r, dict)}
             merged = list(existing_rules)
-            for r in DEFAULT_GITHUB_RULES:
-                if _rule_sig(r) not in seen:
-                    merged.append(dict(r))
-                    seen.add(_rule_sig(r))
+            for version in range(g.rules_version + 1, DEFAULT_GITHUB_RULES_VERSION + 1):
+                for r in DEFAULT_GITHUB_RULES_BY_VERSION.get(version, []):
+                    sig = _rule_sig(r)
+                    if sig not in seen:
+                        merged.append(dict(r))
+                        seen.add(sig)
             g.rules = merged
         g.rules_seeded = True
         g.rules_version = DEFAULT_GITHUB_RULES_VERSION
