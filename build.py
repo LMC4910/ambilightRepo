@@ -45,14 +45,16 @@ CLOUDFLARED_NAME = "cloudflared.exe" if SYSTEM == "Windows" else "cloudflared"
 # Pin the cloudflared release we auto-download so opt-in builds are reproducible
 # and integrity-checked, instead of bundling whatever "latest" happens to serve.
 # To bump: pick a tag from github.com/cloudflare/cloudflared/releases, update this
-# version, and paste the matching SHA-256 digests (lowercase hex, from the release
-# page) into CLOUDFLARED_SHA256 keyed by asset filename.
-CLOUDFLARED_VERSION = "2024.12.2"
+# version, then refresh CLOUDFLARED_SHA256 with the new digests — download each
+# asset and hash it, e.g.:
+#   curl -fSL <asset-url> | sha256sum
+# (Cloudflare doesn't publish a checksums file, so we hash the release assets.)
+# cloudflared ships no windows-arm64 build, so that target isn't pinned here.
+CLOUDFLARED_VERSION = "2026.6.1"
 CLOUDFLARED_SHA256: dict[str, str] = {
-    # "cloudflared-windows-amd64.exe": "<sha256>",
-    # "cloudflared-windows-arm64.exe": "<sha256>",
-    # "cloudflared-linux-amd64": "<sha256>",
-    # "cloudflared-linux-arm64": "<sha256>",
+    "cloudflared-windows-amd64.exe": "5253e66f1f493c4e13539749f1aa86fd0c61e3072900fec29a44ba046a6d97e2",
+    "cloudflared-linux-amd64": "5861a10a438fe8ddcfebb3b830f83966cbf193edafce0fe2eeb198fbae1f7a22",
+    "cloudflared-linux-arm64": "59816ce9b16db71f5bc2a86d59b3632a96c8c3ee934bde2bc8641ee83a6070eb",
 }
 
 
