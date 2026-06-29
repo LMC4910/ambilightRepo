@@ -43,6 +43,22 @@ def test_build_argv_named_tunnel_uses_token():
     assert "--url" not in argv
 
 
+def test_named_mode_requires_token_and_hostname():
+    assert CloudflaredTunnel(named=True, hostname="h", token="t")._named_mode is True
+    assert CloudflaredTunnel(named=True, hostname="", token="t")._named_mode is False
+    assert CloudflaredTunnel(named=True, hostname="h", token="")._named_mode is False
+    assert CloudflaredTunnel(named=False, hostname="h", token="t")._named_mode is False
+
+
+def test_build_argv_named_without_token_falls_back_to_quick():
+    # Named requested but no token → not truly named mode → quick-tunnel argv, so
+    # we never publish a hostname cloudflared was never told to serve.
+    t = CloudflaredTunnel(local_url="http://127.0.0.1:7826", named=True,
+                          hostname="ambi.example.com", token="")
+    assert t._named_mode is False
+    assert t._build_argv("cf") == ["cf", "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:7826"]
+
+
 def test_locate_cloudflared_returns_none_without_binary(monkeypatch):
     # No bundled binary, nothing on PATH → None (caller falls back to polling).
     monkeypatch.setattr(tunnel, "resource_path", lambda name: "/nonexistent/" + name)

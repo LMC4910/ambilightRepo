@@ -34,7 +34,7 @@ import os
 import re
 import shutil
 import sys
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from ...paths import resource_path
 
@@ -93,25 +93,44 @@ class CloudflaredTunnel:
 
     def __init__(self, local_url: str = "http://127.0.0.1:7826", *,
                  named: bool = False, hostname: str = "",
-                 token: str = "", binary: Optional[str] = None) -> None:
+                 token: str = "", binary: Optional[str] = None,
+                 on_url_change: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
         self._local_url = local_url
         self._named = bool(named)
         self._hostname = (hostname or "").strip()
         self._token = (token or "").strip()
         self._binary = binary  # override (tests); else resolved at start()
+        # Async callback fired when the public URL *changes* (i.e. after a
+        # quick-tunnel restart hands us a new hostname) so the caller can
+        # re-register anything pinned to the old URL.
+        self._on_url_change = on_url_change
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._monitor: Optional[asyncio.Task] = None
         self._url_ready = asyncio.Event()
         self._want_running = False
         self.public_url: str = ""
+        # Last URL we surfaced; lets us distinguish the first URL (handled by the
+        # caller's start()) from a later restart-driven change (fires the callback).
+        self._announced_url: str = ""
         self.error: str = ""
 
     @property
     def running(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
+    @property
+    def _named_mode(self) -> bool:
+        """True only when every named-tunnel prerequisite is present.
+
+        A named tunnel needs the flag, a run token, *and* the hostname we publish
+        as the public URL. If any is missing we fall back to a quick tunnel (and
+        scrape its URL from stdout) consistently, instead of publishing a hostname
+        cloudflared was never told to serve.
+        """
+        return self._named and bool(self._token) and bool(self._hostname)
+
     def _build_argv(self, binary: str) -> list[str]:
-        if self._named and self._token:
+        if self._named_mode:
             # Stable named tunnel fronted by the user's hostname.
             return [binary, "tunnel", "--no-autoupdate", "run", "--token", self._token]
         # Zero-config quick tunnel.
@@ -133,6 +152,14 @@ class CloudflaredTunnel:
             logger.warning("[GitHub] %s", self.error)
             return None
 
+        if self._named and not self._named_mode:
+            # Named tunnel requested but a prerequisite is missing — fall back to a
+            # quick tunnel rather than register hooks against an unserved hostname.
+            logger.warning(
+                "[GitHub] Named tunnel requested but %s missing; using a quick tunnel.",
+                "token" if not self._token else "hostname",
+            )
+
         self._want_running = True
         self._url_ready.clear()
         try:
@@ -142,9 +169,11 @@ class CloudflaredTunnel:
             logger.warning("[GitHub] %s", self.error)
             return None
 
-        # A named tunnel has a known, stable URL — no need to scrape stdout.
-        if self._named and self._hostname:
+        # A named tunnel has a known, stable URL — no need to scrape stdout. Only
+        # short-circuit when we're actually running in named mode (token present).
+        if self._named_mode:
             self.public_url = self._hostname if self._hostname.startswith("http") else f"https://{self._hostname}"
+            self._announced_url = self.public_url
             self._url_ready.set()
 
         try:
@@ -182,8 +211,14 @@ class CloudflaredTunnel:
                 if not self._url_ready.is_set():
                     url = parse_public_url(line)
                     if url:
+                        # A different URL than last time means the tunnel restarted
+                        # on a new hostname — notify the caller so it can re-point.
+                        changed = bool(self._announced_url) and url != self._announced_url
                         self.public_url = url
+                        self._announced_url = url
                         self._url_ready.set()
+                        if changed and self._on_url_change is not None:
+                            asyncio.create_task(self._on_url_change(url))
             # Stream closed → process is exiting. Reap it.
             await proc.wait()
         except asyncio.CancelledError:  # pragma: no cover - shutdown
