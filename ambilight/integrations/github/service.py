@@ -25,10 +25,13 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+import secrets as _secrets
+
 from ...events import bus
 from .. import secrets_store
 from . import api as api_mod
 from . import mapper, oauth
+from . import webhook as webhook_mod
 from .health import (
     AUTH_CONNECTED,
     AUTH_DISCONNECTED,
@@ -38,6 +41,14 @@ from .health import (
 from .models import GithubEvent
 from .poller import GithubPoller
 from .store import GithubStore
+from .tunnel import CloudflaredTunnel
+
+# Cache key (in the SQLite `cache` table) for the {repo_or_org: hook_id} map of
+# hooks we created, so we can update them in place (idempotent) and delete them
+# on disable instead of leaking duplicates.
+_HOOKS_CACHE_KEY = "webhook_hooks"
+# The receiver path the tunnel fronts; also the marker we match existing hooks by.
+_WEBHOOK_PATH = "/api/github/webhook"
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +104,10 @@ class GithubIntegration:
         self._api: Optional[api_mod.GithubApi] = None
         self._poller: Optional[GithubPoller] = None
         self._auth_task: Optional[asyncio.Task] = None
+        # Webhook (event-driven) delivery path.
+        self._tunnel: Optional[CloudflaredTunnel] = None
+        self._covered_repos: set[str] = set()   # repos served by a live webhook
+        self._covered_orgs: set[str] = set()     # orgs served by a live webhook
         self.account = ""
         self._apply_config(cfg)
 
@@ -142,6 +157,13 @@ class GithubIntegration:
         if self._auth_task is not None:
             self._auth_task.cancel()
             self._auth_task = None
+        if self._tunnel is not None:
+            # Drop the tunnel process; leave remote hooks in place to be
+            # re-pointed on next launch (quick-tunnel URLs change anyway).
+            self._schedule(self._tunnel.stop())
+            self._tunnel = None
+            self._covered_repos.clear()
+            self._covered_orgs.clear()
         if self._poller is not None:
             # Best-effort async teardown; on shutdown the loop may already be
             # winding down, so cancel the task directly too.
@@ -189,6 +211,16 @@ class GithubIntegration:
         self._configure_poller()
         self._poller.start()
         logger.info("[GitHub] Connected as %s; polling started.", self.account or "?")
+        # Event-driven delivery: if the user turned webhooks on, bring up the
+        # tunnel and (re)register hooks now. Quick-tunnel URLs change per launch,
+        # so this re-points existing hooks on every connect. Best-effort — any
+        # failure just leaves the affected repos on polling.
+        if bool(getattr(self._gh, "webhook_enabled", False)):
+            try:
+                await self._activate_webhooks()
+            except Exception as exc:  # pragma: no cover - defensive
+                self._health.record_error(f"webhook enable failed: {exc}")
+                logger.warning("[GitHub] Webhook enable failed; staying on polling: %s", exc)
 
     def _configure_poller(self) -> None:
         if self._poller is None or self._gh is None:
@@ -198,9 +230,14 @@ class GithubIntegration:
             watch_notifications=bool(getattr(self._gh, "watch_notifications", True)),
             watched_repos=list(getattr(self._gh, "watched_repos", []) or []),
             watched_orgs=list(getattr(self._gh, "watched_orgs", []) or []),
+            covered_repos=set(self._covered_repos),
+            covered_orgs=set(self._covered_orgs),
         )
 
     async def _teardown_poller(self) -> None:
+        # Webhooks ride on the same connection — drop the tunnel too (runtime only;
+        # remote hooks are left in place to be re-pointed on the next connect).
+        await self._teardown_webhooks_runtime()
         if self._poller is not None:
             await self._poller.stop()
             self._poller = None
@@ -238,12 +275,211 @@ class GithubIntegration:
         if delivery_id:
             payload = {**payload, "_delivery_id": delivery_id}
         ev = normalize.normalize_webhook(event_name, payload, self.account)
+        self._health.last_delivery_ts = time.time()
         store = self._ensure_store()
         if not store.mark_seen(ev.id):
             return
         store.add_event(ev)
         self._health.last_event_ts = ev.timestamp
         await self._dispatch(ev)
+
+    # --- webhook activation (tunnel + auto-registration) ----------------
+    def _update_gh_config(self, **fields: Any) -> None:
+        """Persist a partial github-config update and refresh the local view."""
+        try:
+            from ...config import ConfigManager
+            ConfigManager.update({"github": fields})
+            self._gh = ConfigManager.get().github
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[GitHub] could not persist config %s: %s", fields, exc)
+
+    def _ensure_webhook_secret(self) -> str:
+        """Return the shared HMAC secret, generating + persisting it on first use."""
+        secret = secrets_store.get_secret(webhook_mod.WEBHOOK_SECRET_KEY)
+        if not secret:
+            secret = _secrets.token_hex(32)
+            secrets_store.set_secret(webhook_mod.WEBHOOK_SECRET_KEY, secret)
+            self._update_gh_config(webhook_secret_set=True)
+        return secret
+
+    async def enable_webhooks(self) -> Dict[str, Any]:
+        """User action: turn webhooks on (persist the flag, connect, activate).
+
+        Idempotent and safe to call repeatedly. The heavy lifting lives in
+        :meth:`_activate_webhooks`; connecting auto-activates via that method, so
+        we never run it twice. Returns a status dict.
+        """
+        if not self._health.httpx_available:
+            raise RuntimeError("httpx is not installed; GitHub integration unavailable")
+        self._update_gh_config(webhook_enabled=True)
+        if self._api is None:
+            # Connecting auto-activates webhooks now that the flag is set.
+            await self._connect()
+            if self._api is None:
+                raise RuntimeError("not connected to GitHub")
+            return self.status()
+        return await self._activate_webhooks()
+
+    async def _activate_webhooks(self) -> Dict[str, Any]:
+        """Open the tunnel and (re)register hooks on each admin'd watched repo.
+
+        Assumes the API client exists (called from a connected state). Repos we
+        can't admin — and the notifications inbox — keep polling.
+        """
+        if self._api is None:
+            return self.status()
+        secret = self._ensure_webhook_secret()
+
+        # 1. Bring up the public tunnel.
+        if self._tunnel is None:
+            token = secrets_store.get_secret("github_tunnel_token") if getattr(self._gh, "tunnel_named", False) else ""
+            self._tunnel = CloudflaredTunnel(
+                local_url="http://127.0.0.1:7826",
+                named=bool(getattr(self._gh, "tunnel_named", False)),
+                hostname=str(getattr(self._gh, "tunnel_hostname", "") or ""),
+                token=token,
+            )
+        public_url = await self._tunnel.start()
+        self._health.tunnel_public_url = public_url or ""
+        if not public_url:
+            # No tunnel → no webhooks. Stay on full polling, surface the reason.
+            self._health.tunnel_error = self._tunnel.error
+            self._health.webhook_active = False
+            self._covered_repos.clear()
+            self._covered_orgs.clear()
+            self._configure_poller()
+            return self.status()
+        self._health.tunnel_error = ""
+
+        # 2. Register/update a hook per watched repo we administer.
+        delivery_url = f"{public_url}{_WEBHOOK_PATH}"
+        await self._register_all_hooks(delivery_url, secret)
+
+        self._health.webhook_active = bool(self._covered_repos or self._covered_orgs)
+        self._configure_poller()
+        logger.info("[GitHub] Webhooks active via %s (covered: %d repos, %d orgs).",
+                    public_url, len(self._covered_repos), len(self._covered_orgs))
+        return self.status()
+
+    async def _register_all_hooks(self, delivery_url: str, secret: str) -> None:
+        store = self._ensure_store()
+        hooks_map: Dict[str, int] = dict(store.get_cache(_HOOKS_CACHE_KEY) or {})
+        self._covered_repos.clear()
+        self._health.hook_status = {}
+
+        watched_repos = list(getattr(self._gh, "watched_repos", []) or [])
+        for repo in watched_repos:
+            repo = str(repo).strip()
+            if not repo:
+                continue
+            try:
+                info = await self._api.get_repo(repo)
+                if not bool((info.get("permissions") or {}).get("admin")):
+                    self._health.hook_status[repo] = "needs-admin"
+                    continue
+                hook_id = await self._reconcile_repo_hook(repo, delivery_url, secret, hooks_map)
+                hooks_map[repo.lower()] = hook_id
+                self._covered_repos.add(repo.lower())
+                self._health.hook_status[repo] = "registered"
+            except api_mod.GithubApiError as exc:
+                self._health.hook_status[repo] = "needs-admin" if exc.status in (403, 404) else "error"
+                self._health.record_error(f"hook register {repo}: {exc}")
+                logger.warning("[GitHub] Could not register webhook on %s: %s", repo, exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._health.hook_status[repo] = "error"
+                self._health.record_error(f"hook register {repo}: {exc}")
+
+        # Org hooks (best-effort; needs the admin:org_hook scope).
+        for org in list(getattr(self._gh, "watched_orgs", []) or []):
+            org = str(org).strip()
+            if not org:
+                continue
+            try:
+                hook_id = await self._reconcile_org_hook(org, delivery_url, secret, hooks_map)
+                hooks_map[f"org:{org.lower()}"] = hook_id
+                self._covered_orgs.add(org.lower())
+                self._health.hook_status[f"org:{org}"] = "registered"
+            except api_mod.GithubApiError as exc:
+                self._health.hook_status[f"org:{org}"] = "needs-admin" if exc.status in (403, 404) else "error"
+                logger.warning("[GitHub] Could not register org webhook on %s: %s", org, exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._health.hook_status[f"org:{org}"] = "error"
+
+        store.set_cache(_HOOKS_CACHE_KEY, hooks_map)
+
+    async def _reconcile_repo_hook(self, repo: str, delivery_url: str, secret: str,
+                                   hooks_map: Dict[str, int]) -> int:
+        """Create our hook on *repo*, or update the existing one in place. Returns its id."""
+        existing = await self._api.list_repo_hooks(repo)
+        hook_id = self._find_our_hook(existing, hooks_map.get(repo.lower()))
+        if hook_id is not None:
+            await self._api.update_repo_hook(repo, hook_id, delivery_url, secret)
+            return hook_id
+        created = await self._api.create_repo_hook(repo, delivery_url, secret)
+        return int(created.get("id"))
+
+    async def _reconcile_org_hook(self, org: str, delivery_url: str, secret: str,
+                                  hooks_map: Dict[str, int]) -> int:
+        existing = await self._api.list_org_hooks(org)
+        hook_id = self._find_our_hook(existing, hooks_map.get(f"org:{org.lower()}"))
+        if hook_id is not None:
+            await self._api.update_org_hook(org, hook_id, delivery_url, secret)
+            return hook_id
+        created = await self._api.create_org_hook(org, delivery_url, secret)
+        return int(created.get("id"))
+
+    @staticmethod
+    def _find_our_hook(existing: List[Dict[str, Any]], known_id: Optional[int]) -> Optional[int]:
+        """Match a previously-created hook by id, else by our receiver path suffix.
+
+        Quick-tunnel hostnames change each launch, so we can't match on the full
+        URL — we match the stable ``/api/github/webhook`` path instead.
+        """
+        ids = {int(h.get("id")) for h in existing if h.get("id") is not None}
+        if known_id is not None and int(known_id) in ids:
+            return int(known_id)
+        for h in existing:
+            url = str((h.get("config") or {}).get("url", "") or "")
+            if url.endswith(_WEBHOOK_PATH):
+                return int(h.get("id"))
+        return None
+
+    async def _delete_remote_hooks(self) -> None:
+        """Best-effort: delete every hook we created (needs a valid token)."""
+        if self._api is None:
+            return
+        store = self._ensure_store()
+        hooks_map: Dict[str, int] = dict(store.get_cache(_HOOKS_CACHE_KEY) or {})
+        for key, hook_id in list(hooks_map.items()):
+            try:
+                if key.startswith("org:"):
+                    await self._api.delete_org_hook(key[4:], int(hook_id))
+                else:
+                    await self._api.delete_repo_hook(key, int(hook_id))
+            except Exception as exc:  # pragma: no cover - best-effort cleanup
+                logger.debug("[GitHub] could not delete hook %s/%s: %s", key, hook_id, exc)
+        store.set_cache(_HOOKS_CACHE_KEY, {})
+
+    async def _teardown_webhooks_runtime(self) -> None:
+        """Stop the tunnel and clear runtime webhook state (no config change)."""
+        if self._tunnel is not None:
+            await self._tunnel.stop()
+            self._tunnel = None
+        self._covered_repos.clear()
+        self._covered_orgs.clear()
+        self._health.webhook_active = False
+        self._health.tunnel_public_url = ""
+        self._health.tunnel_error = ""
+        self._health.hook_status = {}
+
+    async def disable_webhooks(self) -> Dict[str, Any]:
+        """User action: delete our hooks, drop the tunnel, and resume full polling."""
+        self._update_gh_config(webhook_enabled=False)
+        await self._delete_remote_hooks()
+        await self._teardown_webhooks_runtime()
+        self._configure_poller()
+        logger.info("[GitHub] Webhooks disabled; polling resumed.")
+        return self.status()
 
     # --- OAuth device flow ----------------------------------------------
     async def begin_auth(self) -> Dict[str, Any]:
@@ -330,6 +566,12 @@ class GithubIntegration:
             logger.debug("[GitHub] could not persist enabled flag: %s", exc)
 
     async def logout(self) -> None:
+        # Delete our hooks while the token is still valid; keep the user's
+        # webhook_enabled preference so a later re-login restores them.
+        try:
+            await self._delete_remote_hooks()
+        except Exception:  # pragma: no cover - best-effort
+            pass
         secrets_store.clear_github_token()
         if self._auth_task is not None:
             self._auth_task.cancel()
