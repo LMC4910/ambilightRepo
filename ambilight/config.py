@@ -301,9 +301,18 @@ class GithubConfig:
     # Highest DEFAULT_GITHUB_RULES_VERSION whose defaults have been merged into
     # `rules`. Lets an upgrade top-up newly-added defaults once (see config load).
     rules_version: int = 0
-    # Advanced: inbound webhook receiver (optional, off by default).
+    # Advanced: inbound webhook receiver (optional, off by default). When on, the
+    # app opens a tunnel to make its loopback receiver reachable and auto-registers
+    # a hook on each watched repo it admins; polling for those repos is then
+    # skipped (the notifications inbox + non-admin repos keep polling). See
+    # integrations/github/tunnel.py and service.enable_webhooks().
     webhook_enabled: bool = False
     webhook_secret_set: bool = False     # marker only; the secret lives in the keyring
+    webhook_provider: str = "cloudflared"  # tunnel provider (only cloudflared today)
+    # Optional stable "named tunnel" (Cloudflare account + domain) instead of an
+    # ephemeral trycloudflare URL. The tunnel token lives in the keyring.
+    tunnel_named: bool = False
+    tunnel_hostname: str = ""            # e.g. "ambilight.example.com" for a named tunnel
 
 
 @dataclass
@@ -768,6 +777,9 @@ class ConfigManager:
         g.rules = clean_gh_rules
         g.webhook_enabled = bool(g.webhook_enabled)
         g.webhook_secret_set = bool(g.webhook_secret_set)
+        g.webhook_provider = str(g.webhook_provider or "cloudflared").strip().lower() or "cloudflared"
+        g.tunnel_named = bool(g.tunnel_named)
+        g.tunnel_hostname = str(g.tunnel_hostname or "").strip()
 
         # 7. Ownership — mint a stable per-install instance_id (persisted by
         #    load()/update() so it survives restarts), default the label to the
