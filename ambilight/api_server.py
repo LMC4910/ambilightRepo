@@ -688,6 +688,28 @@ async def github_webhook(request: Request) -> Dict[str, str]:
     return {"message": "accepted"}
 
 
+@app.post("/api/github/webhook/enable", dependencies=[Depends(verify_token)])
+async def github_webhook_enable() -> Dict[str, Any]:
+    """Turn on event-driven delivery: open the tunnel + auto-register hooks.
+
+    Returns the GitHub status snapshot (tunnel URL, per-repo hook status). Repos
+    the user can't admin — and the notifications inbox — stay on polling.
+    """
+    gh = _require_github()
+    try:
+        return await gh.enable_webhooks()
+    except RuntimeError as exc:                # httpx missing / not connected
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Enable webhooks failed: {exc}")
+
+
+@app.post("/api/github/webhook/disable", dependencies=[Depends(verify_token)])
+async def github_webhook_disable() -> Dict[str, Any]:
+    """Turn off webhooks: delete our hooks, drop the tunnel, resume full polling."""
+    return await _require_github().disable_webhooks()
+
+
 # ---------------------------------------------------------------------------
 # AUTO-START (start on login)
 # ---------------------------------------------------------------------------
