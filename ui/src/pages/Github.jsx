@@ -427,7 +427,18 @@ function RuleRow({ rule, onChange, onDelete, eventTypes, actionsByEvent, repos, 
     <div className="card card-pad" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <Swatch rgb={rule.color || [88, 166, 255]} onChange={(c) => onChange({ ...rule, color: c })} />
-        <select className="field" style={{ maxWidth: 130 }} value={scope} onChange={(e) => onChange({ ...rule, scope: e.target.value })}>
+        <select className="field" style={{ maxWidth: 130 }} value={scope} onChange={(e) => {
+          // Clear fields the new scope doesn't use so buildPayload()/ruleSig()
+          // don't persist or dedupe on stale repo/org/workflow values.
+          const nextScope = e.target.value
+          onChange({
+            ...rule,
+            scope: nextScope,
+            org: nextScope === 'org' ? rule.org : '',
+            repo: (nextScope === 'repo' || nextScope === 'workflow') ? rule.repo : '',
+            workflow: nextScope === 'workflow' ? rule.workflow : '',
+          })
+        }}>
           <option value="global">Global</option><option value="org">Organisation</option>
           <option value="repo">Repository</option><option value="workflow">Workflow</option>
         </select>
@@ -440,7 +451,7 @@ function RuleRow({ rule, onChange, onDelete, eventTypes, actionsByEvent, repos, 
       {(scope === 'repo' || scope === 'workflow') && (
         <div style={{ display: 'flex', gap: 8 }}>
           <Combo style={{ flex: 1 }} mono value={rule.repo || ''} emptyLabel="Select repository…"
-            options={repoOpts} placeholder="owner/repo" onChange={(v) => onChange({ ...rule, repo: v })} />
+            options={repoOpts} placeholder="owner/repo" onChange={(v) => onChange({ ...rule, repo: v, workflow: '' })} />
           {scope === 'workflow' && (
             <Combo style={{ flex: 1 }} value={rule.workflow || ''}
               emptyLabel={rule.repo ? 'Any workflow' : 'Pick a repository first'}
@@ -486,19 +497,33 @@ export default function Github({ onBack }) {
   useEffect(() => { githubMeta().then((m) => m && setMeta(m)).catch(() => {}) }, [])
 
   // Repos + orgs need an authenticated connection; (re)load when it comes up.
+  // On disconnect, drop the previous account's catalogs so the editor never
+  // shows its private repo/org/workflow names after logout or an account switch.
   useEffect(() => {
-    if (!connected) return
+    if (!connected) {
+      setRepos([])
+      setOrgs([])
+      setWfByRepo({})
+      wfRequested.current.clear()
+      return
+    }
     let alive = true
     githubRepos().then((r) => { if (alive) setRepos(r || []) }).catch(() => {})
     githubOrgs().then((o) => { if (alive) setOrgs(o || []) }).catch(() => {})
     return () => { alive = false }
   }, [connected])
 
-  // Lazily load a repo's workflow names the first time a rule targets it.
+  // Lazily load a repo's workflow names the first time a rule targets it. Mark
+  // the repo as requested only after a successful fetch, so a transient failure
+  // isn't cached as "no workflows" and the repo can be retried later.
   const ensureWorkflows = useCallback((repo) => {
     if (!repo || !connected || wfRequested.current.has(repo)) return
-    wfRequested.current.add(repo)
-    githubWorkflows(repo).then((list) => setWfByRepo((m) => ({ ...m, [repo]: list || [] }))).catch(() => {})
+    githubWorkflows(repo)
+      .then((list) => {
+        wfRequested.current.add(repo)
+        setWfByRepo((m) => ({ ...m, [repo]: list || [] }))
+      })
+      .catch(() => {})
   }, [connected, githubWorkflows])
 
   const evtPairs = (meta?.event_types?.length ? meta.event_types.map((e) => [e.value, e.label]) : EVENT_TYPES)

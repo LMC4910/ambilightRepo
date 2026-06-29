@@ -280,9 +280,9 @@ export const useStore = create((set, get) => ({
   githubRepos: async () => {
     try { return await window.api.github.repos(); } catch (e) { return []; }
   },
-  githubWorkflows: async (repo) => {
-    try { return await window.api.github.workflows(repo); } catch (e) { return []; }
-  },
+  // No catch here: a transient failure must reject so ensureWorkflows() can
+  // retry it later, rather than being cached as an empty workflow list.
+  githubWorkflows: async (repo) => window.api.github.workflows(repo),
   githubMeta: async () => {
     try { return await window.api.github.meta(); } catch (e) { return null; }
   },
