@@ -42,6 +42,18 @@ SYSTEM = platform.system()  # Windows | Darwin | Linux
 # Bundled when found so webhooks work out of the box; missing it just leaves the
 # integration on polling (or a PATH-installed cloudflared) — see tunnel.py.
 CLOUDFLARED_NAME = "cloudflared.exe" if SYSTEM == "Windows" else "cloudflared"
+# Pin the cloudflared release we auto-download so opt-in builds are reproducible
+# and integrity-checked, instead of bundling whatever "latest" happens to serve.
+# To bump: pick a tag from github.com/cloudflare/cloudflared/releases, update this
+# version, and paste the matching SHA-256 digests (lowercase hex, from the release
+# page) into CLOUDFLARED_SHA256 keyed by asset filename.
+CLOUDFLARED_VERSION = "2024.12.2"
+CLOUDFLARED_SHA256: dict[str, str] = {
+    # "cloudflared-windows-amd64.exe": "<sha256>",
+    # "cloudflared-windows-arm64.exe": "<sha256>",
+    # "cloudflared-linux-amd64": "<sha256>",
+    # "cloudflared-linux-arm64": "<sha256>",
+}
 
 
 def _which(name: str) -> str:
@@ -140,44 +152,85 @@ def _find_native_artifact(filename: str) -> Path | None:
     return None
 
 
-def _cloudflared_download_url() -> str | None:
-    """Official cloudflared release URL for the host platform, or None.
+def _cloudflared_asset_name() -> str | None:
+    """Release asset filename for the host platform, or None if unsupported.
 
     macOS ships a ``.tgz`` (not a bare binary), so auto-fetch there is skipped —
     place the binary in ``bin/`` or set ``AMBILIGHT_CLOUDFLARED`` instead.
     """
-    base = "https://github.com/cloudflare/cloudflared/releases/latest/download/"
     machine = platform.machine().lower()
     arch = "amd64" if machine in ("amd64", "x86_64") else ("arm64" if machine in ("arm64", "aarch64") else None)
     if arch is None:
         return None
     if SYSTEM == "Windows":
-        return f"{base}cloudflared-windows-{arch}.exe"
+        return f"cloudflared-windows-{arch}.exe"
     if SYSTEM == "Linux":
-        return f"{base}cloudflared-linux-{arch}"
+        return f"cloudflared-linux-{arch}"
     return None
 
 
+def _cloudflared_download_url(asset: str) -> str:
+    """Pinned official release URL for *asset* (a specific version, not latest)."""
+    return (f"https://github.com/cloudflare/cloudflared/releases/download/"
+            f"{CLOUDFLARED_VERSION}/{asset}")
+
+
+def _expected_cloudflared_sha256(asset: str) -> str | None:
+    """Expected digest for *asset*: env override first, then the pinned table."""
+    env = os.environ.get("AMBILIGHT_CLOUDFLARED_SHA256", "").strip().lower()
+    if env:
+        return env
+    return CLOUDFLARED_SHA256.get(asset)
+
+
 def _fetch_cloudflared() -> Path | None:
-    """Opt-in download of cloudflared into ``bin/`` (gated by env). Best-effort."""
-    url = _cloudflared_download_url()
-    if not url:
+    """Opt-in download of cloudflared into ``bin/`` (gated by env).
+
+    Fails closed: the binary is pinned to ``CLOUDFLARED_VERSION`` and verified
+    against a known SHA-256 before it is bundled. With no expected digest pinned
+    (table empty and no ``AMBILIGHT_CLOUDFLARED_SHA256`` override), we refuse to
+    bundle an unverified, network-fetched executable.
+    """
+    import hashlib
+    import urllib.request
+
+    asset = _cloudflared_asset_name()
+    if not asset:
         print(f"[WARN] No cloudflared auto-download for this platform; place it at "
               f"bin/{CLOUDFLARED_NAME} or set AMBILIGHT_CLOUDFLARED.")
         return None
+    expected = _expected_cloudflared_sha256(asset)
+    if not expected:
+        print(f"[ERROR] No pinned SHA-256 for {asset} @ {CLOUDFLARED_VERSION}; "
+              f"refusing to bundle an unverified cloudflared. Add its digest to "
+              f"CLOUDFLARED_SHA256 or set AMBILIGHT_CLOUDFLARED_SHA256.")
+        return None
+
+    url = _cloudflared_download_url(asset)
     dest_dir = ROOT / "bin"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / CLOUDFLARED_NAME
+    tmp = dest_dir / f"{CLOUDFLARED_NAME}.download"
     print(f"[cloudflared] Downloading {url} …")
-    import urllib.request
     try:
-        urllib.request.urlretrieve(url, dest)
-        if SYSTEM != "Windows":
-            dest.chmod(0o755)
-        return dest
+        urllib.request.urlretrieve(url, tmp)
     except Exception as exc:  # network/CI-specific
         print(f"[WARN] cloudflared download failed: {exc}")
+        tmp.unlink(missing_ok=True)
         return None
+
+    digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+    if digest != expected:
+        print(f"[ERROR] cloudflared checksum mismatch for {asset}: expected "
+              f"{expected}, got {digest}. Discarding download.")
+        tmp.unlink(missing_ok=True)
+        return None
+
+    tmp.replace(dest)
+    if SYSTEM != "Windows":
+        dest.chmod(0o755)
+    print(f"[OK] cloudflared {CLOUDFLARED_VERSION} verified ({digest[:12]}…).")
+    return dest
 
 
 def _find_cloudflared() -> Path | None:
