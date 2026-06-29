@@ -617,8 +617,10 @@ async def github_repos() -> List[Dict[str, Any]]:
 
 
 @app.get("/api/github/workflows", dependencies=[Depends(verify_token)])
-async def github_workflows(repo: str) -> List[Dict[str, Any]]:
+async def github_workflows(repo: str = "") -> List[Dict[str, Any]]:
     """List a repo's Actions workflow names so the UI can offer them as a picker."""
+    # `repo` defaults to "" (rather than being required) so an omitted param hits
+    # the same custom 400 below as a blank one, instead of FastAPI's 422.
     repo = str(repo or "").strip()
     if not repo:
         raise HTTPException(status_code=400, detail="repo query param is required (owner/name)")
