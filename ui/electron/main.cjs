@@ -554,6 +554,8 @@ function createWindow() {
     method: 'POST',
     body: JSON.stringify({ color: color || null })
   }))
+  ipcMain.handle('api:github:webhookEnable', async () => fetchApi('/api/github/webhook/enable', { method: 'POST' }))
+  ipcMain.handle('api:github:webhookDisable', async () => fetchApi('/api/github/webhook/disable', { method: 'POST' }))
 
   // Open an OS settings deep-link (used to grant notification access) or the
   // GitHub device-authorisation page. Restricted to a small allowlist so a

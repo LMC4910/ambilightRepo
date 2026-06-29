@@ -108,7 +108,9 @@ const buildPayload = (d) => ({
     ...(r.off_ms != null ? { off_ms: r.off_ms } : {}),
     ...(r.brightness != null ? { brightness: r.brightness } : {}),
   })),
-  webhook_enabled: d.webhook_enabled, webhook_secret_set: d.webhook_secret_set,
+  // NB: webhook_enabled / webhook_secret_set are intentionally omitted — the live
+  // webhook state is owned by the enable/disable endpoints (WebhookPanel), and
+  // the config is deep-merged on save, so leaving them out preserves that state.
 })
 
 const relTime = (ts) => {
@@ -235,6 +237,100 @@ function RecentEvents() {
           <span className="subtle" style={{ fontSize: 11.5, flex: '0 0 auto' }}>{relTime(e.timestamp)}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+/* ---------------- Webhooks (event-driven delivery) ----------------
+   Webhooks make GitHub push activity instantly instead of polling. Because the
+   app is loopback-only, enabling opens a cloudflared tunnel and auto-registers a
+   hook on each repo the user administers; those repos then stop being polled.
+   The notifications inbox and non-admin repos keep polling. */
+const HOOK_BADGE = {
+  registered: { cls: 'ok', icon: 'check', text: 'Webhook' },
+  'needs-admin': { cls: 'warn', icon: 'alert-triangle', text: 'No admin · polling' },
+  'polling-fallback': { cls: 'subtle', icon: 'rotate-ccw', text: 'Polling' },
+  error: { cls: 'danger', icon: 'x', text: 'Error · polling' },
+}
+
+function HookBadge({ name, state }) {
+  const b = HOOK_BADGE[state] || HOOK_BADGE['polling-fallback']
+  const color = b.cls === 'ok' ? 'var(--ok,#22c55e)' : b.cls === 'warn' ? 'var(--warn,#f5a623)'
+    : b.cls === 'danger' ? 'var(--err,#e5484d)' : 'var(--muted,#94a3b8)'
+  return (
+    <div className="card card-pad" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <span className="mono" style={{ flex: 1, fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, color }}>
+        <Icon n={b.icon} />{b.text}
+      </span>
+    </div>
+  )
+}
+
+function WebhookPanel({ status, connected, watchedRepos, watchedOrgs }) {
+  const { githubWebhookEnable, githubWebhookDisable } = useStore()
+  const [busy, setBusy] = useState(false)
+  const active = !!status?.webhook_active
+  const url = status?.tunnel_public_url || ''
+  const err = status?.tunnel_error || ''
+  const hookStatus = status?.hook_status || {}
+
+  const toggle = async (on) => {
+    setBusy(true)
+    if (on) await githubWebhookEnable()
+    else await githubWebhookDisable()
+    setBusy(false)
+  }
+
+  if (!connected) {
+    return <div className="hint"><Icon n="info" />Connect your GitHub account to enable instant webhook delivery.</div>
+  }
+
+  return (
+    <div className="stack">
+      <div className="card card-pad" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div className="feat-ic"><Icon n="zap" /></div>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>Instant delivery (webhooks)<span className="subtle" style={{ fontSize: 11, fontWeight: 500, marginLeft: 8 }}>beta</span></div>
+            <div className="subtle" style={{ fontSize: 12.5 }}>
+              {busy ? (active ? 'Disabling…' : 'Opening tunnel & registering hooks…')
+                : active ? 'GitHub pushes events instantly — covered repos stop being polled.'
+                : 'Replace polling with push for repos you admin. Opens a local cloudflared tunnel.'}
+            </div>
+          </div>
+        </div>
+        <Toggle checked={active || (busy && !active)} disabled={busy} onChange={(v) => toggle(v)} />
+      </div>
+
+      {err && (
+        <div className="card card-pad" style={{ borderColor: 'color-mix(in srgb,var(--warn) 28%,transparent)', background: 'var(--warn-bg)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Icon n="alert-triangle" style={{ color: 'var(--warn)' }} />
+            <span style={{ fontSize: 12.5, color: 'var(--warn)' }}>{err} — staying on polling.</span>
+          </div>
+        </div>
+      )}
+
+      {active && url && (
+        <div className="card card-pad" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Icon n="link" />
+          <span className="subtle" style={{ fontSize: 12 }}>Public endpoint</span>
+          <span className="mono" style={{ flex: 1, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{url}/api/github/webhook</span>
+          {status?.last_delivery_ts > 0 && <span className="subtle" style={{ fontSize: 11.5 }}>last delivery {relTime(status.last_delivery_ts)}</span>}
+        </div>
+      )}
+
+      {active && (watchedRepos.length > 0 || watchedOrgs.length > 0) && (
+        <div className="tile-grid">
+          {watchedRepos.map((r) => <HookBadge key={r} name={r} state={hookStatus[r]} />)}
+          {watchedOrgs.map((o) => <HookBadge key={`org:${o}`} name={o} state={hookStatus[`org:${o}`]} />)}
+        </div>
+      )}
+
+      <div className="hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Icon n="info" />Org-wide webhooks need re-authorising with the <span className="mono">admin:org_hook</span> scope. Repos you don't administer keep polling. The notifications inbox always polls.
+      </div>
     </div>
   )
 }
@@ -464,6 +560,11 @@ export default function Github({ onBack }) {
 
             <Section title="Watched organisations" count={g.watched_orgs.length} />
             <WatchedPicker items={g.watched_orgs} onChange={(v) => set({ watched_orgs: v })} options={orgNames} placeholder="organisation login" mono={false} label="organisation" />
+
+            {/* webhooks (event-driven delivery) */}
+            <Section title="Delivery" />
+            <WebhookPanel status={githubStatus} connected={connected}
+              watchedRepos={g.watched_repos} watchedOrgs={g.watched_orgs} />
 
             {/* appearance */}
             <Section title="Default light" />

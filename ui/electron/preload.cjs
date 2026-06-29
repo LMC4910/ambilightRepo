@@ -36,7 +36,9 @@ contextBridge.exposeInMainWorld('api', {
     workflows: (repo) => ipcRenderer.invoke('api:github:workflows', repo),
     meta: () => ipcRenderer.invoke('api:github:meta'),
     events: (limit) => ipcRenderer.invoke('api:github:events', limit),
-    test: (color) => ipcRenderer.invoke('api:github:test', color)
+    test: (color) => ipcRenderer.invoke('api:github:test', color),
+    webhookEnable: () => ipcRenderer.invoke('api:github:webhookEnable'),
+    webhookDisable: () => ipcRenderer.invoke('api:github:webhookDisable')
   },
   system: {
     // Only known OS settings deep-links are honoured; the main process enforces

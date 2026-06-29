@@ -298,5 +298,29 @@ export const useStore = create((set, get) => ({
       console.error(e);
       return false;
     }
+  },
+  githubWebhookEnable: async () => {
+    try {
+      const s = await window.api.github.webhookEnable();
+      if (s) set({ githubStatus: s });
+      get().fetchGithubStatus();
+      return s;
+    } catch (e) {
+      const reason = (e?.message || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+      get().toast(reason || 'Could not enable webhooks');
+      return null;
+    }
+  },
+  githubWebhookDisable: async () => {
+    try {
+      const s = await window.api.github.webhookDisable();
+      if (s) set({ githubStatus: s });
+      get().fetchGithubStatus();
+      get().toast('Webhooks disabled; polling resumed');
+      return s;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
   }
 }))
