@@ -23,7 +23,9 @@ export default function Integrations() {
 
   const statusFor = (id) => {
     if (id !== 'github' || !githubStatus) return null
-    if (githubStatus.auth_state === 'connected') return { cls: 'ok', label: githubStatus.account ? `Connected · ${githubStatus.account}` : 'Connected' }
+    if (githubStatus.auth_state === 'connected') {
+      return { cls: 'ok', label: githubStatus.account ? `Connected · ${githubStatus.account}` : 'Connected' }
+    }
     if (githubStatus.enabled) return { cls: 'warn', label: 'Enabled · not connected' }
     return null
   }
@@ -42,9 +44,15 @@ export default function Integrations() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <div className="feat-ic"><Icon n={it.icon} /></div>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
                       <span style={{ fontWeight: 600 }}>{it.name}</span>
-                      {st && <span className={`status-pill ${st.cls}`} style={{ fontSize: 11 }}><span className="dot" />{st.label}</span>}
+                      {st && (
+                        <span className={`status-pill ${st.cls}`} title={st.label}
+                          style={{ fontSize: 11, minWidth: 0, maxWidth: '100%' }}>
+                          <span className="dot" style={{ flex: '0 0 auto' }} />
+                          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{st.label}</span>
+                        </span>
+                      )}
                     </div>
                     <div className="subtle" style={{ fontSize: 12.5 }}>{it.desc}</div>
                   </div>

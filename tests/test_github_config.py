@@ -1,6 +1,12 @@
 """Tests for GithubConfig defaults and normalization/validation."""
 
-from ambilight.config import AppConfig, GithubConfig, ConfigManager
+from ambilight.config import (
+    AppConfig,
+    GithubConfig,
+    ConfigManager,
+    DEFAULT_GITHUB_RULES,
+    DEFAULT_GITHUB_RULES_VERSION,
+)
 
 
 def test_defaults():
@@ -36,6 +42,85 @@ def test_cleared_rules_are_reseeded():
     ConfigManager._normalize_and_validate(cfg)        # auto re-seeds
     assert cfg.github.rules
     assert cfg.github.rules_seeded is True
+
+
+def test_existing_install_tops_up_missing_defaults():
+    # Simulate an install seeded under an older defaults version with one custom rule.
+    cfg = AppConfig()
+    g = cfg.github
+    g.rules_seeded = True
+    g.rules_version = 0
+    g.rules = [{"scope": "workflow", "repo": "me/app", "workflow": "CI",
+                "event_type": "workflow_run", "action": "failure", "color": [230, 51, 51]}]
+    ConfigManager._normalize_and_validate(cfg)
+    # the user's custom rule is preserved untouched
+    custom = [r for r in g.rules if r["scope"] == "workflow" and r["repo"] == "me/app"]
+    assert custom and custom[0]["color"] == [230, 51, 51]
+    # the missing defaults (incl. the global CI-failure rule) were merged in
+    assert any(r["scope"] == "global" and r["event_type"] == "workflow_run"
+               and r["action"] == "failure" for r in g.rules)
+    assert len(g.rules) == len(DEFAULT_GITHUB_RULES) + 1
+    assert g.rules_version == DEFAULT_GITHUB_RULES_VERSION
+
+
+def test_topup_is_idempotent_and_skips_duplicates():
+    cfg = AppConfig()
+    g = cfg.github
+    g.rules_seeded = True
+    g.rules_version = 0
+    # A custom rule whose signature matches a default (global push) must not be duplicated.
+    g.rules = [{"scope": "global", "event_type": "push", "action": "", "color": [1, 2, 3]}]
+    ConfigManager._normalize_and_validate(cfg)
+    first = len(g.rules)
+    push = [r for r in g.rules if r["event_type"] == "push"]
+    assert len(push) == 1 and push[0]["color"] == [1, 2, 3]   # default push deduped, custom kept
+    ConfigManager._normalize_and_validate(cfg)                 # second load
+    assert len(g.rules) == first                              # version now current → no re-append
+
+
+def test_topup_only_adds_newer_version_defaults(monkeypatch):
+    """A version bump tops up only the new version's defaults; a default the user
+    deleted under an earlier version is not resurrected."""
+    from ambilight import config as cfgmod
+
+    new_rule = {"scope": "global", "event_type": "sponsorship", "action": "", "color": [1, 2, 3]}
+    monkeypatch.setattr(
+        cfgmod, "DEFAULT_GITHUB_RULES_BY_VERSION",
+        {**cfgmod.DEFAULT_GITHUB_RULES_BY_VERSION, 2: [new_rule]},
+    )
+    monkeypatch.setattr(cfgmod, "DEFAULT_GITHUB_RULES_VERSION", 2)
+
+    cfg = AppConfig()
+    g = cfg.github
+    g.rules_seeded = True
+    g.rules_version = 1          # was current under v1...
+    # ...but the user deleted the built-in global "push" default before upgrading.
+    g.rules = [{"scope": "global", "event_type": "issue", "action": "opened", "color": [5, 5, 5]}]
+    ConfigManager._normalize_and_validate(cfg)
+
+    # the v2 default is merged in
+    assert any(r["event_type"] == "sponsorship" for r in g.rules)
+    # the deleted v1 default ("push") is NOT resurrected by the v1→v2 top-up
+    assert not any(r["event_type"] == "push" for r in g.rules)
+    assert g.rules_version == 2
+
+
+def test_deleted_default_not_resurrected_when_version_current():
+    cfg = AppConfig()
+    g = cfg.github
+    g.rules_seeded = True
+    g.rules_version = DEFAULT_GITHUB_RULES_VERSION             # already up to date
+    g.rules = [{"scope": "global", "event_type": "issue", "action": "opened", "color": [1, 1, 1]}]
+    ConfigManager._normalize_and_validate(cfg)
+    assert len(g.rules) == 1                                   # no merge ran
+
+
+def test_pristine_explicit_rules_are_not_topped_up():
+    # rules_seeded False (never seeded) → explicit rules are only cleaned, not merged.
+    cfg = AppConfig()
+    cfg.github.rules = [{"scope": "global", "event_type": "release", "action": "", "color": [9, 9, 9]}]
+    ConfigManager._normalize_and_validate(cfg)
+    assert len(cfg.github.rules) == 1
 
 
 def test_poll_interval_floored():

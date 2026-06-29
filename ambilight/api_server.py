@@ -616,6 +616,24 @@ async def github_repos() -> List[Dict[str, Any]]:
     return await _require_github().list_repos()
 
 
+@app.get("/api/github/workflows", dependencies=[Depends(verify_token)])
+async def github_workflows(repo: str = "") -> List[Dict[str, Any]]:
+    """List a repo's Actions workflow names so the UI can offer them as a picker."""
+    # `repo` defaults to "" (rather than being required) so an omitted param hits
+    # the same custom 400 below as a blank one, instead of FastAPI's 422.
+    repo = str(repo or "").strip()
+    if not repo:
+        raise HTTPException(status_code=400, detail="repo query param is required (owner/name)")
+    return await _require_github().list_workflows(repo)
+
+
+@app.get("/api/github/meta", dependencies=[Depends(verify_token)])
+async def github_meta() -> Dict[str, Any]:
+    """Static rule taxonomy (event types + actions per event) for the rule editor."""
+    from .integrations.github import taxonomy
+    return taxonomy.meta()
+
+
 @app.get("/api/github/events", dependencies=[Depends(verify_token)])
 async def github_events(limit: int = 50) -> List[Dict[str, Any]]:
     if github_integration is None:
@@ -670,6 +688,28 @@ async def github_webhook(request: Request) -> Dict[str, str]:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     await github_integration.ingest_webhook(event_name, payload, delivery_id)
     return {"message": "accepted"}
+
+
+@app.post("/api/github/webhook/enable", dependencies=[Depends(verify_token)])
+async def github_webhook_enable() -> Dict[str, Any]:
+    """Turn on event-driven delivery: open the tunnel + auto-register hooks.
+
+    Returns the GitHub status snapshot (tunnel URL, per-repo hook status). Repos
+    the user can't admin — and the notifications inbox — stay on polling.
+    """
+    gh = _require_github()
+    try:
+        return await gh.enable_webhooks()
+    except RuntimeError as exc:                # httpx missing / not connected
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Enable webhooks failed: {exc}")
+
+
+@app.post("/api/github/webhook/disable", dependencies=[Depends(verify_token)])
+async def github_webhook_disable() -> Dict[str, Any]:
+    """Turn off webhooks: delete our hooks, drop the tunnel, resume full polling."""
+    return await _require_github().disable_webhooks()
 
 
 # ---------------------------------------------------------------------------

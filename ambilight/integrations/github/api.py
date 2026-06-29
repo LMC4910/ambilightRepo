@@ -24,6 +24,19 @@ WEB_BASE = "https://github.com"
 _ACCEPT = "application/vnd.github+json"
 _API_VERSION = "2022-11-28"
 
+# Webhook event names to subscribe a created hook to. These mirror the keys the
+# normalizer understands (see normalize._WEBHOOK_TYPE) so every delivery maps to
+# a known event_type. Note: starring fires the ``watch`` event (there is no
+# ``star`` webhook), and the alert events only deliver where the feature is on.
+DEFAULT_HOOK_EVENTS = [
+    "push", "pull_request", "pull_request_review", "pull_request_review_comment",
+    "issues", "issue_comment", "release", "create", "delete", "fork", "watch",
+    "workflow_run", "check_suite", "check_run", "workflow_job",
+    "deployment", "deployment_status", "discussion", "discussion_comment",
+    "commit_comment", "dependabot_alert", "code_scanning_alert",
+    "secret_scanning_alert",
+]
+
 
 def httpx_available() -> bool:
     """True when the optional ``httpx`` dependency can be imported."""
@@ -91,7 +104,8 @@ class GithubApi:
     async def _request(self, method: str, path: str, *,
                        etag: Optional[str] = None,
                        last_modified: Optional[str] = None,
-                       params: Optional[Dict[str, Any]] = None) -> Response:
+                       params: Optional[Dict[str, Any]] = None,
+                       json_body: Optional[Dict[str, Any]] = None) -> Response:
         client = self._ensure_client()
         url = path if path.startswith("http") else f"{API_BASE}{path}"
         headers = {
@@ -107,7 +121,7 @@ class GithubApi:
         elif last_modified:
             headers["If-Modified-Since"] = last_modified
 
-        resp = await client.request(method, url, headers=headers, params=params)
+        resp = await client.request(method, url, headers=headers, params=params, json=json_body)
         data: Any = None
         if resp.status_code not in (304,) and resp.content:
             try:
@@ -135,6 +149,15 @@ class GithubApi:
             params={"per_page": per_page, "sort": "updated", "affiliation": "owner,collaborator,organization_member"},
         )).data or []
 
+    async def get_repo_workflows(self, repo: str, per_page: int = 100) -> List[Dict[str, Any]]:
+        """List a repo's Actions workflows. ``name`` matches a run's workflow name
+        (see :func:`normalize.normalize_workflow_run`), so the UI can offer it as a
+        picker instead of having the user type it."""
+        data = (await self._request(
+            "GET", f"/repos/{repo}/actions/workflows", params={"per_page": per_page},
+        )).data or {}
+        return data.get("workflows", []) if isinstance(data, dict) else []
+
     # --- pollable feeds (conditional) -----------------------------------
     async def get_notifications(self, etag: Optional[str] = None,
                                 last_modified: Optional[str] = None,
@@ -160,3 +183,93 @@ class GithubApi:
         return await self._request(
             "GET", f"/orgs/{org}/events", etag=etag, params={"per_page": 30},
         )
+
+    # --- repository identity / permissions ------------------------------
+    async def get_repo(self, repo: str) -> Dict[str, Any]:
+        """Fetch a repo object. ``permissions.admin`` tells us whether the token
+        can register a webhook on it (only repo admins can)."""
+        return (await self._request("GET", f"/repos/{repo}")).data or {}
+
+    # --- webhook management (push delivery; needs admin on the repo) ------
+    async def list_repo_hooks(self, repo: str) -> List[Dict[str, Any]]:
+        return (await self._request(
+            "GET", f"/repos/{repo}/hooks", params={"per_page": 100},
+        )).data or []
+
+    async def create_repo_hook(self, repo: str, url: str, secret: str,
+                               events: Optional[List[str]] = None,
+                               active: bool = True) -> Dict[str, Any]:
+        body = {
+            "name": "web",
+            "active": bool(active),
+            "events": list(events or DEFAULT_HOOK_EVENTS),
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        return (await self._request("POST", f"/repos/{repo}/hooks", json_body=body)).data or {}
+
+    async def update_repo_hook(self, repo: str, hook_id: int, url: str, secret: str,
+                               events: Optional[List[str]] = None,
+                               active: bool = True) -> Dict[str, Any]:
+        body = {
+            "active": bool(active),
+            "events": list(events or DEFAULT_HOOK_EVENTS),
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        return (await self._request(
+            "PATCH", f"/repos/{repo}/hooks/{hook_id}", json_body=body,
+        )).data or {}
+
+    async def delete_repo_hook(self, repo: str, hook_id: int) -> None:
+        await self._request("DELETE", f"/repos/{repo}/hooks/{hook_id}")
+
+    # --- org webhook management (needs the admin:org_hook scope) ----------
+    async def list_org_hooks(self, org: str) -> List[Dict[str, Any]]:
+        return (await self._request(
+            "GET", f"/orgs/{org}/hooks", params={"per_page": 100},
+        )).data or []
+
+    async def create_org_hook(self, org: str, url: str, secret: str,
+                              events: Optional[List[str]] = None,
+                              active: bool = True) -> Dict[str, Any]:
+        body = {
+            "name": "web",
+            "active": bool(active),
+            "events": list(events or DEFAULT_HOOK_EVENTS),
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        return (await self._request("POST", f"/orgs/{org}/hooks", json_body=body)).data or {}
+
+    async def update_org_hook(self, org: str, hook_id: int, url: str, secret: str,
+                              events: Optional[List[str]] = None,
+                              active: bool = True) -> Dict[str, Any]:
+        body = {
+            "active": bool(active),
+            "events": list(events or DEFAULT_HOOK_EVENTS),
+            "config": {
+                "url": url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        return (await self._request(
+            "PATCH", f"/orgs/{org}/hooks/{hook_id}", json_body=body,
+        )).data or {}
+
+    async def delete_org_hook(self, org: str, hook_id: int) -> None:
+        await self._request("DELETE", f"/orgs/{org}/hooks/{hook_id}")

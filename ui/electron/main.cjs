@@ -547,11 +547,15 @@ function createWindow() {
   ipcMain.handle('api:github:logout', async () => fetchApi('/api/github/auth/logout', { method: 'POST' }))
   ipcMain.handle('api:github:orgs', async () => fetchApi('/api/github/orgs'))
   ipcMain.handle('api:github:repos', async () => fetchApi('/api/github/repos'))
+  ipcMain.handle('api:github:workflows', async (e, repo) => fetchApi(`/api/github/workflows?repo=${encodeURIComponent(repo || '')}`))
+  ipcMain.handle('api:github:meta', async () => fetchApi('/api/github/meta'))
   ipcMain.handle('api:github:events', async (e, limit) => fetchApi(`/api/github/events?limit=${encodeURIComponent(limit || 50)}`))
   ipcMain.handle('api:github:test', async (e, color) => fetchApi('/api/github/test', {
     method: 'POST',
     body: JSON.stringify({ color: color || null })
   }))
+  ipcMain.handle('api:github:webhookEnable', async () => fetchApi('/api/github/webhook/enable', { method: 'POST' }))
+  ipcMain.handle('api:github:webhookDisable', async () => fetchApi('/api/github/webhook/disable', { method: 'POST' }))
 
   // Open an OS settings deep-link (used to grant notification access) or the
   // GitHub device-authorisation page. Restricted to a small allowlist so a

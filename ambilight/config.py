@@ -211,51 +211,72 @@ class NotificationConfig:
     keyword_rules: list = field(default_factory=list)
 
 
-# Sensible starter colour rules, seeded once so the integration lights up out of
-# the box (workflow → repo → org → global precedence; the user can edit/clear
-# them in the Integrations → GitHub tab). A blank action matches any action.
+# Default colour rules, grouped by the DEFAULT_GITHUB_RULES_VERSION that first
+# shipped them. They are seeded once so the integration lights up out of the box
+# (workflow → repo → org → global precedence; the user can edit/clear them in the
+# Integrations → GitHub tab). A blank action matches any action.
+#
+# On load, an install on an older github.rules_version is topped-up with only the
+# buckets *newer* than its stored version (matched by signature). Because the
+# top-up scans those deltas — not the full current list — a version bump adds only
+# its own new defaults and never resurrects a default the user deleted under an
+# earlier version. To add new defaults: bump DEFAULT_GITHUB_RULES_VERSION and add
+# a new bucket here keyed by that version (don't append to an existing bucket).
+DEFAULT_GITHUB_RULES_BY_VERSION = {
+    1: [
+        # CI / GitHub Actions
+        {"scope": "global", "event_type": "workflow_run", "action": "failure", "color": [220, 38, 38], "blink_count": 4},
+        {"scope": "global", "event_type": "workflow_run", "action": "success", "color": [34, 197, 94]},
+        {"scope": "global", "event_type": "workflow_run", "action": "cancelled", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "workflow_run", "action": "in_progress", "color": [234, 179, 8]},
+        {"scope": "global", "event_type": "workflow_job", "action": "in_progress", "color": [234, 179, 8]},
+        {"scope": "global", "event_type": "workflow_job", "action": "completed", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "check_run", "action": "created", "color": [56, 189, 248]},
+        {"scope": "global", "event_type": "check_run", "action": "completed", "color": [148, 163, 184]},
+        # Pull requests
+        {"scope": "global", "event_type": "pull_request", "action": "opened", "color": [59, 130, 246]},
+        {"scope": "global", "event_type": "pull_request", "action": "merged", "color": [168, 85, 247]},
+        {"scope": "global", "event_type": "pull_request", "action": "closed", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "pull_request", "action": "review_requested", "color": [192, 132, 252]},
+        {"scope": "global", "event_type": "pull_request_review", "action": "", "color": [192, 132, 252]},
+        {"scope": "global", "event_type": "review_comment", "action": "", "color": [129, 140, 248]},
+        # Issues
+        {"scope": "global", "event_type": "issue", "action": "opened", "color": [6, 182, 212]},
+        {"scope": "global", "event_type": "issue", "action": "assigned", "color": [14, 165, 233]},
+        {"scope": "global", "event_type": "issue", "action": "closed", "color": [22, 101, 52]},
+        {"scope": "global", "event_type": "issue_comment", "action": "", "color": [56, 189, 248]},
+        # Mentions / review-requests / assignments (any event type)
+        {"scope": "global", "event_type": "", "action": "mentioned", "color": [249, 115, 22], "blink_count": 3},
+        {"scope": "global", "event_type": "", "action": "review_requested", "color": [192, 132, 252]},
+        {"scope": "global", "event_type": "", "action": "assigned", "color": [14, 165, 233]},
+        # Releases / packages
+        {"scope": "global", "event_type": "release", "action": "", "color": [250, 204, 21]},
+        # Repo activity
+        {"scope": "global", "event_type": "push", "action": "", "color": [100, 116, 139]},
+        {"scope": "global", "event_type": "branch", "action": "created", "color": [52, 211, 153]},
+        {"scope": "global", "event_type": "branch", "action": "deleted", "color": [148, 163, 184]},
+        {"scope": "global", "event_type": "star", "action": "", "color": [250, 204, 21]},
+        {"scope": "global", "event_type": "fork", "action": "", "color": [125, 211, 252]},
+        {"scope": "global", "event_type": "discussion", "action": "", "color": [45, 212, 191]},
+        {"scope": "global", "event_type": "discussion_comment", "action": "", "color": [20, 184, 166]},
+        {"scope": "global", "event_type": "commit_comment", "action": "", "color": [14, 165, 233]},
+        {"scope": "global", "event_type": "deployment", "action": "", "color": [99, 102, 241]},
+        {"scope": "global", "event_type": "deployment_status", "action": "", "color": [79, 70, 229]},
+        {"scope": "global", "event_type": "repository_invitation", "action": "", "color": [251, 191, 36], "blink_count": 3},
+        # Security — urgent flashing red
+        {"scope": "global", "event_type": "security_alert", "action": "", "color": [239, 68, 68], "blink_count": 6, "on_ms": 120, "off_ms": 80},
+    ],
+}
+
+# Highest shipped defaults version (the newest bucket above).
+DEFAULT_GITHUB_RULES_VERSION = max(DEFAULT_GITHUB_RULES_BY_VERSION)
+
+# Flattened seed set, in version order. Single source of truth derived from the
+# per-version buckets; used for first-run seeding and the UI's "Restore defaults".
 DEFAULT_GITHUB_RULES = [
-    # CI / GitHub Actions
-    {"scope": "global", "event_type": "workflow_run", "action": "failure", "color": [220, 38, 38], "blink_count": 4},
-    {"scope": "global", "event_type": "workflow_run", "action": "success", "color": [34, 197, 94]},
-    {"scope": "global", "event_type": "workflow_run", "action": "cancelled", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "workflow_run", "action": "in_progress", "color": [234, 179, 8]},
-    {"scope": "global", "event_type": "workflow_job", "action": "in_progress", "color": [234, 179, 8]},
-    {"scope": "global", "event_type": "workflow_job", "action": "completed", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "check_run", "action": "created", "color": [56, 189, 248]},
-    {"scope": "global", "event_type": "check_run", "action": "completed", "color": [148, 163, 184]},
-    # Pull requests
-    {"scope": "global", "event_type": "pull_request", "action": "opened", "color": [59, 130, 246]},
-    {"scope": "global", "event_type": "pull_request", "action": "merged", "color": [168, 85, 247]},
-    {"scope": "global", "event_type": "pull_request", "action": "closed", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "pull_request", "action": "review_requested", "color": [192, 132, 252]},
-    {"scope": "global", "event_type": "pull_request_review", "action": "", "color": [192, 132, 252]},
-    {"scope": "global", "event_type": "review_comment", "action": "", "color": [129, 140, 248]},
-    # Issues
-    {"scope": "global", "event_type": "issue", "action": "opened", "color": [6, 182, 212]},
-    {"scope": "global", "event_type": "issue", "action": "assigned", "color": [14, 165, 233]},
-    {"scope": "global", "event_type": "issue", "action": "closed", "color": [22, 101, 52]},
-    {"scope": "global", "event_type": "issue_comment", "action": "", "color": [56, 189, 248]},
-    # Mentions / review-requests / assignments (any event type)
-    {"scope": "global", "event_type": "", "action": "mentioned", "color": [249, 115, 22], "blink_count": 3},
-    {"scope": "global", "event_type": "", "action": "review_requested", "color": [192, 132, 252]},
-    {"scope": "global", "event_type": "", "action": "assigned", "color": [14, 165, 233]},
-    # Releases / packages
-    {"scope": "global", "event_type": "release", "action": "", "color": [250, 204, 21]},
-    # Repo activity
-    {"scope": "global", "event_type": "push", "action": "", "color": [100, 116, 139]},
-    {"scope": "global", "event_type": "branch", "action": "created", "color": [52, 211, 153]},
-    {"scope": "global", "event_type": "branch", "action": "deleted", "color": [148, 163, 184]},
-    {"scope": "global", "event_type": "star", "action": "", "color": [250, 204, 21]},
-    {"scope": "global", "event_type": "fork", "action": "", "color": [125, 211, 252]},
-    {"scope": "global", "event_type": "discussion", "action": "", "color": [45, 212, 191]},
-    {"scope": "global", "event_type": "discussion_comment", "action": "", "color": [20, 184, 166]},
-    {"scope": "global", "event_type": "commit_comment", "action": "", "color": [14, 165, 233]},
-    {"scope": "global", "event_type": "deployment", "action": "", "color": [99, 102, 241]},
-    {"scope": "global", "event_type": "deployment_status", "action": "", "color": [79, 70, 229]},
-    {"scope": "global", "event_type": "repository_invitation", "action": "", "color": [251, 191, 36], "blink_count": 3},
-    # Security — urgent flashing red
-    {"scope": "global", "event_type": "security_alert", "action": "", "color": [239, 68, 68], "blink_count": 6, "on_ms": 120, "off_ms": 80},
+    rule
+    for version in sorted(DEFAULT_GITHUB_RULES_BY_VERSION)
+    for rule in DEFAULT_GITHUB_RULES_BY_VERSION[version]
 ]
 
 
@@ -291,9 +312,21 @@ class GithubConfig:
     # Marker that defaults were seeded at least once. Kept for back-compat and
     # diagnostics; defaults still auto-reseed when rules are empty.
     rules_seeded: bool = False
-    # Advanced: inbound webhook receiver (optional, off by default).
+    # Highest DEFAULT_GITHUB_RULES_VERSION whose defaults have been merged into
+    # `rules`. Lets an upgrade top-up newly-added defaults once (see config load).
+    rules_version: int = 0
+    # Advanced: inbound webhook receiver (optional, off by default). When on, the
+    # app opens a tunnel to make its loopback receiver reachable and auto-registers
+    # a hook on each watched repo it admins; polling for those repos is then
+    # skipped (the notifications inbox + non-admin repos keep polling). See
+    # integrations/github/tunnel.py and service.enable_webhooks().
     webhook_enabled: bool = False
     webhook_secret_set: bool = False     # marker only; the secret lives in the keyring
+    webhook_provider: str = "cloudflared"  # tunnel provider (only cloudflared today)
+    # Optional stable "named tunnel" (Cloudflare account + domain) instead of an
+    # ephemeral trycloudflare URL. The tunnel token lives in the keyring.
+    tunnel_named: bool = False
+    tunnel_hostname: str = ""            # e.g. "ambilight.example.com" for a named tunnel
 
 
 @dataclass
@@ -680,13 +713,55 @@ class ConfigManager:
         except (TypeError, ValueError):
             g.off_ms = 120
 
-        # Seed sensible default colour rules so the integration lights up out
-        # of the box and self-heals if a user clears every rule accidentally.
-        if not (g.rules if isinstance(g.rules, list) else []):
+        try:
+            g.rules_version = max(0, int(g.rules_version))
+        except (TypeError, ValueError):
+            g.rules_version = 0
+
+        # Seed/refresh the default colour rules so the integration lights up out
+        # of the box. Three cases:
+        #   * no rules at all → seed the full default set (also self-heals if a
+        #     user clears every rule accidentally);
+        #   * older rules_version → additively merge in the defaults introduced
+        #     *after* that version (per-version deltas, matched by signature)
+        #     without touching their custom rules, so an upgrade tops-up only the
+        #     genuinely-new defaults and never resurrects an older default the
+        #     user deleted;
+        #   * up-to-date → leave rules as-is.
+        # The mapper's precedence (workflow > repo > org > global) means the
+        # merged global defaults never override a user's more-specific rule.
+        existing_rules = g.rules if isinstance(g.rules, list) else []
+
+        def _rule_sig(r):
+            return (
+                str(r.get("scope", "global") or "global").strip().lower(),
+                str(r.get("event_type", "") or "").strip().lower(),
+                str(r.get("action", "") or "").strip().lower(),
+                str(r.get("repo", "") or "").strip().lower(),
+                str(r.get("org", "") or "").strip().lower(),
+                str(r.get("workflow", "") or "").strip().lower(),
+            )
+
+        if not existing_rules:
             g.rules = [dict(r) for r in DEFAULT_GITHUB_RULES]
-            g.rules_seeded = True
-        else:
-            g.rules_seeded = True
+        elif g.rules_seeded and g.rules_version < DEFAULT_GITHUB_RULES_VERSION:
+            # Existing install (already seeded once) on an older defaults version:
+            # top-up only the defaults introduced *after* its stored version,
+            # matched by signature. Iterating the per-version buckets (not the
+            # full current list) means a default the user deleted under an earlier
+            # version is never resurrected by a later bump. Gating on rules_seeded
+            # means a pristine config that set rules explicitly is left untouched.
+            seen = {_rule_sig(r) for r in existing_rules if isinstance(r, dict)}
+            merged = list(existing_rules)
+            for version in range(g.rules_version + 1, DEFAULT_GITHUB_RULES_VERSION + 1):
+                for r in DEFAULT_GITHUB_RULES_BY_VERSION.get(version, []):
+                    sig = _rule_sig(r)
+                    if sig not in seen:
+                        merged.append(dict(r))
+                        seen.add(sig)
+            g.rules = merged
+        g.rules_seeded = True
+        g.rules_version = DEFAULT_GITHUB_RULES_VERSION
 
         raw_gh_rules = g.rules if isinstance(g.rules, list) else []
         if not isinstance(g.rules, list) and g.rules:
@@ -723,6 +798,9 @@ class ConfigManager:
         g.rules = clean_gh_rules
         g.webhook_enabled = bool(g.webhook_enabled)
         g.webhook_secret_set = bool(g.webhook_secret_set)
+        g.webhook_provider = str(g.webhook_provider or "cloudflared").strip().lower() or "cloudflared"
+        g.tunnel_named = bool(g.tunnel_named)
+        g.tunnel_hostname = str(g.tunnel_hostname or "").strip()
 
         # 7. Ownership — mint a stable per-install instance_id (persisted by
         #    load()/update() so it survives restarts), default the label to the

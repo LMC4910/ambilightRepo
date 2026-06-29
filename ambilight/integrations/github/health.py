@@ -35,6 +35,15 @@ class GithubHealth:
     rate_remaining: int = -1
     rate_limit: int = -1
     watched_repos: int = 0
+    # Webhook / tunnel telemetry (event-driven delivery path).
+    tunnel_running: bool = False           # tunnel process up with a public URL
+    webhook_active: bool = False           # tunnel up AND ≥1 hook registered
+    tunnel_public_url: str = ""            # current public URL (empty when off)
+    tunnel_error: str = ""                 # last tunnel failure (binary missing, etc.)
+    # Per-repo/org hook state: full_name -> "registered" | "polling-fallback" |
+    # "needs-admin" | "error". Drives the UI badges.
+    hook_status: Dict[str, str] = field(default_factory=dict)
+    last_delivery_ts: float = 0.0          # last received webhook delivery
     # Errors.
     last_error: str = ""
     error_count: int = 0
@@ -52,6 +61,12 @@ class GithubHealth:
             "rate_remaining": self.rate_remaining,
             "rate_limit": self.rate_limit,
             "watched_repos": self.watched_repos,
+            "tunnel_running": self.tunnel_running,
+            "webhook_active": self.webhook_active,
+            "tunnel_public_url": self.tunnel_public_url,
+            "tunnel_error": self.tunnel_error,
+            "hook_status": dict(self.hook_status),
+            "last_delivery_ts": self.last_delivery_ts,
             "last_error": self.last_error,
             "error_count": self.error_count,
         }

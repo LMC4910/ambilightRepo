@@ -280,6 +280,12 @@ export const useStore = create((set, get) => ({
   githubRepos: async () => {
     try { return await window.api.github.repos(); } catch (e) { return []; }
   },
+  // No catch here: a transient failure must reject so ensureWorkflows() can
+  // retry it later, rather than being cached as an empty workflow list.
+  githubWorkflows: async (repo) => window.api.github.workflows(repo),
+  githubMeta: async () => {
+    try { return await window.api.github.meta(); } catch (e) { return null; }
+  },
   githubEvents: async (limit = 50) => {
     try { return await window.api.github.events(limit); } catch (e) { return []; }
   },
@@ -291,6 +297,30 @@ export const useStore = create((set, get) => ({
     } catch (e) {
       console.error(e);
       return false;
+    }
+  },
+  githubWebhookEnable: async () => {
+    try {
+      const s = await window.api.github.webhookEnable();
+      if (s) set({ githubStatus: s });
+      get().fetchGithubStatus();
+      return s;
+    } catch (e) {
+      const reason = (e?.message || '').replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '');
+      get().toast(reason || 'Could not enable webhooks');
+      return null;
+    }
+  },
+  githubWebhookDisable: async () => {
+    try {
+      const s = await window.api.github.webhookDisable();
+      if (s) set({ githubStatus: s });
+      get().fetchGithubStatus();
+      get().toast('Webhooks disabled; polling resumed');
+      return s;
+    } catch (e) {
+      console.error(e);
+      return null;
     }
   }
 }))

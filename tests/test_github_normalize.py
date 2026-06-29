@@ -69,6 +69,23 @@ def test_workflow_run_action_normalizes_case_and_whitespace():
     assert ev.action == "failure"
 
 
+def test_workflow_run_name_is_stripped():
+    # Padded names must still match a workflow-scoped rule typed without padding.
+    run = {"id": 3, "name": "  Ambilight CI/CD  ", "status": "completed", "conclusion": "failure"}
+    ev = normalize.normalize_workflow_run(run, repository="a/b")
+    assert ev.workflow == "Ambilight CI/CD"
+
+
+def test_webhook_workflow_name_is_stripped():
+    payload = {
+        "_delivery_id": "w1",
+        "repository": {"full_name": "acme/api", "owner": {"login": "acme"}},
+        "workflow_run": {"name": "  Build  ", "status": "completed", "conclusion": "success"},
+    }
+    ev = normalize.normalize_webhook("workflow_run", payload)
+    assert ev.workflow == "Build"
+
+
 def test_event_pull_request_merged():
     ev_raw = {
         "id": "555",

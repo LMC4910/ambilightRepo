@@ -151,3 +151,7 @@ native/build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Bundled cloudflared binary (downloaded at build time for the GitHub-webhook
+# tunnel; not committed — see build.py _find_cloudflared / _fetch_cloudflared).
+/bin/

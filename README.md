@@ -7,7 +7,7 @@
 **Ambilight Desktop** mirrors what's on your display onto LED strips around it in real time, giving you the Philips Ambilight experience on the affordable MagicHome and WLED hardware you can already buy. It installs like a normal app, runs quietly in the background, and just works.
 
 [![Build Status](https://github.com/LMC4910/ambilightRepo/actions/workflows/build.yml/badge.svg)](https://github.com/LMC4910/ambilightRepo/actions)
-[![Version](https://img.shields.io/badge/version-2.0.0-6c5ce7.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.1.0-6c5ce7.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Windows](https://img.shields.io/badge/Windows-Production%20Ready-success)](#platform-support)
@@ -31,6 +31,7 @@
 - 🖥️ **A real desktop app** — native Electron UI with system tray, first-run wizard, and a self-supervising background service that restarts itself if it ever crashes.
 - 🏠 **Smart-home ready** — optional **MQTT bridge + Home Assistant** auto-discovery.
 - 🔔 **Never miss a ping** — **Notification Flash** pulses your lights on OS notifications, even in fullscreen or while locked.
+- 🐙 **Ambient GitHub awareness** — connect your GitHub account and flash on CI runs, pull requests, issues, releases and mentions, with your own colour rules (new in 2.1).
 - 🆕 **Multi-PC aware** — several computers can share the same strips without fighting over them (new in 2.0).
 - 🔒 **Local-first & private** — everything runs on your machine over your LAN. No cloud account, no telemetry.
 
@@ -40,7 +41,7 @@
 
 ### Option A — Install the desktop app *(recommended)*
 
-1. Download the installer for your OS from [**Releases**](https://github.com/LMC4910/ambilightRepo/releases) — on Windows that's `Ambilight Desktop Setup 2.0.0.exe`.
+1. Download the installer for your OS from [**Releases**](https://github.com/LMC4910/ambilightRepo/releases) — on Windows that's `Ambilight Desktop Setup 2.1.0.exe`.
 2. Run it and launch **Ambilight Desktop**.
 3. The app starts its background service and walks you through a **5-step setup wizard**: pick a monitor → discover your controller → test it → choose a profile → optionally start on login.
 
@@ -110,6 +111,7 @@ A three-tier backend chain with automatic failover — **WGC → DXGI → MSS** 
 - **🆕 Cross-instance device ownership.** Share one set of strips across several PCs without flicker: instances cooperatively claim devices, a deterministic rule elects a single owner, and a crashed owner's claim hands off automatically. Coordinates over your MQTT broker if you have one, otherwise a zero-config LAN announce. Transparent for single-PC setups.
 - **🏠 MQTT bridge + Home Assistant.** Publishes live state, accepts commands, and auto-creates a Home Assistant device (light + profile selector + sensors). Off by default; broker credentials live in the OS keyring, never in plaintext.
 - **🔔 Notification Flash.** Pulse the lights when an OS notification arrives — using the originating app's brand colour or a fixed one — with per-app overrides, keyword rules (incl. Phone Link forwarding), dedup, and a rate limit. Works in fullscreen, during Do Not Disturb, and while locked.
+- **🐙 Ambient GitHub awareness.** A dedicated **Integrations** tab connects your GitHub account via the OAuth device flow and flashes the strip on CI runs, pull requests, issues, releases, mentions and security alerts. Colours come from your own rules, matched most-specific-first (workflow → repository → organisation → global). Polls by default; for repos you administer you can enable **instant webhook delivery** (a local cloudflared tunnel auto-registers hooks and those repos stop being polled). Off by default and a no-op until connected.
 
 ### 🛡️ Runs like real software
 
@@ -288,7 +290,7 @@ GET  /api/logs?level=INFO         → recent log lines
 A single installer bundles the Electron app **and** the Python service (compiled to a self-contained binary via PyInstaller) — no system Python needed after install.
 
 ```bash
-build-installer            # Windows  → ui\release\Ambilight Desktop Setup 2.0.0.exe (+ latest.yml)
+build-installer            # Windows  → ui\release\Ambilight Desktop Setup 2.1.0.exe (+ latest.yml)
 ./build-installer.sh       # macOS/Linux → ui/release/ (DMG, or AppImage + deb)
 python build.py            # cross-platform equivalent the wrappers call
 ```
@@ -305,6 +307,10 @@ CI mirrors `python build.py`: [`build.yml`](.github/workflows/build.yml) builds 
 ---
 
 ## 🗺️ Roadmap
+
+**Shipped in 2.1**
+- ✅ Integrations hub with Ambient GitHub awareness (OAuth device flow, user-defined colour rules)
+- ✅ Instant webhook delivery for admin repos (cloudflared tunnel + auto-registered hooks)
 
 **Shipped in 2.0**
 - ✅ Ground-up desktop redesign (frameless shell, sidebar router, 5-step wizard, dedicated Zones page)
