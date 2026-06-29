@@ -624,15 +624,20 @@ class GithubIntegration:
             return self._cached(cache_key)
         try:
             workflows = await self._api.get_repo_workflows(repo)
-            slim = [
-                {
-                    "name": w.get("name", ""),
+            # Trim names to match normalize.* (which strips workflow names on
+            # incoming events); otherwise a padded picker value like "  Build  "
+            # would never match the "Build" carried by events. Drop entries that
+            # are empty/whitespace-only after trimming.
+            slim = []
+            for w in workflows:
+                name = str(w.get("name", "") or "").strip()
+                if not name:
+                    continue
+                slim.append({
+                    "name": name,
                     "path": w.get("path", ""),
                     "state": w.get("state", ""),
-                }
-                for w in workflows
-                if w.get("name")
-            ]
+                })
             self._ensure_store().set_cache(cache_key, slim)
             return slim
         except Exception as exc:

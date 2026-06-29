@@ -181,3 +181,21 @@ def test_list_workflows_slims_and_falls_back_to_cache(tmp_path):
 
     gi._api = BoomApi()
     assert asyncio.run(gi.list_workflows("acme/api")) == out   # served from cache
+
+
+def test_list_workflows_trims_names_and_drops_whitespace(tmp_path):
+    # The picker must store the same trimmed name that normalize.* produces for
+    # incoming events, or workflow-scoped rules picked here would never match.
+    cfg = _cfg()
+    gi = _integration(cfg, tmp_path / "g.db")
+
+    class PaddedApi:
+        async def get_repo_workflows(self, repo, per_page=100):
+            return [
+                {"id": 1, "name": "  Build  ", "path": ".github/workflows/build.yml", "state": "active"},
+                {"id": 2, "name": "   ", "path": "skip", "state": "active"},   # whitespace-only → dropped
+            ]
+
+    gi._api = PaddedApi()
+    out = asyncio.run(gi.list_workflows("acme/api"))
+    assert out == [{"name": "Build", "path": ".github/workflows/build.yml", "state": "active"}]
