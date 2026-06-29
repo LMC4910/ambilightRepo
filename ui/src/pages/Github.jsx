@@ -270,6 +270,9 @@ function HookBadge({ name, state }) {
 function WebhookPanel({ status, connected, watchedRepos, watchedOrgs }) {
   const { githubWebhookEnable, githubWebhookDisable } = useStore()
   const [busy, setBusy] = useState(false)
+  // `running` = tunnel up (so we show its URL + hook badges even if no repo is
+  // covered yet, e.g. all need admin); `active` = at least one hook registered.
+  const running = !!status?.tunnel_running
   const active = !!status?.webhook_active
   const url = status?.tunnel_public_url || ''
   const err = status?.tunnel_error || ''
@@ -294,13 +297,14 @@ function WebhookPanel({ status, connected, watchedRepos, watchedOrgs }) {
           <div>
             <div style={{ fontSize: 15, fontWeight: 600 }}>Instant delivery (webhooks)<span className="subtle" style={{ fontSize: 11, fontWeight: 500, marginLeft: 8 }}>beta</span></div>
             <div className="subtle" style={{ fontSize: 12.5 }}>
-              {busy ? (active ? 'Disabling…' : 'Opening tunnel & registering hooks…')
+              {busy ? (running ? 'Disabling…' : 'Opening tunnel & registering hooks…')
                 : active ? 'GitHub pushes events instantly — covered repos stop being polled.'
+                : running ? 'Tunnel is up, but no watched repo could be hooked yet (admin needed) — still polling.'
                 : 'Replace polling with push for repos you admin. Opens a local cloudflared tunnel.'}
             </div>
           </div>
         </div>
-        <Toggle checked={active || (busy && !active)} disabled={busy} onChange={(v) => toggle(v)} />
+        <Toggle checked={running || (busy && !running)} disabled={busy} onChange={(v) => toggle(v)} />
       </div>
 
       {err && (
@@ -312,7 +316,7 @@ function WebhookPanel({ status, connected, watchedRepos, watchedOrgs }) {
         </div>
       )}
 
-      {active && url && (
+      {running && url && (
         <div className="card card-pad" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Icon n="link" />
           <span className="subtle" style={{ fontSize: 12 }}>Public endpoint</span>
@@ -321,7 +325,7 @@ function WebhookPanel({ status, connected, watchedRepos, watchedOrgs }) {
         </div>
       )}
 
-      {active && (watchedRepos.length > 0 || watchedOrgs.length > 0) && (
+      {running && (watchedRepos.length > 0 || watchedOrgs.length > 0) && (
         <div className="tile-grid">
           {watchedRepos.map((r) => <HookBadge key={r} name={r} state={hookStatus[r]} />)}
           {watchedOrgs.map((o) => <HookBadge key={`org:${o}`} name={o} state={hookStatus[`org:${o}`]} />)}
@@ -588,8 +592,11 @@ export default function Github({ onBack }) {
 
             {/* webhooks (event-driven delivery) */}
             <Section title="Delivery" />
+            {/* Hooks/polling act on the *saved* config, so the panel reflects the
+                persisted watches — not the unsaved draft (which may differ). */}
             <WebhookPanel status={githubStatus} connected={connected}
-              watchedRepos={g.watched_repos} watchedOrgs={g.watched_orgs} />
+              watchedRepos={settings?.github?.watched_repos || []}
+              watchedOrgs={settings?.github?.watched_orgs || []} />
 
             {/* appearance */}
             <Section title="Default light" />
