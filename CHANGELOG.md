@@ -5,6 +5,39 @@ All notable changes to **Ambilight Desktop** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-06-29
+
+Minor release introducing an **Integrations hub** with the first live integration —
+**Ambient GitHub Awareness** — that turns activity from your repositories into
+ambient light. Everything else is unchanged and upgrades in place.
+
+### Added
+- **Integrations hub.** A new **Integrations** tab gathers third-party services
+  in one place (GitHub live today; Gmail, Outlook and Discord shown as roadmap
+  placeholders), each with an at-a-glance connection status.
+- **Ambient GitHub awareness.** Connect a GitHub account via the **OAuth device
+  flow** (no password leaves the machine) and flash the strip on CI runs, pull
+  requests, issues, releases, mentions and security alerts. Activity is colour-mapped
+  by **user-configured rules** matched most-specific-first
+  (workflow → repository → organisation → global), with a default colour, blink
+  count and timing, plus a notifications inbox, watched-repo/org pickers, and a
+  live recent-events feed. Off by default and a no-op until connected; the
+  optional `httpx` dependency gates the feature.
+- **Instant delivery via webhooks (beta).** Optionally replace polling with push
+  for repositories you administer: enabling opens a local **cloudflared** tunnel,
+  auto-registers a webhook on each admin repo, and stops polling those sources.
+  Repositories you don't administer and the notifications inbox keep polling.
+
+### Fixed
+- **GitHub mark renders correctly.** The bundled icon set no longer ships a
+  `github` glyph, so the integration showed a generic placeholder; the official
+  GitHub mark is now drawn inline everywhere the icon is used.
+- **Connection status no longer overflows its card.** On the Integrations hub the
+  `Connected · <account>` pill now wraps and truncates within the GitHub card
+  instead of spilling past its edge for longer account names.
+
+[2.1.0]: https://github.com/LMC4910/ambilightRepo/releases/tag/v2.1.0
+
 ## [2.0.0] - 2026-06-26
 
 Major release. A **ground-up redesign** of the desktop app on a new "Ambi Light"
