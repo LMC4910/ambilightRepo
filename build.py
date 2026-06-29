@@ -38,6 +38,10 @@ SERVICE_NAME = "ambilight-service"
 CAPTURE_HOST_EXE = "capture_host.exe"
 GRAPHICS_HOOK_DLL = "graphics_hook.dll"
 SYSTEM = platform.system()  # Windows | Darwin | Linux
+# cloudflared powers the optional GitHub-webhook tunnel (loopback → public URL).
+# Bundled when found so webhooks work out of the box; missing it just leaves the
+# integration on polling (or a PATH-installed cloudflared) — see tunnel.py.
+CLOUDFLARED_NAME = "cloudflared.exe" if SYSTEM == "Windows" else "cloudflared"
 
 
 def _which(name: str) -> str:
@@ -133,6 +137,63 @@ def _find_native_artifact(filename: str) -> Path | None:
         p = NATIVE_BUILD / rel
         if p.is_file():
             return p
+    return None
+
+
+def _cloudflared_download_url() -> str | None:
+    """Official cloudflared release URL for the host platform, or None.
+
+    macOS ships a ``.tgz`` (not a bare binary), so auto-fetch there is skipped —
+    place the binary in ``bin/`` or set ``AMBILIGHT_CLOUDFLARED`` instead.
+    """
+    base = "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+    machine = platform.machine().lower()
+    arch = "amd64" if machine in ("amd64", "x86_64") else ("arm64" if machine in ("arm64", "aarch64") else None)
+    if arch is None:
+        return None
+    if SYSTEM == "Windows":
+        return f"{base}cloudflared-windows-{arch}.exe"
+    if SYSTEM == "Linux":
+        return f"{base}cloudflared-linux-{arch}"
+    return None
+
+
+def _fetch_cloudflared() -> Path | None:
+    """Opt-in download of cloudflared into ``bin/`` (gated by env). Best-effort."""
+    url = _cloudflared_download_url()
+    if not url:
+        print(f"[WARN] No cloudflared auto-download for this platform; place it at "
+              f"bin/{CLOUDFLARED_NAME} or set AMBILIGHT_CLOUDFLARED.")
+        return None
+    dest_dir = ROOT / "bin"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / CLOUDFLARED_NAME
+    print(f"[cloudflared] Downloading {url} …")
+    import urllib.request
+    try:
+        urllib.request.urlretrieve(url, dest)
+        if SYSTEM != "Windows":
+            dest.chmod(0o755)
+        return dest
+    except Exception as exc:  # network/CI-specific
+        print(f"[WARN] cloudflared download failed: {exc}")
+        return None
+
+
+def _find_cloudflared() -> Path | None:
+    """Locate a cloudflared binary to bundle: env override, repo ``bin/``, PATH,
+    then an opt-in download (``AMBILIGHT_FETCH_CLOUDFLARED=1``). None if absent."""
+    env = os.environ.get("AMBILIGHT_CLOUDFLARED", "").strip()
+    if env and Path(env).is_file():
+        return Path(env)
+    local = ROOT / "bin" / CLOUDFLARED_NAME
+    if local.is_file():
+        return local
+    found = shutil.which("cloudflared")
+    if found:
+        return Path(found)
+    if os.environ.get("AMBILIGHT_FETCH_CLOUDFLARED", "").strip().lower() in ("1", "true", "yes"):
+        return _fetch_cloudflared()
     return None
 
 
@@ -346,6 +407,19 @@ def build_service(gpu: bool = False) -> None:
             print("[WARN] capture_host.exe not built; the 'hook' capture backend "
                   "will be unavailable in this bundle (run build_native first).")
 
+    # Bundle cloudflared (under bin/) so the optional GitHub-webhook tunnel works
+    # out of the box. Non-essential: a missing binary just leaves webhooks on
+    # polling (or a PATH-installed cloudflared at runtime), so warn rather than fail.
+    cloudflared_args: list[str] = []
+    cf = _find_cloudflared()
+    if cf is not None:
+        cloudflared_args += ["--add-binary", f"{cf}{sep}bin"]
+        print(f"[OK] Bundling cloudflared (GitHub webhook tunnel): {cf}")
+    else:
+        print("[INFO] cloudflared not found; GitHub webhooks will rely on a "
+              "PATH-installed cloudflared or fall back to polling. Set "
+              "AMBILIGHT_CLOUDFLARED=<path> or AMBILIGHT_FETCH_CLOUDFLARED=1 to bundle it.")
+
     # Bake the GitHub OAuth App client id into the bundle when provided via the
     # build environment (CI injects it from a repo secret/variable at release
     # time). A device-flow client id is NOT a secret — it ships in the app — so
@@ -382,6 +456,7 @@ def build_service(gpu: bool = False) -> None:
         "--add-data", f"{ROOT / 'configuration.yaml'}{sep}.",
         "--add-data", f"{ROOT / 'profiles'}{sep}profiles",
         *add_binary_args,
+        *cloudflared_args,
         *client_id_args,
         # Collect the whole package so conditionally/dynamically imported
         # submodules (capture backends, api_server referenced via uvicorn) ship.
