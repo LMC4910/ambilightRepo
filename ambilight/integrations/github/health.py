@@ -36,6 +36,7 @@ class GithubHealth:
     rate_limit: int = -1
     watched_repos: int = 0
     # Webhook / tunnel telemetry (event-driven delivery path).
+    tunnel_running: bool = False           # tunnel process up with a public URL
     webhook_active: bool = False           # tunnel up AND ≥1 hook registered
     tunnel_public_url: str = ""            # current public URL (empty when off)
     tunnel_error: str = ""                 # last tunnel failure (binary missing, etc.)
@@ -60,6 +61,7 @@ class GithubHealth:
             "rate_remaining": self.rate_remaining,
             "rate_limit": self.rate_limit,
             "watched_repos": self.watched_repos,
+            "tunnel_running": self.tunnel_running,
             "webhook_active": self.webhook_active,
             "tunnel_public_url": self.tunnel_public_url,
             "tunnel_error": self.tunnel_error,

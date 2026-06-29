@@ -47,8 +47,20 @@ from .tunnel import CloudflaredTunnel
 # hooks we created, so we can update them in place (idempotent) and delete them
 # on disable instead of leaking duplicates.
 _HOOKS_CACHE_KEY = "webhook_hooks"
-# The receiver path the tunnel fronts; also the marker we match existing hooks by.
+# The receiver path the tunnel fronts.
 _WEBHOOK_PATH = "/api/github/webhook"
+# A unique ownership marker appended as a query param to our callback URL. We
+# match existing hooks by this tag (not the generic receiver path), so we never
+# adopt — and so on disable never delete — a webhook some *other* tool registered
+# at the same /api/github/webhook path. Query params are ignored by the receiver's
+# routing and excluded from the HMAC (which signs the body), so the tag is purely
+# an identity marker and does not affect delivery or verification.
+_WEBHOOK_OWNER_TAG = "ambilight-leds"
+
+
+def _build_delivery_url(public_url: str) -> str:
+    """Our callback URL: the receiver path plus the ownership marker query param."""
+    return f"{public_url}{_WEBHOOK_PATH}?app={_WEBHOOK_OWNER_TAG}"
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +120,9 @@ class GithubIntegration:
         self._tunnel: Optional[CloudflaredTunnel] = None
         self._covered_repos: set[str] = set()   # repos served by a live webhook
         self._covered_orgs: set[str] = set()     # orgs served by a live webhook
+        # Serialises hook (re)registration so the initial activation and a
+        # tunnel-URL-change reconcile can't run _register_all_hooks concurrently.
+        self._hook_lock = asyncio.Lock()
         self.account = ""
         self._apply_config(cfg)
 
@@ -330,7 +345,8 @@ class GithubIntegration:
             return self.status()
         secret = self._ensure_webhook_secret()
 
-        # 1. Bring up the public tunnel.
+        # 1. Bring up the public tunnel. The on_url_change callback re-points our
+        # hooks if a quick tunnel restarts with a new hostname (see below).
         if self._tunnel is None:
             token = secrets_store.get_secret("github_tunnel_token") if getattr(self._gh, "tunnel_named", False) else ""
             self._tunnel = CloudflaredTunnel(
@@ -338,9 +354,11 @@ class GithubIntegration:
                 named=bool(getattr(self._gh, "tunnel_named", False)),
                 hostname=str(getattr(self._gh, "tunnel_hostname", "") or ""),
                 token=token,
+                on_url_change=self._on_tunnel_url_changed,
             )
         public_url = await self._tunnel.start()
         self._health.tunnel_public_url = public_url or ""
+        self._health.tunnel_running = bool(public_url)
         if not public_url:
             # No tunnel → no webhooks. Stay on full polling, surface the reason.
             self._health.tunnel_error = self._tunnel.error
@@ -352,14 +370,39 @@ class GithubIntegration:
         self._health.tunnel_error = ""
 
         # 2. Register/update a hook per watched repo we administer.
-        delivery_url = f"{public_url}{_WEBHOOK_PATH}"
-        await self._register_all_hooks(delivery_url, secret)
+        delivery_url = _build_delivery_url(public_url)
+        async with self._hook_lock:
+            await self._register_all_hooks(delivery_url, secret)
 
         self._health.webhook_active = bool(self._covered_repos or self._covered_orgs)
         self._configure_poller()
         logger.info("[GitHub] Webhooks active via %s (covered: %d repos, %d orgs).",
                     public_url, len(self._covered_repos), len(self._covered_orgs))
         return self.status()
+
+    async def _on_tunnel_url_changed(self, new_url: str) -> None:
+        """Re-point hooks after the tunnel comes back up on a new public URL.
+
+        Quick-tunnel hostnames change across cloudflared restarts; without this,
+        GitHub would keep POSTing to the dead URL. Fires only on a *changed* URL
+        (not the first one — that path is handled by _activate_webhooks).
+        """
+        if not new_url or self._tunnel is None or self._api is None:
+            return
+        try:
+            secret = self._ensure_webhook_secret()
+            self._health.tunnel_public_url = new_url
+            self._health.tunnel_running = True
+            self._health.tunnel_error = ""
+            delivery_url = _build_delivery_url(new_url)
+            async with self._hook_lock:
+                await self._register_all_hooks(delivery_url, secret)
+            self._health.webhook_active = bool(self._covered_repos or self._covered_orgs)
+            self._configure_poller()
+            logger.info("[GitHub] Tunnel URL changed to %s; hooks re-registered.", new_url)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._health.record_error(f"hook re-register after tunnel change: {exc}")
+            logger.warning("[GitHub] Could not re-register hooks after tunnel change: %s", exc)
 
     async def _register_all_hooks(self, delivery_url: str, secret: str) -> None:
         store = self._ensure_store()
@@ -430,17 +473,20 @@ class GithubIntegration:
 
     @staticmethod
     def _find_our_hook(existing: List[Dict[str, Any]], known_id: Optional[int]) -> Optional[int]:
-        """Match a previously-created hook by id, else by our receiver path suffix.
+        """Match a previously-created hook by id, else by our ownership marker.
 
         Quick-tunnel hostnames change each launch, so we can't match on the full
-        URL — we match the stable ``/api/github/webhook`` path instead.
+        URL. We match on the ``app=<owner-tag>`` query marker we always append —
+        never the bare ``/api/github/webhook`` path, which another tool could also
+        use — so we never adopt or delete a webhook we didn't create.
         """
         ids = {int(h.get("id")) for h in existing if h.get("id") is not None}
         if known_id is not None and int(known_id) in ids:
             return int(known_id)
+        marker = f"app={_WEBHOOK_OWNER_TAG}"
         for h in existing:
             url = str((h.get("config") or {}).get("url", "") or "")
-            if url.endswith(_WEBHOOK_PATH):
+            if marker in url:
                 return int(h.get("id"))
         return None
 
@@ -450,6 +496,9 @@ class GithubIntegration:
             return
         store = self._ensure_store()
         hooks_map: Dict[str, int] = dict(store.get_cache(_HOOKS_CACHE_KEY) or {})
+        # Keep any entry whose delete failed so a transient API error doesn't leak
+        # the remote hook *and* discard the only id we had to retry cleanup with.
+        remaining: Dict[str, int] = {}
         for key, hook_id in list(hooks_map.items()):
             try:
                 if key.startswith("org:"):
@@ -458,7 +507,8 @@ class GithubIntegration:
                     await self._api.delete_repo_hook(key, int(hook_id))
             except Exception as exc:  # pragma: no cover - best-effort cleanup
                 logger.debug("[GitHub] could not delete hook %s/%s: %s", key, hook_id, exc)
-        store.set_cache(_HOOKS_CACHE_KEY, {})
+                remaining[key] = hook_id
+        store.set_cache(_HOOKS_CACHE_KEY, remaining)
 
     async def _teardown_webhooks_runtime(self) -> None:
         """Stop the tunnel and clear runtime webhook state (no config change)."""
@@ -467,6 +517,7 @@ class GithubIntegration:
             self._tunnel = None
         self._covered_repos.clear()
         self._covered_orgs.clear()
+        self._health.tunnel_running = False
         self._health.webhook_active = False
         self._health.tunnel_public_url = ""
         self._health.tunnel_error = ""
