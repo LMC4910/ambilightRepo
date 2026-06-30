@@ -9,6 +9,7 @@
 [![Build Status](https://github.com/LMC4910/ambilightRepo/actions/workflows/build.yml/badge.svg)](https://github.com/LMC4910/ambilightRepo/actions)
 [![Version](https://img.shields.io/badge/version-2.1.0-6c5ce7.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Integrated with GitHub](https://img.shields.io/badge/Integrated%20with-GitHub-181717?logo=github&logoColor=white)](#ambient-github-awareness)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![Windows](https://img.shields.io/badge/Windows-Production%20Ready-success)](#platform-support)
 [![macOS · Linux](https://img.shields.io/badge/macOS%20·%20Linux-Experimental-orange)](#platform-support)
@@ -111,7 +112,7 @@ A three-tier backend chain with automatic failover — **WGC → DXGI → MSS** 
 - **🆕 Cross-instance device ownership.** Share one set of strips across several PCs without flicker: instances cooperatively claim devices, a deterministic rule elects a single owner, and a crashed owner's claim hands off automatically. Coordinates over your MQTT broker if you have one, otherwise a zero-config LAN announce. Transparent for single-PC setups.
 - **🏠 MQTT bridge + Home Assistant.** Publishes live state, accepts commands, and auto-creates a Home Assistant device (light + profile selector + sensors). Off by default; broker credentials live in the OS keyring, never in plaintext.
 - **🔔 Notification Flash.** Pulse the lights when an OS notification arrives — using the originating app's brand colour or a fixed one — with per-app overrides, keyword rules (incl. Phone Link forwarding), dedup, and a rate limit. Works in fullscreen, during Do Not Disturb, and while locked.
-- **🐙 Ambient GitHub awareness.** A dedicated **Integrations** tab connects your GitHub account via the OAuth device flow and flashes the strip on CI runs, pull requests, issues, releases, mentions and security alerts. Colours come from your own rules, matched most-specific-first (workflow → repository → organisation → global). Polls by default; for repos you administer you can enable **instant webhook delivery** (a local cloudflared tunnel auto-registers hooks and those repos stop being polled). Off by default and a no-op until connected.
+- <a id="ambient-github-awareness"></a>**🐙 Ambient GitHub awareness.** A dedicated **Integrations** tab connects your GitHub account via the OAuth device flow and flashes the strip on CI runs, pull requests, issues, releases, mentions and security alerts. Colours come from your own rules, matched most-specific-first (workflow → repository → organisation → global). Polls by default; for repos you administer you can enable **instant webhook delivery** (a local cloudflared tunnel auto-registers hooks and those repos stop being polled). Off by default and a no-op until connected.
 
 ### 🛡️ Runs like real software
 
